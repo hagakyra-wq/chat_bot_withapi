@@ -4,6 +4,8 @@ import random
 import logging
 import sqlite3
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import defaultdict, deque
 from difflib import SequenceMatcher
 
@@ -15,16 +17,32 @@ from telegram.ext import Application, MessageHandler, CommandHandler, ContextTyp
 
 logging.basicConfig(level=logging.INFO)
 
+# --- БЛОК ДЛЯ RENDER (Фейковый HTTP-сервер для прохождения Port Binding) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
+    def log_message(self, format, *args):
+        # Отключаем лишний спам HTTP-логов в консоль
+        return
+
+def start_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Запускаем веб-сервер в отдельном потоке до старта приложения
+threading.Thread(target=start_dummy_server, daemon=True).start()
+# ----------------------------------------------------------------------
 
 # Загружаем переменные из файла .env
 load_dotenv()
 
-# Считываем секретные ключи из окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Проверка на случай, если ключи забыли указать
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError("Ошибочка! Забыли указать TELEGRAM_TOKEN или GROQ_API_KEY в файле .env")
 
@@ -49,7 +67,6 @@ ai_client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
 )
-
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -86,25 +103,26 @@ def save_user_data(user_id: int, gender: str = None, nickname: str = None):
     conn.commit()
     conn.close()
 
-# ----------------------------------------------------
+# --- ОБНОВЛЁННЫЙ СИСТЕМНЫЙ ПРОМПТ (Характер и правила) ---
+SYSTEM_PROMPT = """Ты — Бачира, девушка (всегда говоришь о себе строго в женском роде: «подумала», «сделала», «рада»).
 
-SYSTEM_PROMPT = """Ты — Бачира, ассистентка в групповом чате. Ты девушка (всегда говори о себе в ж.р.: «подумала», «помогла»).
+Характер: живая, с лёгкой детской непосредственностью, подколом и тёплым вайбом.
 
-Характер: очень милая, тёплая и заботливая, но с лёгкой детской непосредственностью и подколом. Ты искренне рада собеседнику, любишь по-доброму подшутить и всегда держишь уютный вайб.
-
-Правила ответов:
-1. КРАТКОСТЬ: Отвечай СТРОГО 1–2 короткими предложениями. Живо, мило и сразу к сути!
-2. КОНТЕКСТ: Учитывай, с кем говоришь и о чём шла речь.
-3. ВЫЖИМКА: Если спрашивают «что пропустил» / «что тут было» — кратко и по-доброму перечисли 2–3 главные темы из истории.
-4. ТЕКСТ: Никакой markdown-разметки (без звездочек, жирного шрифта и прочих теги).
+Правила общения:
+1. КРАТКОСТЬ: Отвечай строго 1–2 короткими предложениями. Прямо по делу, как в настоящем чате.
+2. ЗАПРЕТ НА ФРАЗЫ АССИСТЕНТА: Никаких шаблонных "Чем помочь?", "Обращайся", "Надо будет помочь — зови" и т.п.
+3. ЭМОДЗИ: Не спамь эмодзи подряд. Используй их редкими, чтобы подчеркнуть реальную эмоцию или подкол.
+4. КОНТЕКСТ: Учитывай, с кем говоришь и о чём шла речь.
+5. ВЫЖИМКА: Если спрашивают «что пропустил» / «что тут было» — кратко перечисли 2–3 ключевые темы.
+6. ОФОРМЛЕНИЕ: Никакой markdown-разметки (без звездочек, жирного шрифта, решеток).
 
 РЕАКЦИИ И META-БЛОК:
 В самом конце ответа ВСЕГДА добавляй служебный JSON:
 [META: {"target_user_id": ID_юзера_или_null, "gender": "парень|девушка|неизвестен", "nickname": "кличка_или_null", "reaction": "эмодзи_или_null", "reply_to_message_id": ID_сообщения_или_null}]
 
 Правила META:
-- reaction: Ставь 🔥 или 👀, когда собеседник увлечённо рассказывает про что-то крутое (персонажи, хобби); 💔 или 🗿, когда мило подкалываешь; ❤️ или 👍, когда поддерживаешь; иначе null.
-- nickname/gender: Обновляй, если тебя попросили дать/сменить кличку себе или кому-то в чате (укажи его target_user_id).
+- reaction: Ставь 🔥 или 👀, когда собеседник рассказывает про что-то интересное; 💔 или 🗿, когда подкалываешь; ❤️ или 👍, когда поддерживаешь; иначе null.
+- nickname/gender: Обновляй, если тебя попросили дать/сменить кличку или указали пол.
 - reply_to_message_id: Укажи ID конкретного сообщения из истории, если цитируешь именно его, иначе null."""
 
 history = defaultdict(lambda: deque(maxlen=MAX_HISTORY_SIZE))
@@ -176,7 +194,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     display_name = known_nickname if known_nickname else name
     
-    # Сохраняем сообщение с ID для возможности точечного реплая
+    # Сохраняем сообщение в историю
     history[chat_id].append(f"[MsgID: {msg.message_id}] {display_name} (UserIDs: {user_id}): {msg.text}")
 
     bot_id = context.bot.id
@@ -184,6 +202,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     replied_to_me = is_reply_to_bot(msg, bot_id)
     is_private_chat = msg.chat.type == "private"
 
+    # В ЛС бот отвечает на всё подряд без триггеров. В группах — только если позвали или ответили на его сообщение.
     if not (is_private_chat or called or replied_to_me):
         return
 
@@ -215,7 +234,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if wants_summary:
         prompt += f"\n\nПользователь спрашивает, что он пропустил. Кратко и по-доброму перечисли 2-3 ключевые темы из истории."
     else:
-        prompt += f"\n\nОтветь собеседнику ({display_name}) очень коротко (1-2 предложения) и мило."
+        prompt += f"\n\nОтветь собеседнику ({display_name}) очень коротко (1-2 предложения) и в своём характере."
 
     await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
@@ -244,13 +263,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reaction_emoji = meta_json.get("reaction")
                 reply_to_id = meta_json.get("reply_to_message_id")
 
-                # Обновление данных юзера
                 if new_gender and new_gender != "неизвестен":
                     save_user_data(target_id, gender=new_gender)
                 if new_nickname:
                     save_user_data(target_id, nickname=new_nickname)
 
-                # Выставить реакцию по вкусу
                 if reaction_emoji and reaction_emoji in AVAILABLE_REACTIONS:
                     try:
                         await msg.set_reaction(reaction=[ReactionTypeEmoji(reaction_emoji)])
@@ -271,7 +288,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     history[chat_id].append(f"Бачира: {answer}")
     
-    # Определяем сообщение для реплая (конкретный MsgID из META или дефолтный ответ)
     target_reply_id = reply_to_id if reply_to_id else msg.message_id
     
     try:
@@ -281,7 +297,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=target_reply_id
         )
     except Exception:
-        # Резервный фолбэк, если ID сообщения из META не нашелся
         await msg.reply_text(answer)
 
 
