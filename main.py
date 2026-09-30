@@ -1,9 +1,10 @@
+import os
 import re
 import json
 import random
 import logging
 import sqlite3
-import os
+import random
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from difflib import SequenceMatcher
@@ -224,6 +225,21 @@ def is_called(text: str) -> bool:
                 return True
     return False
 
+
+def should_react(text: str, is_interesting: bool) -> bool:
+    text_lower = text.lower()
+    
+    # 1. Упоминание Бачиры (50% шанс)
+    if "бачира" in text_lower:
+        return random.random() < 0.50
+    
+    # 2. Интересное сообщение (30% шанс)
+    elif is_interesting:
+        return random.random() < 0.30
+    
+    # 3. Обычное сообщение (10% шанс)
+    else:
+        return random.random() < 0.10
 def is_summary_request(text: str) -> bool:
     text_lower = text.lower()
     return any(phrase in text_lower for phrase in SUMMARY_TRIGGERS)
