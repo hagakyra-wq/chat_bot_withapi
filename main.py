@@ -182,8 +182,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_id = context.bot.id
     called = is_called(msg.text)
     replied_to_me = is_reply_to_bot(msg, bot_id)
+    is_private_chat = msg.chat.type == "private"
 
-    if not (called or replied_to_me):
+    if not (is_private_chat or called or replied_to_me):
         return
 
     wants_summary = is_summary_request(msg.text)
