@@ -19,6 +19,12 @@
 - Start Command: `python main.py` (команда Procfile: `web: python main.py`)
 - Корневой `.python-version` закрепляет Python `3.11.11` для Render.
 
+Если в настройках Environment сервиса задан `PYTHON_VERSION`, он может
+переопределять версию из `.python-version`; укажите там `3.11.11` или удалите
+это переопределение, затем запустите новый Deploy. Приложение также явно
+создаёт asyncio event loop перед запуском polling для совместимости с
+средами Python, в которых loop больше не создаётся автоматически.
+
 В Environment добавьте `TELEGRAM_TOKEN`, `GROQ_API_KEY`, `ADMIN_ID` и
 `BACKUP_CHANNEL_ID`. Render задаёт `PORT` для Web Service автоматически;
 локально бот использует `8080`, если `PORT` не задан.
