@@ -104,6 +104,7 @@ class ImageGenerationManager:
     def __init__(self) -> None:
         self.pending: dict[str, PendingImage] = {}
         self.jobs: dict[tuple[int, int], ImageJob] = {}
+        self._generation_lock = asyncio.Lock()
         self._fast_lock = asyncio.Lock()
         self._last_fast_start: float | None = None
 
@@ -266,11 +267,25 @@ class ImageGenerationManager:
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         try:
-            if job.mode == "fast":
-                image, mime_type, model_name = await self._generate_pollinations(job)
-            else:
-                image, mime_type, model_name = await self._generate_horde(job)
-            await self._publish_and_deliver(job, context, image, mime_type, model_name)
+            if self._generation_lock.locked():
+                await self._edit_status(
+                    job,
+                    "Ожидаю, пока Юбара закончит генерацию для другого пользователя.",
+                )
+            async with self._generation_lock:
+                await self._edit_status(
+                    job,
+                    self._status_text(
+                        "Pollinations" if job.mode == "fast" else "AI Horde",
+                        job.started_at,
+                        "создаю изображение" if job.mode == "fast" else "обрабатываю запрос",
+                    ),
+                )
+                if job.mode == "fast":
+                    image, mime_type, model_name = await self._generate_pollinations(job)
+                else:
+                    image, mime_type, model_name = await self._generate_horde(job)
+                await self._publish_and_deliver(job, context, image, mime_type, model_name)
         except asyncio.CancelledError:
             if job.mode == "horde" and job.remote_id:
                 await self._cancel_horde_request(job.remote_id)
@@ -516,14 +531,12 @@ class ImageGenerationManager:
     ) -> None:
         image_file = io.BytesIO(image)
         image_file.name = "yubara.png" if mime_type == "image/png" else "yubara.jpg"
-        channel_published = False
         try:
             await context.bot.send_photo(
                 chat_id=BACKUP_CHANNEL_ID,
                 photo=image_file,
                 caption=f"Yubara | {model_name}\n{job.prompt}"[:1024],
             )
-            channel_published = True
         except TelegramError:
             logging.exception("Не удалось опубликовать генерацию в канале BACKUP_CHANNEL_ID.")
 
@@ -545,8 +558,7 @@ class ImageGenerationManager:
 
         await self._edit_status(
             job,
-            "Готово! Изображение отправлено сюда."
-            + (" И опубликовано в канале." if channel_published else " Но опубликовать его в канале не удалось."),
+            "Готово! Изображение отправлено сюда.",
             active=False,
         )
 
