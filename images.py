@@ -227,6 +227,13 @@ class ImageGenerationManager:
             update=update,
             name=f"image-generation-{job_id}",
         )
+        logging.info(
+            "Запущена генерация изображения job_id=%s provider=%s chat_id=%s user_id=%s.",
+            job_id,
+            mode,
+            pending.chat_id,
+            pending.owner_id,
+        )
 
     async def _reserve_fast_start(self) -> int:
         async with self._fast_lock:
@@ -295,20 +302,38 @@ class ImageGenerationManager:
                 active=False,
             )
             raise
-        except Exception:
-            logging.exception(
-                "Ошибка генерации изображения через %s (chat_id=%s)",
+        except Exception as exc:
+            elapsed = max(0, int(time.monotonic() - job.started_at))
+            reason = self._safe_error_summary(exc)
+            logging.error(
+                "Ошибка генерации job_id=%s provider=%s chat_id=%s elapsed_seconds=%s: %s",
+                job.job_id,
                 job.mode,
                 job.chat_id,
+                elapsed,
+                reason,
+                exc_info=True,
             )
             await self._edit_status(
                 job,
-                "Не получилось создать изображение. Попробуй другой режим или измени описание.",
+                "Не получилось создать изображение. "
+                f"Сервис: {job.mode}; причина: {reason}. Попробуй позже или другой режим.",
                 active=False,
             )
         finally:
             if self.jobs.get((job.chat_id, job.owner_id)) is job:
                 self.jobs.pop((job.chat_id, job.owner_id), None)
+
+    @staticmethod
+    def _safe_error_summary(error: Exception) -> str:
+        if isinstance(error, httpx.HTTPStatusError):
+            return (
+                f"HTTP {error.response.status_code} "
+                f"{error.response.reason_phrase}"
+            )[:300]
+        if isinstance(error, httpx.RequestError):
+            return f"Сетевая ошибка ({type(error).__name__})."
+        return f"{type(error).__name__}: {str(error)[:250]}"
 
     async def _generate_pollinations(self, job: ImageJob) -> tuple[bytes, str, str]:
         url = f"{POLLINATIONS_URL}/{quote(job.prompt, safe='')}"

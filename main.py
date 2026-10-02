@@ -13,6 +13,12 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 import database
+from channel_log import (
+    TelegramChannelLogHandler,
+    install_channel_log_handler,
+    remove_channel_log_handler,
+    send_channel_event,
+)
 from config import (
     BACKUP_CHANNEL_ID,
     BACKUP_INTERVAL_SECONDS,
@@ -105,6 +111,12 @@ async def _restore_database(bot: object) -> tuple[str, int] | None:
 
 
 async def _post_init(application: Application) -> None:
+    log_handler = install_channel_log_handler(application.bot)
+    application.bot_data["channel_log_handler"] = log_handler
+    await send_channel_event(
+        application.bot,
+        f"▶️ Юбара запускается. HTTP healthcheck: порт {PORT}; проверяю инициализацию базы данных.",
+    )
     restored_info = await _restore_database(application.bot)
     await database.initialize()
     if restored_info is not None:
@@ -118,6 +130,10 @@ async def _post_init(application: Application) -> None:
         interval=BACKUP_INTERVAL_SECONDS,
         first=BACKUP_INTERVAL_SECONDS,
         name="database-backup",
+    )
+    await send_channel_event(
+        application.bot,
+        "✅ Юбара запущена: polling и резервное копирование активны.",
     )
 
 
@@ -177,16 +193,20 @@ async def _backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _post_shutdown(application: Application) -> None:
     logging.info("Остановка: проверяю, требуется ли финальный бэкап.")
+    await send_channel_event(application.bot, "⏹ Юбара останавливается; завершаю задачи и проверяю бэкап.")
     await stop_image_jobs()
     await _perform_backup(application.bot)
+    log_handler = application.bot_data.pop("channel_log_handler", None)
+    if isinstance(log_handler, TelegramChannelLogHandler):
+        remove_channel_log_handler(log_handler)
 
 
 async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     error = context.error
     if error is not None:
         logging.error(
-            "Необработанная ошибка при обработке Telegram update %r",
-            update,
+            "Необработанная ошибка при обработке Telegram update_id=%s",
+            update.update_id if isinstance(update, Update) else "unknown",
             exc_info=(type(error), error, error.__traceback__),
         )
 
@@ -207,8 +227,41 @@ def build_application() -> Application:
     application.add_handler(
         MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, on_private_message)
     )
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.CHANNEL_POST & filters.StatusUpdate.PINNED_MESSAGE,
+            _delete_channel_pin_notification,
+        )
+    )
     application.add_error_handler(_error_handler)
     return application
+
+
+async def _delete_channel_pin_notification(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.channel_post
+    if (
+        message is None
+        or message.chat_id != BACKUP_CHANNEL_ID
+        or message.pinned_message is None
+    ):
+        return
+    try:
+        await context.bot.delete_message(
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+        )
+        logging.info(
+            "Удалено служебное уведомление о закреплении в канале (message_id=%s).",
+            message.message_id,
+        )
+    except TelegramError:
+        logging.exception(
+            "Не удалось удалить служебное уведомление о закреплении в канале (message_id=%s).",
+            message.message_id,
+        )
 
 
 def main() -> None:
