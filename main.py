@@ -209,7 +209,7 @@ def build_application() -> Application:
 
 
 def main() -> None:
-    logging.info("Запуск Telegram-бота Юбари.")
+    logging.info("Запуск Telegram-бота Юбары.")
     try:
         http_server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
     except OSError:

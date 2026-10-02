@@ -24,7 +24,7 @@ ADMIN_MENU, WAIT_ADD_GROUP, WAIT_REMOVE_GROUP, WAIT_CREATE_KEY, WAIT_REVOKE_KEY 
 ADMIN_PANEL_USERS: set[int] = set()
 ACCESS_MESSAGE = (
     "Чтобы получить доступ к функционалу бота, необходимо ввести пароль, "
-    "который можно получить у @MEGURSHKA"
+    "который можно получить у @BIGBACA"
 )
 _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
 
@@ -45,10 +45,10 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
 async def _show_admin_menu(update: Update) -> None:
     query = update.callback_query
     if query:
-        await query.edit_message_text("Панель администратора Юбари:", reply_markup=_admin_keyboard())
+        await query.edit_message_text("Панель администратора Юбары:", reply_markup=_admin_keyboard())
     elif update.effective_message:
         await update.effective_message.reply_text(
-            "Панель администратора Юбари:",
+            "Панель администратора Юбары:",
             reply_markup=_admin_keyboard(),
         )
 
@@ -434,7 +434,7 @@ async def _private_dialog(
             message.chat_id,
             context.bot.id,
             sent.message_id,
-            "Бачира",
+            "Юбара",
             answer,
         )
     except Exception:

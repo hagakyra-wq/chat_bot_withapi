@@ -1,4 +1,4 @@
-"""Обработчики групповых сообщений Юбари."""
+"""Обработчики групповых сообщений Юбары."""
 
 import logging
 import random
@@ -20,7 +20,7 @@ from llm import build_prompt, generate_reply, is_called, is_summary_request, par
 
 UNKNOWN_GROUP_NOTICE = (
     "Если хотите воспользоваться функциями бота, обратитесь за помощью "
-    "к моему создателю @MEGURSHKA"
+    "к моему создателю @BIGBACA"
 )
 _last_unknown_group_notice: dict[int, float] = {}
 _COMMAND_RE = re.compile(r"^/([a-z_]+)(?:@\w+)?", re.IGNORECASE)
@@ -271,7 +271,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         try:
             bot_message = await context.bot.send_message(chat_id=group_id, text=answer)
         except TelegramError:
-            logging.exception("Telegram не отправил ответ Юбари в группу %s", group_id)
+            logging.exception("Telegram не отправил ответ Юбары в группу %s", group_id)
 
     if bot_message is not None:
         try:
@@ -279,7 +279,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 group_id,
                 context.bot.id,
                 bot_message.message_id,
-                "Бачира",
+                "Юбара",
                 answer,
             )
         except Exception:

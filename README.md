@@ -1,4 +1,4 @@
-# Telegram-бот «Юбари»
+# Telegram-бот Yubara «Юбара»
 
 Бот запускается в режиме polling и использует SQLite, Groq и HTTP healthcheck,
 который Render проверяет на порту `PORT`.
