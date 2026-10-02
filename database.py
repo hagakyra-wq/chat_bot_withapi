@@ -1,0 +1,552 @@
+"""Асинхронный доступ к SQLite и создание согласованных копий БД."""
+
+import asyncio
+import logging
+import os
+import sqlite3
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+
+from config import (
+    DATABASE_BACKUP_PATH,
+    DATABASE_PATH,
+    MAX_TOTAL_MESSAGES_PER_CHAT,
+)
+
+_write_lock = asyncio.Lock()
+_dirty_generation = 0
+_synced_generation = 0
+
+
+@asynccontextmanager
+async def _connect() -> AsyncGenerator[aiosqlite.Connection, None]:
+    connection = await aiosqlite.connect(DATABASE_PATH)
+    connection.row_factory = aiosqlite.Row
+    await connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield connection
+    finally:
+        await connection.close()
+
+
+def _record_write() -> None:
+    global _dirty_generation
+    _dirty_generation += 1
+
+
+async def initialize() -> None:
+    """Создаёт таблицы схемы проекта, сохраняя существующие данные."""
+    global _dirty_generation, _synced_generation
+    async with _write_lock:
+        async with _connect() as db:
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    username TEXT,
+                    gender TEXT NOT NULL DEFAULT 'неизвестен',
+                    callsign TEXT,
+                    notes TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (user_id, group_id)
+                );
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    sender_name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
+                    ON messages(chat_id, id);
+                CREATE TABLE IF NOT EXISTS allowed_groups (
+                    group_id INTEGER PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS access_keys (
+                    key TEXT PRIMARY KEY,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS authorized_users (
+                    user_id INTEGER PRIMARY KEY,
+                    authorized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS dirty_users_insert
+                AFTER INSERT ON users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_users_update
+                AFTER UPDATE ON users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_users_delete
+                AFTER DELETE ON users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_messages_insert
+                AFTER INSERT ON messages BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_messages_update
+                AFTER UPDATE ON messages BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_messages_delete
+                AFTER DELETE ON messages BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_allowed_groups_insert
+                AFTER INSERT ON allowed_groups BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_allowed_groups_delete
+                AFTER DELETE ON allowed_groups BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_allowed_groups_update
+                AFTER UPDATE ON allowed_groups BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_access_keys_insert
+                AFTER INSERT ON access_keys BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_access_keys_delete
+                AFTER DELETE ON access_keys BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_access_keys_update
+                AFTER UPDATE ON access_keys BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_authorized_users_insert
+                AFTER INSERT ON authorized_users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_authorized_users_update
+                AFTER UPDATE ON authorized_users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_authorized_users_delete
+                AFTER DELETE ON authorized_users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                """
+            )
+            await db.commit()
+            cursor = await db.execute("SELECT value FROM meta WHERE key = 'dirty'")
+            dirty = await cursor.fetchone()
+    _dirty_generation = 1 if dirty and dirty["value"] == "1" else 0
+    _synced_generation = 0
+    logging.info("Схема SQLite готова: %s", DATABASE_PATH)
+
+
+async def is_group_allowed(group_id: int) -> bool:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM allowed_groups WHERE group_id = ?",
+            (group_id,),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def list_allowed_groups() -> list[int]:
+    async with _connect() as db:
+        cursor = await db.execute("SELECT group_id FROM allowed_groups ORDER BY group_id")
+        rows = await cursor.fetchall()
+        return [int(row["group_id"]) for row in rows]
+
+
+async def add_allowed_group(group_id: int) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO allowed_groups(group_id) VALUES (?)",
+                (group_id,),
+            )
+            await db.commit()
+            inserted = cursor.rowcount > 0
+        if inserted:
+            _record_write()
+        return inserted
+
+
+async def remove_allowed_group(group_id: int) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM allowed_groups WHERE group_id = ?",
+                (group_id,),
+            )
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            _record_write()
+        return deleted
+
+
+async def ensure_user(user_id: int, group_id: int, username: str | None) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO users(user_id, group_id, username)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, group_id, username),
+            )
+            inserted = cursor.rowcount > 0
+            if username is not None:
+                update = await db.execute(
+                    """
+                    UPDATE users SET username = ?
+                    WHERE user_id = ? AND group_id = ? AND username IS NOT ?
+                    """,
+                    (username, user_id, group_id, username),
+                )
+                inserted = inserted or update.rowcount > 0
+            await db.commit()
+        if inserted:
+            _record_write()
+
+
+async def get_user_data(user_id: int, group_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, group_id, username, gender, callsign, notes
+            FROM users WHERE user_id = ? AND group_id = ?
+            """,
+            (user_id, group_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_group_users(group_id: int) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, username, gender, callsign, notes
+            FROM users WHERE group_id = ?
+            ORDER BY COALESCE(callsign, username, CAST(user_id AS TEXT))
+            """,
+            (group_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def update_user_profile(
+    user_id: int,
+    group_id: int,
+    *,
+    gender: str | None = None,
+    callsign: str | None = None,
+    note: str | None = None,
+) -> bool:
+    assignments: list[str] = []
+    values: list[str | int] = []
+    if gender is not None:
+        assignments.append("gender = ?")
+        values.append(gender)
+    if callsign is not None:
+        assignments.append("callsign = ?")
+        values.append(callsign)
+    if note is not None:
+        assignments.append(
+            "notes = CASE WHEN notes = '' THEN ? ELSE notes || char(10) || ? END"
+        )
+        values.extend((note, note))
+    if not assignments:
+        return False
+
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                f"UPDATE users SET {', '.join(assignments)} "
+                "WHERE user_id = ? AND group_id = ?",
+                (*values, user_id, group_id),
+            )
+            await db.commit()
+            updated = cursor.rowcount > 0
+        if updated:
+            _record_write()
+        return updated
+
+
+async def forget_user(user_id: int, group_id: int) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM users WHERE user_id = ? AND group_id = ?",
+                (user_id, group_id),
+            )
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            _record_write()
+        return deleted
+
+
+async def save_message(
+    chat_id: int,
+    user_id: int,
+    message_id: int,
+    sender_name: str,
+    text: str,
+) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute(
+                """
+                INSERT INTO messages(chat_id, user_id, message_id, sender_name, text)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chat_id, user_id, message_id, sender_name, text),
+            )
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM messages WHERE chat_id = ?",
+                (chat_id,),
+            )
+            count = int((await cursor.fetchone())[0])
+            if count > MAX_TOTAL_MESSAGES_PER_CHAT:
+                await db.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE id IN (
+                        SELECT id FROM messages WHERE chat_id = ?
+                        ORDER BY id ASC LIMIT ?
+                    )
+                    """,
+                    (chat_id, count - MAX_TOTAL_MESSAGES_PER_CHAT),
+                )
+            await db.commit()
+        _record_write()
+
+
+async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, int, str]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT message_id, sender_name, user_id, text
+            FROM messages WHERE chat_id = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (chat_id, max(1, limit)),
+        )
+        rows = await cursor.fetchall()
+        return [
+            (int(row["message_id"]), row["sender_name"], int(row["user_id"]), row["text"])
+            for row in reversed(rows)
+        ]
+
+
+async def is_authorized(user_id: int) -> bool:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM authorized_users WHERE user_id = ?",
+            (user_id,),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def consume_access_key(key: str, user_id: int) -> bool:
+    """Атомарно расходует активный ключ и выдаёт постоянный доступ."""
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute("SELECT 1 FROM access_keys WHERE key = ?", (key,))
+            if await cursor.fetchone() is None:
+                await db.rollback()
+                return False
+            await db.execute("DELETE FROM access_keys WHERE key = ?", (key,))
+            await db.execute(
+                "INSERT OR IGNORE INTO authorized_users(user_id) VALUES (?)",
+                (user_id,),
+            )
+            await db.commit()
+        _record_write()
+        return True
+
+
+async def create_access_key(key: str) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            try:
+                await db.execute("INSERT INTO access_keys(key) VALUES (?)", (key,))
+            except aiosqlite.IntegrityError:
+                await db.rollback()
+                return False
+            await db.commit()
+        _record_write()
+        return True
+
+
+async def list_access_keys() -> list[str]:
+    async with _connect() as db:
+        cursor = await db.execute("SELECT key FROM access_keys ORDER BY created_at, key")
+        return [str(row["key"]) for row in await cursor.fetchall()]
+
+
+async def revoke_access_key(key: str) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute("DELETE FROM access_keys WHERE key = ?", (key,))
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            _record_write()
+        return deleted
+
+
+async def list_authorized_users() -> list[tuple[int, str | None]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT a.user_id,
+                   (SELECT u.username FROM users AS u
+                    WHERE u.user_id = a.user_id AND u.username IS NOT NULL
+                    ORDER BY u.group_id LIMIT 1) AS username
+            FROM authorized_users AS a ORDER BY a.user_id
+            """
+        )
+        rows = await cursor.fetchall()
+        return [(int(row["user_id"]), row["username"]) for row in rows]
+
+
+async def get_meta(key: str) -> str | None:
+    async with _connect() as db:
+        cursor = await db.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return str(row["value"]) if row else None
+
+
+async def set_backup_meta(file_id: str, message_id: int) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.executemany(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    ("backup_file_id", file_id),
+                    ("backup_message_id", str(message_id)),
+                ),
+            )
+            await db.commit()
+
+
+async def create_consistent_backup() -> int | None:
+    """Делает online backup; возвращает поколение записей в снимке."""
+    async with _write_lock:
+        if _dirty_generation <= _synced_generation:
+            return None
+        snapshot_generation = _dirty_generation
+        DATABASE_BACKUP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        async with _connect() as source:
+            target: sqlite3.Connection | None = await asyncio.to_thread(
+                sqlite3.connect,
+                DATABASE_BACKUP_PATH,
+                check_same_thread=False,
+            )
+            try:
+                await source.backup(target)
+                await asyncio.to_thread(_finalize_snapshot, target)
+                target = None
+            finally:
+                if target is not None:
+                    await asyncio.to_thread(target.close)
+        return snapshot_generation
+
+
+def _finalize_snapshot(target: sqlite3.Connection) -> None:
+    target.execute(
+        "INSERT INTO meta(key, value) VALUES ('dirty', '0') "
+        "ON CONFLICT(key) DO UPDATE SET value = '0'"
+    )
+    target.commit()
+    target.close()
+
+
+async def mark_backup_synchronized(generation: int) -> None:
+    global _synced_generation
+    async with _write_lock:
+        if _dirty_generation <= _synced_generation:
+            return
+        if _dirty_generation <= generation:
+            async with _connect() as db:
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES ('dirty', '0') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '0'"
+                )
+                await db.commit()
+        _synced_generation = max(_synced_generation, generation)
+
+
+def validate_sqlite(path: str | Path) -> bool:
+    """Проверяет целостность файла SQLite без создания новой базы."""
+    file_path = Path(path)
+    if not file_path.is_file() or file_path.stat().st_size == 0:
+        return False
+    try:
+        connection = sqlite3.connect(f"file:{file_path.as_posix()}?mode=ro", uri=True)
+        try:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            return result is not None and result[0] == "ok"
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        logging.exception("Файл не прошёл проверку SQLite: %s", file_path)
+        return False
+
+
+def replace_database_from(source: str | Path) -> None:
+    """Атомарно заменяет рабочую БД проверенной локальной копией."""
+    source_path = Path(source)
+    if not validate_sqlite(source_path):
+        raise sqlite3.DatabaseError(f"Некорректная SQLite-база: {source_path}")
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.resolve() == DATABASE_PATH.resolve():
+        return
+    staging = DATABASE_PATH.with_suffix(".restore.tmp")
+    source_connection = sqlite3.connect(
+        f"file:{source_path.as_posix()}?mode=ro",
+        uri=True,
+    )
+    staging_connection = sqlite3.connect(staging, check_same_thread=False)
+    try:
+        source_connection.backup(staging_connection)
+        staging_connection.commit()
+    finally:
+        staging_connection.close()
+        source_connection.close()
+    os.replace(staging, DATABASE_PATH)
+
+
+def reset_backup_state() -> None:
+    global _dirty_generation, _synced_generation
+    _dirty_generation = 0
+    _synced_generation = 0
