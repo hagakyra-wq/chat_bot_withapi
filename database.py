@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -70,11 +71,17 @@ async def initialize() -> None:
                 );
                 CREATE TABLE IF NOT EXISTS access_keys (
                     key TEXT PRIMARY KEY,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    access_level TEXT NOT NULL DEFAULT 'user',
+                    duration_seconds INTEGER,
+                    created_by INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS authorized_users (
                     user_id INTEGER PRIMARY KEY,
-                    authorized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    authorized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    username TEXT,
+                    access_level TEXT NOT NULL DEFAULT 'user',
+                    expires_at REAL
                 );
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY,
@@ -157,12 +164,42 @@ async def initialize() -> None:
                 END;
                 """
             )
+            await _ensure_columns(
+                db,
+                "access_keys",
+                {
+                    "access_level": "TEXT NOT NULL DEFAULT 'user'",
+                    "duration_seconds": "INTEGER",
+                    "created_by": "INTEGER",
+                },
+            )
+            await _ensure_columns(
+                db,
+                "authorized_users",
+                {
+                    "username": "TEXT",
+                    "access_level": "TEXT NOT NULL DEFAULT 'user'",
+                    "expires_at": "REAL",
+                },
+            )
             await db.commit()
             cursor = await db.execute("SELECT value FROM meta WHERE key = 'dirty'")
             dirty = await cursor.fetchone()
     _dirty_generation = 1 if dirty and dirty["value"] == "1" else 0
     _synced_generation = 0
     logging.info("Схема SQLite готова: %s", DATABASE_PATH)
+
+
+async def _ensure_columns(
+    db: aiosqlite.Connection,
+    table: str,
+    columns: dict[str, str],
+) -> None:
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    existing = {str(row["name"]) for row in await cursor.fetchall()}
+    for column, declaration in columns.items():
+        if column not in existing:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 async def is_group_allowed(group_id: int) -> bool:
@@ -365,39 +402,110 @@ async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, i
         ]
 
 
-async def is_authorized(user_id: int) -> bool:
+async def get_authorized_user(user_id: int) -> dict[str, Any] | None:
     async with _connect() as db:
         cursor = await db.execute(
-            "SELECT 1 FROM authorized_users WHERE user_id = ?",
-            (user_id,),
+            """
+            SELECT user_id, username, access_level, expires_at
+            FROM authorized_users
+            WHERE user_id = ? AND (expires_at IS NULL OR expires_at > ?)
+            """,
+            (user_id, time.time()),
         )
-        return await cursor.fetchone() is not None
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
 
-async def consume_access_key(key: str, user_id: int) -> bool:
-    """Атомарно расходует активный ключ и выдаёт постоянный доступ."""
+async def is_authorized(user_id: int) -> bool:
+    return await get_authorized_user(user_id) is not None
+
+
+async def is_admin_user(user_id: int) -> bool:
+    record = await get_authorized_user(user_id)
+    return bool(record and record["access_level"] == "admin")
+
+
+async def consume_access_key(
+    key: str,
+    user_id: int,
+    username: str | None = None,
+) -> dict[str, Any] | None:
+    """Атомарно расходует ключ и выдаёт выбранный уровень доступа на срок."""
     async with _write_lock:
         async with _connect() as db:
             await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute("SELECT 1 FROM access_keys WHERE key = ?", (key,))
-            if await cursor.fetchone() is None:
+            cursor = await db.execute(
+                """
+                SELECT access_level, duration_seconds
+                FROM access_keys WHERE key = ?
+                """,
+                (key,),
+            )
+            key_record = await cursor.fetchone()
+            if key_record is None:
                 await db.rollback()
-                return False
+                return None
+            cursor = await db.execute(
+                """
+                SELECT access_level, expires_at
+                FROM authorized_users WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+            previous_record = await cursor.fetchone()
+            expires_at = (
+                time.time() + int(key_record["duration_seconds"])
+                if key_record["duration_seconds"] is not None
+                else None
+            )
+            granted_level = str(key_record["access_level"])
+            if previous_record and previous_record["access_level"] == "admin" and granted_level == "user":
+                granted_level = "admin"
+                expires_at = previous_record["expires_at"]
             await db.execute("DELETE FROM access_keys WHERE key = ?", (key,))
             await db.execute(
-                "INSERT OR IGNORE INTO authorized_users(user_id) VALUES (?)",
-                (user_id,),
+                """
+                INSERT INTO authorized_users(
+                    user_id, username, access_level, expires_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    access_level = excluded.access_level,
+                    expires_at = excluded.expires_at,
+                    authorized_at = CURRENT_TIMESTAMP
+                """,
+                (user_id, username, granted_level, expires_at),
             )
             await db.commit()
         _record_write()
-        return True
+        return {
+            "access_level": granted_level,
+            "expires_at": expires_at,
+        }
 
 
-async def create_access_key(key: str) -> bool:
+async def create_access_key(
+    key: str,
+    *,
+    access_level: str = "user",
+    duration_seconds: int | None = None,
+    created_by: int | None = None,
+) -> bool:
+    if access_level not in ("user", "admin"):
+        raise ValueError("access_level должен быть user или admin.")
+    if duration_seconds is not None and duration_seconds <= 0:
+        raise ValueError("duration_seconds должен быть положительным.")
     async with _write_lock:
         async with _connect() as db:
             try:
-                await db.execute("INSERT INTO access_keys(key) VALUES (?)", (key,))
+                await db.execute(
+                    """
+                    INSERT INTO access_keys(
+                        key, access_level, duration_seconds, created_by
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (key, access_level, duration_seconds, created_by),
+                )
             except aiosqlite.IntegrityError:
                 await db.rollback()
                 return False
@@ -406,10 +514,15 @@ async def create_access_key(key: str) -> bool:
         return True
 
 
-async def list_access_keys() -> list[str]:
+async def list_access_keys() -> list[dict[str, Any]]:
     async with _connect() as db:
-        cursor = await db.execute("SELECT key FROM access_keys ORDER BY created_at, key")
-        return [str(row["key"]) for row in await cursor.fetchall()]
+        cursor = await db.execute(
+            """
+            SELECT key, access_level, duration_seconds, created_by
+            FROM access_keys ORDER BY created_at, key
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
 
 async def revoke_access_key(key: str) -> bool:
@@ -423,19 +536,56 @@ async def revoke_access_key(key: str) -> bool:
         return deleted
 
 
-async def list_authorized_users() -> list[tuple[int, str | None]]:
+async def list_authorized_users(
+    *,
+    access_level: str = "user",
+) -> list[dict[str, Any]]:
+    if access_level not in ("user", "admin"):
+        raise ValueError("access_level должен быть user или admin.")
     async with _connect() as db:
         cursor = await db.execute(
             """
-            SELECT a.user_id,
-                   (SELECT u.username FROM users AS u
-                    WHERE u.user_id = a.user_id AND u.username IS NOT NULL
-                    ORDER BY u.group_id LIMIT 1) AS username
-            FROM authorized_users AS a ORDER BY a.user_id
-            """
+            SELECT user_id, username, access_level, expires_at
+            FROM authorized_users
+            WHERE access_level = ? AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY user_id
+            """,
+            (access_level, time.time()),
         )
         rows = await cursor.fetchall()
-        return [(int(row["user_id"]), row["username"]) for row in rows]
+        return [dict(row) for row in rows]
+
+
+async def update_authorized_username(user_id: int, username: str | None) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE authorized_users SET username = ?
+                WHERE user_id = ? AND username IS NOT ?
+                """,
+                (username, user_id, username),
+            )
+            await db.commit()
+            updated = cursor.rowcount > 0
+        if updated:
+            _record_write()
+
+
+async def revoke_authorized_user(user_id: int, *, access_level: str) -> bool:
+    if access_level not in ("user", "admin"):
+        raise ValueError("access_level должен быть user или admin.")
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM authorized_users WHERE user_id = ? AND access_level = ?",
+                (user_id, access_level),
+            )
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            _record_write()
+        return deleted
 
 
 async def get_meta(key: str) -> str | None:

@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from telegram import Update
 from telegram.error import TelegramError
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 import database
 from config import (
@@ -24,6 +24,7 @@ from config import (
 )
 from handlers_group import on_group_message
 from handlers_pm import build_admin_conversation_handler, on_private_message
+from images import on_image_callback, stop_image_jobs
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -176,6 +177,7 @@ async def _backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _post_shutdown(application: Application) -> None:
     logging.info("Остановка: проверяю, требуется ли финальный бэкап.")
+    await stop_image_jobs()
     await _perform_backup(application.bot)
 
 
@@ -197,6 +199,7 @@ def build_application() -> Application:
         .post_shutdown(_post_shutdown)
         .build()
     )
+    application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
     application.add_handler(build_admin_conversation_handler())
     application.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.TEXT, on_group_message)

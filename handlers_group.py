@@ -16,6 +16,7 @@ from config import (
     KNOWN_PEOPLE_TRIGGERS,
     UNKNOWN_GROUP_NOTICE_SECONDS,
 )
+from images import extract_image_request, image_manager, is_image_command
 from llm import build_prompt, generate_reply, is_called, is_summary_request, parse_meta
 
 UNKNOWN_GROUP_NOTICE = (
@@ -160,6 +161,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _send_unknown_group_notice(message, group_id)
         return
 
+    await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
+
     if command == "forget_me":
         try:
             deleted = await database.forget_user(user.id, group_id)
@@ -210,6 +213,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     except Exception:
         logging.exception("Ошибка сохранения группового сообщения в SQLite")
+        return
+
+    is_image_request, image_prompt = extract_image_request(text)
+    if is_image_request and (
+        is_image_command(text) or called or replied_to_bot or mentioned
+    ):
+        await image_manager.offer(update, context, image_prompt)
         return
 
     if not (called or replied_to_bot or mentioned or command):
@@ -284,3 +294,4 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except Exception:
             logging.exception("Не удалось сохранить ответ бота в истории группы %s", group_id)
+        await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
