@@ -223,9 +223,14 @@ def main() -> None:
     http_thread.start()
     logging.info("HTTP healthcheck запущен на порту %s.", PORT)
 
+    event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(event_loop)
     try:
         build_application().run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
+        if not event_loop.is_closed():
+            event_loop.close()
+        asyncio.set_event_loop(None)
         http_server.shutdown()
         http_server.server_close()
         http_thread.join(timeout=5)

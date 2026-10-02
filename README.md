@@ -17,6 +17,7 @@
 
 - Build Command: `pip install -r requirements.txt`
 - Start Command: `python main.py` (команда Procfile: `web: python main.py`)
+- Корневой `.python-version` закрепляет Python `3.11.11` для Render.
 
 В Environment добавьте `TELEGRAM_TOKEN`, `GROQ_API_KEY`, `ADMIN_ID` и
 `BACKUP_CHANNEL_ID`. Render задаёт `PORT` для Web Service автоматически;
