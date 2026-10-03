@@ -89,7 +89,6 @@ async def initialize() -> None:
                 );
                 CREATE TABLE IF NOT EXISTS image_settings (
                     chat_id INTEGER PRIMARY KEY,
-                    model_preference TEXT NOT NULL DEFAULT 'auto',
                     pollinations_model TEXT NOT NULL DEFAULT 'flux',
                     width INTEGER NOT NULL DEFAULT 768,
                     height INTEGER NOT NULL DEFAULT 1024,
@@ -245,14 +244,13 @@ async def list_allowed_groups() -> list[int]:
 async def get_image_settings(chat_id: int) -> dict[str, Any]:
     async with _connect() as db:
         cursor = await db.execute(
-            "SELECT model_preference, pollinations_model, width, height, negative_prompt, seed "
+            "SELECT pollinations_model, width, height, negative_prompt, seed "
             "FROM image_settings WHERE chat_id = ?",
             (chat_id,),
         )
         row = await cursor.fetchone()
     if row is None:
         return {
-            "model_preference": "auto",
             "pollinations_model": "flux",
             "width": 768,
             "height": 1024,
@@ -264,13 +262,10 @@ async def get_image_settings(chat_id: int) -> dict[str, Any]:
 
 async def set_image_setting(chat_id: int, setting: str, value: Any) -> None:
     columns = {
-        "model_preference": "model_preference",
         "pollinations_model": "pollinations_model",
         "negative_prompt": "negative_prompt",
         "seed": "seed",
     }
-    if setting == "model_preference" and value not in ("auto", "animagine", "anime", "anything"):
-        raise ValueError("Недопустимое предпочтение модели AI Horde.")
     if setting == "pollinations_model" and value not in ("flux", "turbo"):
         raise ValueError("Недопустимая модель Pollinations.")
     if setting == "size" and value not in (
