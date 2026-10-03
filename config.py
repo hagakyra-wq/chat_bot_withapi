@@ -31,6 +31,7 @@ TELEGRAM_TOKEN = _required_text("TELEGRAM_TOKEN")
 GROQ_API_KEY = _required_text("GROQ_API_KEY")
 ADMIN_ID = _required_int("ADMIN_ID")
 BACKUP_CHANNEL_ID = _required_int("BACKUP_CHANNEL_ID")
+AI_HORDE_API_KEY = os.getenv("AI_HORDE", "").strip() or "0000000000"
 
 try:
     PORT = int(os.getenv("PORT", "8080"))

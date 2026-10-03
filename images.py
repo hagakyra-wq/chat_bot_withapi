@@ -18,16 +18,16 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
-from config import BACKUP_CHANNEL_ID
+from config import AI_HORDE_API_KEY, BACKUP_CHANNEL_ID
 
 POLLINATIONS_URL = "https://image.pollinations.ai/prompt"
 AI_HORDE_URL = "https://aihorde.net/api/v2"
-AI_HORDE_ANONYMOUS_KEY = "0000000000"
 CLIENT_AGENT = "YubaraTelegramBot:1.0.0:github.com/hagakyra-wq/chat_bot_withapi"
 POLLINATIONS_COOLDOWN_SECONDS = 120
 MAX_IMAGE_BYTES = 9 * 1024 * 1024
 PROMPT_MAX_LENGTH = 1500
 STATUS_REFRESH_SECONDS = 5
+HORDE_REQUEUE_MIN_AGE_SECONDS = 5 * 60
 ANIME_PROMPT_PREFIX = "anime style, 2D anime illustration, anime art, "
 DEFAULT_NEGATIVE_PROMPT = "3d, photorealistic, realistic, 3d render, bad anatomy, bad hands"
 MODEL_PREFERENCES = {
@@ -106,6 +106,10 @@ class ImageJob:
     remote_id: str | None = None
     task: asyncio.Task[object] | None = None
     status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+class HordeRequestExpired(Exception):
+    """Задание AI Horde удалено до завершения генерации."""
 
 
 def extract_image_request(text: str) -> tuple[bool, str]:
@@ -850,7 +854,7 @@ class ImageGenerationManager:
 
     async def _generate_horde(self, job: ImageJob) -> tuple[bytes, str, str]:
         headers = {
-            "apikey": AI_HORDE_ANONYMOUS_KEY,
+            "apikey": AI_HORDE_API_KEY,
             "Client-Agent": CLIENT_AGENT,
             "Content-Type": "application/json",
         }
@@ -881,58 +885,33 @@ class ImageGenerationManager:
             }
             if models:
                 payload["models"] = [models[0]]
-            response = await client.post(
-                f"{AI_HORDE_URL}/generate/async",
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            request_data = response.json()
-            remote_id = request_data.get("id")
-            if not isinstance(remote_id, str) or not remote_id:
-                raise RuntimeError("AI Horde не вернул ID задания.")
-            job.remote_id = remote_id
-            await self._edit_status(
-                job,
-                self._status_text("AI Horde", job.started_at, "запрос в очереди"),
-            )
-
+            retries = 0
             while True:
-                check_response = await client.get(
-                    f"{AI_HORDE_URL}/generate/check/{remote_id}",
-                    headers=headers,
-                )
-                check_response.raise_for_status()
-                check = check_response.json()
-                queue_position = int(check.get("queue_position") or 0)
-                eta = int(check.get("wait_time") or 0)
-                elapsed = max(0, int(time.monotonic() - job.started_at))
-                await self._edit_status(
-                    job,
-                    f"Юбара уже {elapsed // 60} мин {elapsed % 60} сек ждёт AI Horde.\n"
-                    f"Позиция в очереди: {queue_position}.\n"
-                    f"Ожидание по оценке сервиса: около {max(0, eta)} сек.",
-                )
-                if check.get("faulted"):
-                    raise RuntimeError("AI Horde сообщил об ошибке генерации.")
-                if check.get("done"):
+                try:
+                    generated, model_name = await self._request_horde_generation(
+                        client,
+                        headers,
+                        payload,
+                        models,
+                        job,
+                    )
                     break
-                await asyncio.sleep(5)
-
-            status_response = await client.get(
-                f"{AI_HORDE_URL}/generate/status/{remote_id}",
-                headers=headers,
-            )
-            status_response.raise_for_status()
-            generations = status_response.json().get("generations", [])
-            if not generations:
-                raise RuntimeError("AI Horde завершил задание без изображения.")
-            generated = generations[0]
+                except HordeRequestExpired:
+                    retries += 1
+                    logging.warning(
+                        "AI Horde удалил задание из очереди; отправляю заново "
+                        "(job_id=%s, повтор=%s).",
+                        job.job_id,
+                        retries,
+                    )
+                    elapsed = max(0, int(time.monotonic() - job.started_at))
+                    await self._edit_status(
+                        job,
+                        f"Юбара уже {elapsed // 60} мин {elapsed % 60} сек ждёт AI Horde.\n"
+                        "Сервис удалил долго ожидавшее задание, отправляю его повторно.\n"
+                        "Ожидание продолжается без ограничения по времени.",
+                    )
             image_source = generated.get("img")
-            model_name = str(
-                generated.get("model")
-                or (models[0] if models else "AI Horde")
-            )
             if not isinstance(image_source, str) or not image_source:
                 raise RuntimeError("AI Horde вернул некорректную ссылку на изображение.")
             if image_source.startswith("data:image/"):
@@ -957,6 +936,130 @@ class ImageGenerationManager:
             if not mime_type.startswith("image/") or len(image) > MAX_IMAGE_BYTES:
                 raise RuntimeError("AI Horde вернул файл неподдерживаемого типа или размера.")
             return image, mime_type, model_name
+
+    async def _request_horde_generation(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        payload: dict[str, object],
+        models: list[str],
+        job: ImageJob,
+    ) -> tuple[dict[str, object], str]:
+        response = await client.post(
+            f"{AI_HORDE_URL}/generate/async",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        request_data = response.json()
+        remote_id = request_data.get("id")
+        if not isinstance(remote_id, str) or not remote_id:
+            raise RuntimeError("AI Horde не вернул ID задания.")
+        job.remote_id = remote_id
+
+        warnings = request_data.get("warnings", [])
+        if isinstance(warnings, list):
+            warning_text = " ".join(str(item) for item in warnings)
+        elif isinstance(warnings, str):
+            warning_text = warnings
+        else:
+            warning_text = ""
+        no_workers = (
+            "NoAvailableWorker" in warning_text
+            or "no available workers" in str(request_data.get("message", "")).casefold()
+        )
+        if no_workers:
+            logging.warning(
+                "AI Horde принял запрос без подходящих воркеров; задание будет "
+                "автоматически поставлено повторно при удалении из очереди "
+                "(job_id=%s, remote_id=%s).",
+                job.job_id,
+                remote_id,
+            )
+
+        model_name = models[0] if models else "AI Horde"
+        request_started_at = time.monotonic()
+        await self._edit_status(
+            job,
+            self._status_text(
+                "AI Horde",
+                job.started_at,
+                "нет подходящих воркеров; запрос будет обновлён автоматически"
+                if no_workers
+                else "запрос в очереди",
+            ),
+        )
+
+        while True:
+            check_response = await client.get(
+                f"{AI_HORDE_URL}/generate/check/{remote_id}",
+                headers=headers,
+            )
+            try:
+                check_response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if (
+                    self._is_horde_request_not_found(exc)
+                    and time.monotonic() - request_started_at
+                    >= HORDE_REQUEUE_MIN_AGE_SECONDS
+                ):
+                    raise HordeRequestExpired from exc
+                raise
+            check = check_response.json()
+            queue_position = int(check.get("queue_position") or 0)
+            eta = int(check.get("wait_time") or 0)
+            elapsed = max(0, int(time.monotonic() - job.started_at))
+            await self._edit_status(
+                job,
+                f"Юбара уже {elapsed // 60} мин {elapsed % 60} сек ждёт AI Horde.\n"
+                f"Позиция в очереди: {queue_position}.\n"
+                f"Ожидание по оценке сервиса: около {max(0, eta)} сек."
+                + (
+                    "\nПодходящих воркеров нет; задание будет отправлено повторно "
+                    "при удалении из очереди."
+                    if no_workers
+                    else ""
+                ),
+            )
+            if check.get("faulted"):
+                raise RuntimeError("AI Horde сообщил об ошибке генерации.")
+            if check.get("done"):
+                break
+            await asyncio.sleep(5)
+
+        status_response = await client.get(
+            f"{AI_HORDE_URL}/generate/status/{remote_id}",
+            headers=headers,
+        )
+        try:
+            status_response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if (
+                self._is_horde_request_not_found(exc)
+                and time.monotonic() - request_started_at
+                >= HORDE_REQUEUE_MIN_AGE_SECONDS
+            ):
+                raise HordeRequestExpired from exc
+            raise
+        generations = status_response.json().get("generations", [])
+        if not generations or not isinstance(generations[0], dict):
+            raise RuntimeError("AI Horde завершил задание без изображения.")
+        generated = generations[0]
+        model_name = str(generated.get("model") or model_name)
+        return generated, model_name
+
+    @staticmethod
+    def _is_horde_request_not_found(error: httpx.HTTPStatusError) -> bool:
+        if error.response.status_code != 404:
+            return False
+        try:
+            response_data = error.response.json()
+        except ValueError:
+            return False
+        return (
+            isinstance(response_data, dict)
+            and response_data.get("rc") in ("RequestNotFound", "RequestExpired")
+        )
 
     async def _available_anime_models(
         self,
@@ -1025,7 +1128,7 @@ class ImageGenerationManager:
         headers: dict[str, str] | None = None,
     ) -> None:
         request_headers = headers or {
-            "apikey": AI_HORDE_ANONYMOUS_KEY,
+            "apikey": AI_HORDE_API_KEY,
             "Client-Agent": CLIENT_AGENT,
         }
         try:
