@@ -83,6 +83,38 @@ async def admin_start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> in
     return ADMIN_MENU
 
 
+async def break_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    user = update.effective_user
+    message = update.effective_message
+    chat = update.effective_chat
+    if (
+        user is None
+        or message is None
+        or chat is None
+        or chat.type != ChatType.PRIVATE
+    ):
+        return
+    try:
+        if not await _is_admin(user.id):
+            return
+    except Exception:
+        logging.exception("Не удалось проверить право администратора для /break")
+        return
+
+    try:
+        await message.reply_text(
+            "Останавливаю процесс бота. Render может автоматически запустить его снова."
+        )
+    except TelegramError:
+        logging.exception("Не удалось подтвердить администратору выполнение /break")
+
+    logging.info("Администратор user_id=%s запросил остановку процесса через /break.", user.id)
+    context.application.stop_running()
+
+
 async def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID or await database.is_admin_user(user_id)
 
@@ -592,6 +624,9 @@ async def _private_dialog(
             await database.update_authorized_username(user_id, user.username)
         except Exception:
             logging.exception("Не удалось обновить username пользователя %s", user_id)
+
+    if await image_manager.consume_setting_input(update, context):
+        return
 
     await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
 

@@ -87,6 +87,25 @@ async def initialize() -> None:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS image_settings (
+                    chat_id INTEGER PRIMARY KEY,
+                    model_preference TEXT NOT NULL DEFAULT 'auto',
+                    pollinations_model TEXT NOT NULL DEFAULT 'flux',
+                    width INTEGER NOT NULL DEFAULT 768,
+                    height INTEGER NOT NULL DEFAULT 1024,
+                    negative_prompt TEXT NOT NULL DEFAULT '3d, photorealistic, realistic, 3d render, bad anatomy, bad hands',
+                    seed TEXT
+                );
+                CREATE TRIGGER IF NOT EXISTS dirty_image_settings_insert
+                AFTER INSERT ON image_settings BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_image_settings_update
+                AFTER UPDATE ON image_settings BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
                 CREATE TRIGGER IF NOT EXISTS dirty_users_insert
                 AFTER INSERT ON users BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
@@ -182,6 +201,11 @@ async def initialize() -> None:
                     "expires_at": "REAL",
                 },
             )
+            await _ensure_columns(
+                db,
+                "image_settings",
+                {"pollinations_model": "TEXT NOT NULL DEFAULT 'flux'"},
+            )
             await db.commit()
             cursor = await db.execute("SELECT value FROM meta WHERE key = 'dirty'")
             dirty = await cursor.fetchone()
@@ -216,6 +240,77 @@ async def list_allowed_groups() -> list[int]:
         cursor = await db.execute("SELECT group_id FROM allowed_groups ORDER BY group_id")
         rows = await cursor.fetchall()
         return [int(row["group_id"]) for row in rows]
+
+
+async def get_image_settings(chat_id: int) -> dict[str, Any]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT model_preference, pollinations_model, width, height, negative_prompt, seed "
+            "FROM image_settings WHERE chat_id = ?",
+            (chat_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return {
+            "model_preference": "auto",
+            "pollinations_model": "flux",
+            "width": 768,
+            "height": 1024,
+            "negative_prompt": "3d, photorealistic, realistic, 3d render, bad anatomy, bad hands",
+            "seed": None,
+        }
+    return dict(row)
+
+
+async def set_image_setting(chat_id: int, setting: str, value: Any) -> None:
+    columns = {
+        "model_preference": "model_preference",
+        "pollinations_model": "pollinations_model",
+        "negative_prompt": "negative_prompt",
+        "seed": "seed",
+    }
+    if setting == "model_preference" and value not in ("auto", "animagine", "anime", "anything"):
+        raise ValueError("Недопустимое предпочтение модели AI Horde.")
+    if setting == "pollinations_model" and value not in ("flux", "turbo"):
+        raise ValueError("Недопустимая модель Pollinations.")
+    if setting == "size" and value not in (
+        (1024, 576),
+        (576, 1024),
+        (1024, 1024),
+        (768, 768),
+    ):
+        raise ValueError("Недопустимый размер изображения.")
+    if setting == "negative_prompt" and (
+        not isinstance(value, str) or len(value) > 500
+    ):
+        raise ValueError("Негативный промпт должен содержать не более 500 символов.")
+    if setting == "seed" and value is not None and (
+        not isinstance(value, str) or not value.isdigit() or len(value) > 10
+    ):
+        raise ValueError("Seed должен быть целым числом или None.")
+    if setting not in columns and setting != "size":
+        raise ValueError(f"Неизвестная настройка изображения: {setting}")
+
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO image_settings(chat_id) VALUES (?)",
+                (chat_id,),
+            )
+            if setting == "size":
+                width, height = value
+                await db.execute(
+                    "UPDATE image_settings SET width = ?, height = ? WHERE chat_id = ?",
+                    (width, height, chat_id),
+                )
+            else:
+                column = columns[setting]
+                await db.execute(
+                    f"UPDATE image_settings SET {column} = ? WHERE chat_id = ?",
+                    (value, chat_id),
+                )
+            await db.commit()
+        _record_write()
 
 
 async def add_allowed_group(group_id: int) -> bool:

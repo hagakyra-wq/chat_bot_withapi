@@ -161,6 +161,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _send_unknown_group_notice(message, group_id)
         return
 
+    if await image_manager.consume_setting_input(update, context):
+        return
+
     await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
 
     if command == "forget_me":

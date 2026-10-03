@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import logging
+import random
 import re
 import time
 import uuid
@@ -12,9 +13,11 @@ from urllib.parse import quote
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
+import database
 from config import BACKUP_CHANNEL_ID
 
 POLLINATIONS_URL = "https://image.pollinations.ai/prompt"
@@ -25,6 +28,24 @@ POLLINATIONS_COOLDOWN_SECONDS = 120
 MAX_IMAGE_BYTES = 9 * 1024 * 1024
 PROMPT_MAX_LENGTH = 1500
 STATUS_REFRESH_SECONDS = 5
+ANIME_PROMPT_PREFIX = "anime style, 2D anime illustration, anime art, "
+DEFAULT_NEGATIVE_PROMPT = "3d, photorealistic, realistic, 3d render, bad anatomy, bad hands"
+MODEL_PREFERENCES = {
+    "auto": "Автовыбор (Animagine → anime → anything)",
+    "animagine": "Animagine",
+    "anime": "Любая anime-модель",
+    "anything": "Anything",
+}
+POLLINATIONS_MODELS = {
+    "flux": "Flux",
+    "turbo": "Turbo",
+}
+IMAGE_SIZES = {
+    "1024x576": (1024, 576),
+    "576x1024": (576, 1024),
+    "1024x1024": (1024, 1024),
+    "768x768": (768, 768),
+}
 
 _IMAGE_COMMAND_RE = re.compile(r"^/(?:image|img)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 _NATURAL_REQUEST_RE = re.compile(
@@ -44,6 +65,33 @@ class PendingImage:
 
 
 @dataclass
+class PendingSettingInput:
+    request_id: str
+    setting: str
+
+
+@dataclass
+class ImageSettings:
+    model_preference: str = "auto"
+    pollinations_model: str = "flux"
+    width: int = 768
+    height: int = 1024
+    negative_prompt: str = DEFAULT_NEGATIVE_PROMPT
+    seed: str | None = None
+
+    @classmethod
+    def from_record(cls, record: dict[str, object]) -> "ImageSettings":
+        return cls(
+            model_preference=str(record["model_preference"]),
+            pollinations_model=str(record["pollinations_model"]),
+            width=int(record["width"]),
+            height=int(record["height"]),
+            negative_prompt=str(record["negative_prompt"]),
+            seed=str(record["seed"]) if record.get("seed") is not None else None,
+        )
+
+
+@dataclass
 class ImageJob:
     job_id: str
     mode: str
@@ -52,6 +100,8 @@ class ImageJob:
     chat_id: int
     status_message_id: int
     bot: object
+    settings: ImageSettings = field(default_factory=ImageSettings)
+    seed: str = field(default_factory=lambda: str(random.randint(1, 99_999_999)))
     started_at: float = field(default_factory=time.monotonic)
     remote_id: str | None = None
     task: asyncio.Task[object] | None = None
@@ -78,6 +128,7 @@ def is_image_command(text: str) -> bool:
 def _mode_keyboard(request_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("⚙️ Настройки изображения", callback_data=f"img:settings:{request_id}")],
             [
                 InlineKeyboardButton(
                     "⚡ Быстро и некачественно",
@@ -94,6 +145,61 @@ def _mode_keyboard(request_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _settings_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🎨 Модель AI Horde", callback_data=f"img:models:{request_id}")],
+            [InlineKeyboardButton("⚡ Модель Pollinations", callback_data=f"img:pollinations:{request_id}")],
+            [InlineKeyboardButton("📐 Размер", callback_data=f"img:sizes:{request_id}")],
+            [InlineKeyboardButton("🚫 Негативный промпт", callback_data=f"img:input:{request_id}:negative_prompt")],
+            [InlineKeyboardButton("🎲 Seed", callback_data=f"img:input:{request_id}:seed")],
+            [InlineKeyboardButton("↩️ К выбору генератора", callback_data=f"img:back:{request_id}")],
+        ]
+    )
+
+
+def _model_keyboard(request_id: str, current: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if key == current else ''}{label}",
+                callback_data=f"img:set:{request_id}:model:{key}",
+            )
+        ]
+        for key, label in MODEL_PREFERENCES.items()
+    ]
+    rows.append([InlineKeyboardButton("↩️ К параметрам", callback_data=f"img:settings:{request_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _pollinations_keyboard(request_id: str, current: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if key == current else ''}{label}",
+                callback_data=f"img:set:{request_id}:pollinations_model:{key}",
+            )
+        ]
+        for key, label in POLLINATIONS_MODELS.items()
+    ]
+    rows.append([InlineKeyboardButton("↩️ К параметрам", callback_data=f"img:settings:{request_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _size_keyboard(request_id: str, current: tuple[int, int]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if size == current else ''}{label}",
+                callback_data=f"img:set:{request_id}:size:{label}",
+            )
+        ]
+        for label, size in IMAGE_SIZES.items()
+    ]
+    rows.append([InlineKeyboardButton("↩️ К параметрам", callback_data=f"img:settings:{request_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("✖️ Отменить генерацию", callback_data=f"img:cancel:{job_id}")]]
@@ -103,6 +209,7 @@ def _cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
 class ImageGenerationManager:
     def __init__(self) -> None:
         self.pending: dict[str, PendingImage] = {}
+        self.pending_setting_inputs: dict[tuple[int, int], PendingSettingInput] = {}
         self.jobs: dict[tuple[int, int], ImageJob] = {}
         self._generation_lock = asyncio.Lock()
         self._fast_lock = asyncio.Lock()
@@ -155,6 +262,27 @@ class ImageGenerationManager:
         if query is None or user is None:
             return
         action = query.data or ""
+        if action.startswith("img:settings:"):
+            await self._show_settings(update, action.rsplit(":", 1)[-1])
+            return
+        if action.startswith("img:models:"):
+            await self._show_models(update, action.rsplit(":", 1)[-1])
+            return
+        if action.startswith("img:pollinations:"):
+            await self._show_pollinations_models(update, action.rsplit(":", 1)[-1])
+            return
+        if action.startswith("img:sizes:"):
+            await self._show_sizes(update, action.rsplit(":", 1)[-1])
+            return
+        if action.startswith("img:input:"):
+            await self._request_setting_input(update, action)
+            return
+        if action.startswith("img:set:"):
+            await self._save_setting_from_callback(update, action)
+            return
+        if action.startswith("img:back:"):
+            await self._return_to_generator_menu(update, action.rsplit(":", 1)[-1])
+            return
         if action.startswith("img:cancel:"):
             await self._cancel_from_callback(update)
             return
@@ -197,6 +325,14 @@ class ImageGenerationManager:
         query_message = query.message
         if query_message is None:
             return
+        try:
+            settings = ImageSettings.from_record(
+                await database.get_image_settings(pending.chat_id)
+            )
+        except Exception:
+            logging.exception("Не удалось прочитать настройки генерации чата %s.", pending.chat_id)
+            await query.answer("Не удалось прочитать настройки изображения.", show_alert=True)
+            return
         job_id = uuid.uuid4().hex
         status_text = self._status_text(
             "Pollinations" if mode == "fast" else "AI Horde",
@@ -220,6 +356,8 @@ class ImageGenerationManager:
             chat_id=pending.chat_id,
             status_message_id=status_message.message_id,
             bot=context.bot,
+            settings=settings,
+            seed=settings.seed or str(random.randint(1, 99_999_999)),
         )
         self.jobs[job_key] = job
         job.task = context.application.create_task(
@@ -228,12 +366,293 @@ class ImageGenerationManager:
             name=f"image-generation-{job_id}",
         )
         logging.info(
-            "Запущена генерация изображения job_id=%s provider=%s chat_id=%s user_id=%s.",
+            "Запущена генерация изображения job_id=%s provider=%s chat_id=%s user_id=%s settings=%sx%s model=%s.",
             job_id,
             mode,
             pending.chat_id,
             pending.owner_id,
+            settings.width,
+            settings.height,
+            settings.model_preference,
         )
+
+    def _pending_for_callback(
+        self,
+        update: Update,
+        request_id: str,
+    ) -> PendingImage | None:
+        pending = self.pending.get(request_id)
+        message = update.callback_query.message if update.callback_query else None
+        user = update.effective_user
+        chat = update.effective_chat
+        if (
+            pending is None
+            or message is None
+            or user is None
+            or chat is None
+            or message.chat_id != pending.chat_id
+            or (chat.type == ChatType.PRIVATE and pending.owner_id != user.id)
+        ):
+            return None
+        return pending
+
+    async def _show_settings(self, update: Update, request_id: str) -> None:
+        query = update.callback_query
+        pending = self._pending_for_callback(update, request_id)
+        if query is None:
+            return
+        if pending is None:
+            await query.answer("Запрос настроек устарел.", show_alert=True)
+            return
+        try:
+            settings = ImageSettings.from_record(
+                await database.get_image_settings(pending.chat_id)
+            )
+        except Exception:
+            logging.exception("Не удалось прочитать настройки чата %s.", pending.chat_id)
+            await query.answer("Не удалось загрузить настройки.", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                self._settings_description(settings),
+                reply_markup=_settings_keyboard(request_id),
+            )
+        except TelegramError:
+            logging.exception("Не удалось показать меню настроек чата %s.", pending.chat_id)
+
+    async def _show_models(self, update: Update, request_id: str) -> None:
+        query = update.callback_query
+        pending = self._pending_for_callback(update, request_id)
+        if query is None:
+            return
+        if pending is None:
+            await query.answer("Запрос настроек устарел.", show_alert=True)
+            return
+        try:
+            settings = await database.get_image_settings(pending.chat_id)
+            preference = str(settings["model_preference"])
+        except Exception:
+            logging.exception("Не удалось загрузить предпочтение модели чата %s.", pending.chat_id)
+            await query.answer("Не удалось загрузить модели.", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                "Выбери предпочтение модели. Юбара ищет только аниме-модели; если "
+                "подходящих сейчас нет, AI Horde выберет доступную сам.",
+                reply_markup=_model_keyboard(request_id, preference),
+            )
+        except TelegramError:
+            logging.exception("Не удалось показать модели для чата %s.", pending.chat_id)
+
+    async def _show_sizes(self, update: Update, request_id: str) -> None:
+        query = update.callback_query
+        pending = self._pending_for_callback(update, request_id)
+        if query is None:
+            return
+        if pending is None:
+            await query.answer("Запрос настроек устарел.", show_alert=True)
+            return
+        try:
+            settings = await database.get_image_settings(pending.chat_id)
+            current = (int(settings["width"]), int(settings["height"]))
+        except Exception:
+            logging.exception("Не удалось загрузить размер изображения чата %s.", pending.chat_id)
+            await query.answer("Не удалось загрузить размеры.", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                "Выбери размер изображения:",
+                reply_markup=_size_keyboard(request_id, current),
+            )
+        except TelegramError:
+            logging.exception("Не удалось показать размеры для чата %s.", pending.chat_id)
+
+    async def _show_pollinations_models(self, update: Update, request_id: str) -> None:
+        query = update.callback_query
+        pending = self._pending_for_callback(update, request_id)
+        if query is None:
+            return
+        if pending is None:
+            await query.answer("Запрос настроек устарел.", show_alert=True)
+            return
+        try:
+            settings = await database.get_image_settings(pending.chat_id)
+            current = str(settings["pollinations_model"])
+        except Exception:
+            logging.exception("Не удалось загрузить модель Pollinations чата %s.", pending.chat_id)
+            await query.answer("Не удалось загрузить настройки.", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                "Выбери модель Pollinations:",
+                reply_markup=_pollinations_keyboard(request_id, current),
+            )
+        except TelegramError:
+            logging.exception("Не удалось показать модели Pollinations для чата %s.", pending.chat_id)
+
+    async def _request_setting_input(self, update: Update, action: str) -> None:
+        query = update.callback_query
+        user = update.effective_user
+        parts = action.split(":")
+        if len(parts) != 4:
+            if query is not None:
+                await query.answer("Некорректный запрос настройки.", show_alert=True)
+            return
+        _, _, request_id, setting = parts
+        pending = self._pending_for_callback(update, request_id)
+        if query is None:
+            return
+        if (
+            pending is None
+            or user is None
+            or setting not in ("negative_prompt", "seed")
+        ):
+            await query.answer("Запрос настроек устарел.", show_alert=True)
+            return
+        self.pending_setting_inputs[(pending.chat_id, user.id)] = PendingSettingInput(
+            request_id=request_id,
+            setting=setting,
+        )
+        label = "негативный промпт (до 500 символов)" if setting == "negative_prompt" else "числовой seed или /random"
+        await query.answer()
+        await query.edit_message_text(
+            f"Отправь {label}. Отправь /clear, чтобы очистить негативный промпт."
+            if setting == "negative_prompt"
+            else f"Отправь {label}.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Отмена", callback_data=f"img:settings:{request_id}")]]
+            ),
+        )
+
+    async def _save_setting_from_callback(self, update: Update, action: str) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        parts = action.split(":")
+        if len(parts) != 5:
+            await query.answer("Настройка задана некорректно.", show_alert=True)
+            return
+        _, _, request_id, setting, value = parts
+        pending = self._pending_for_callback(update, request_id)
+        if pending is None:
+            await query.answer("Запрос настроек устарел.", show_alert=True)
+            return
+        try:
+            if setting == "model":
+                await database.set_image_setting(pending.chat_id, "model_preference", value)
+            elif setting == "pollinations_model":
+                if value not in POLLINATIONS_MODELS:
+                    raise ValueError("Недопустимая модель Pollinations.")
+                await database.set_image_setting(pending.chat_id, "pollinations_model", value)
+            elif setting == "size":
+                if value not in IMAGE_SIZES:
+                    raise ValueError("Недопустимый размер изображения.")
+                width, height = (int(part) for part in value.split("x", 1))
+                await database.set_image_setting(pending.chat_id, "size", (width, height))
+            else:
+                await query.answer("Неизвестная настройка.", show_alert=True)
+                return
+            settings = ImageSettings.from_record(
+                await database.get_image_settings(pending.chat_id)
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить настройку изображения в чате %s.", pending.chat_id)
+            await query.answer("Не удалось сохранить настройку.", show_alert=True)
+            return
+        await query.answer("Сохранено для этого чата.")
+        try:
+            await query.edit_message_text(
+                self._settings_description(settings),
+                reply_markup=_settings_keyboard(request_id),
+            )
+        except TelegramError:
+            logging.exception("Не удалось обновить меню настроек чата %s.", pending.chat_id)
+
+    async def _return_to_generator_menu(self, update: Update, request_id: str) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        pending = self._pending_for_callback(update, request_id)
+        if pending is None:
+            await query.answer("Запрос устарел.", show_alert=True)
+            return
+        await query.answer()
+        await query.edit_message_text(
+            "Выбирай, каким способом я создам твою картину:",
+            reply_markup=_mode_keyboard(request_id),
+        )
+
+    @staticmethod
+    def _settings_description(settings: ImageSettings) -> str:
+        model = MODEL_PREFERENCES.get(settings.model_preference, MODEL_PREFERENCES["auto"])
+        negative = settings.negative_prompt or "не задан"
+        if len(negative) > 140:
+            negative = negative[:137] + "..."
+        seed = settings.seed or "случайный"
+        return (
+            "Настройки изображений для этого чата:\n"
+            f"AI Horde: {model}\n"
+            f"Pollinations: {POLLINATIONS_MODELS.get(settings.pollinations_model, 'Flux')}\n"
+            f"Размер: {settings.width}×{settings.height}\n"
+            f"Негативный промпт: {negative}\n"
+            f"Seed: {seed}"
+        )
+
+    async def consume_setting_input(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        del context
+        message = update.effective_message
+        user = update.effective_user
+        if message is None or user is None or message.text is None:
+            return False
+        key = (message.chat_id, user.id)
+        pending_input = self.pending_setting_inputs.pop(key, None)
+        if pending_input is None:
+            return False
+        text = message.text.strip()
+        setting = pending_input.setting
+        if setting == "negative_prompt":
+            if text.casefold() in ("/cancel", "/back"):
+                await message.reply_text("Настройка отменена.")
+                return True
+            value = "" if text.casefold() == "/clear" else text
+            if len(value) > 500:
+                self.pending_setting_inputs[key] = pending_input
+                await message.reply_text("Негативный промпт слишком длинный. Максимум 500 символов.")
+                return True
+        else:
+            if text.casefold() in ("/cancel", "/back"):
+                await message.reply_text("Настройка отменена.")
+                return True
+            if text.casefold() == "/random":
+                value = None
+            elif text.isdigit() and len(text) <= 10:
+                value = text
+            else:
+                self.pending_setting_inputs[key] = pending_input
+                await message.reply_text("Отправь целое число или /random.")
+                return True
+        try:
+            await database.set_image_setting(message.chat_id, setting, value)
+            settings = ImageSettings.from_record(
+                await database.get_image_settings(message.chat_id)
+            )
+            await message.reply_text(
+                "Настройка сохранена для этого чата.\n"
+                + self._settings_description(settings)
+            )
+        except Exception:
+            self.pending_setting_inputs[key] = pending_input
+            logging.exception("Не удалось сохранить настройку изображения для чата %s.", message.chat_id)
+            await message.reply_text("Не удалось сохранить настройку. Попробуй позже.")
+        return True
 
     async def _reserve_fast_start(self) -> int:
         async with self._fast_lock:
@@ -273,26 +692,35 @@ class ImageGenerationManager:
         job: ImageJob,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
+        generation_slot_acquired = False
         try:
-            if self._generation_lock.locked():
-                await self._edit_status(
-                    job,
-                    "Ожидаю, пока Юбара закончит генерацию для другого пользователя.",
-                )
-            async with self._generation_lock:
-                await self._edit_status(
-                    job,
-                    self._status_text(
-                        "Pollinations" if job.mode == "fast" else "AI Horde",
-                        job.started_at,
-                        "создаю изображение" if job.mode == "fast" else "обрабатываю запрос",
-                    ),
-                )
-                if job.mode == "fast":
-                    image, mime_type, model_name = await self._generate_pollinations(job)
-                else:
-                    image, mime_type, model_name = await self._generate_horde(job)
-                await self._publish_and_deliver(job, context, image, mime_type, model_name)
+            while not generation_slot_acquired:
+                try:
+                    await asyncio.wait_for(
+                        self._generation_lock.acquire(),
+                        timeout=STATUS_REFRESH_SECONDS,
+                    )
+                    generation_slot_acquired = True
+                except asyncio.TimeoutError:
+                    elapsed = max(0, int(time.monotonic() - job.started_at))
+                    await self._edit_status(
+                        job,
+                        f"Жду, пока Юбара закончит генерацию для другого пользователя.\n"
+                        f"В очереди бота: {elapsed // 60} мин {elapsed % 60} сек.",
+                    )
+            await self._edit_status(
+                job,
+                self._status_text(
+                    "Pollinations" if job.mode == "fast" else "AI Horde",
+                    job.started_at,
+                    "создаю изображение" if job.mode == "fast" else "обрабатываю запрос",
+                ),
+            )
+            if job.mode == "fast":
+                image, mime_type, model_name = await self._generate_pollinations(job)
+            else:
+                image, mime_type, model_name = await self._generate_horde(job)
+            await self._publish_and_deliver(job, context, image, mime_type, model_name)
         except asyncio.CancelledError:
             if job.mode == "horde" and job.remote_id:
                 await self._cancel_horde_request(job.remote_id)
@@ -321,29 +749,72 @@ class ImageGenerationManager:
                 active=False,
             )
         finally:
+            if generation_slot_acquired:
+                self._generation_lock.release()
             if self.jobs.get((job.chat_id, job.owner_id)) is job:
                 self.jobs.pop((job.chat_id, job.owner_id), None)
 
     @staticmethod
     def _safe_error_summary(error: Exception) -> str:
         if isinstance(error, httpx.HTTPStatusError):
+            response = error.response
+            try:
+                response_data = response.json()
+            except ValueError:
+                response_data = {}
+
+            error_code = (
+                response_data.get("rc")
+                if isinstance(response_data, dict)
+                else None
+            )
+            server_message = (
+                response_data.get("message")
+                if isinstance(response_data, dict)
+                else None
+            )
+            endpoint = response.request.url.path if response.request else "unknown"
+
+            if error_code == "RequestNotFound":
+                return (
+                    "AI Horde больше не находит задание: оно могло быть удалено "
+                    "сервисом за бездействие (RequestNotFound, HTTP 404; "
+                    f"endpoint {endpoint})."
+                )
+            if error_code == "RequestExpired":
+                return (
+                    "AI Horde просрочил задание (RequestExpired, "
+                    f"HTTP {response.status_code}; endpoint {endpoint})."
+                )
+
+            details = ""
+            if isinstance(error_code, str) and error_code:
+                details += f"; код {error_code}"
+            if isinstance(server_message, str) and server_message:
+                safe_message = re.sub(r"https?://\S+", "[URL скрыт]", server_message)
+                details += f"; ответ сервиса: {safe_message[:180]}"
             return (
-                f"HTTP {error.response.status_code} "
-                f"{error.response.reason_phrase}"
-            )[:300]
+                f"HTTP {response.status_code} {response.reason_phrase} "
+                f"(endpoint {endpoint}{details})"
+            )[:500]
         if isinstance(error, httpx.RequestError):
             return f"Сетевая ошибка ({type(error).__name__})."
         return f"{type(error).__name__}: {str(error)[:250]}"
 
     async def _generate_pollinations(self, job: ImageJob) -> tuple[bytes, str, str]:
-        url = f"{POLLINATIONS_URL}/{quote(job.prompt, safe='')}"
+        prompt = f"{ANIME_PROMPT_PREFIX}{job.prompt}"
+        url = f"{POLLINATIONS_URL}/{quote(prompt, safe='')}"
         params = {
-            "width": 768,
-            "height": 1024,
+            "model": job.settings.pollinations_model,
+            "width": job.settings.width,
+            "height": job.settings.height,
             "nologo": "true",
             "enhance": "true",
             "private": "true",
+            "seed": job.seed,
         }
+        if job.settings.negative_prompt:
+            params["negative"] = job.settings.negative_prompt
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=20.0)) as client:
             request_task = asyncio.create_task(
                 client.get(url, params=params, headers={"User-Agent": CLIENT_AGENT})
@@ -384,22 +855,32 @@ class ImageGenerationManager:
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=15.0)) as client:
-            models = await self._available_anime_models(client, headers, job)
+            models = await self._available_anime_models(
+                client,
+                headers,
+                job,
+                job.settings.model_preference,
+            )
+            prompt = f"{ANIME_PROMPT_PREFIX}{job.prompt}"
+            if job.settings.negative_prompt:
+                prompt += f" ### {job.settings.negative_prompt}"
             payload = {
-                "prompt": job.prompt,
+                "prompt": prompt,
                 "params": {
-                    "width": 768,
-                    "height": 1024,
+                    "width": job.settings.width,
+                    "height": job.settings.height,
                     "steps": 25,
                     "cfg_scale": 7.0,
+                    "seed": job.seed,
                     "n": 1,
                 },
-                "models": [models[0]],
                 "nsfw": False,
                 "censor_nsfw": True,
                 "trusted_workers": False,
-                "shared": False,
+                "r2": True,
             }
+            if models:
+                payload["models"] = [models[0]]
             response = await client.post(
                 f"{AI_HORDE_URL}/generate/async",
                 headers=headers,
@@ -448,7 +929,10 @@ class ImageGenerationManager:
                 raise RuntimeError("AI Horde завершил задание без изображения.")
             generated = generations[0]
             image_source = generated.get("img")
-            model_name = str(generated.get("model") or models[0])
+            model_name = str(
+                generated.get("model")
+                or (models[0] if models else "AI Horde")
+            )
             if not isinstance(image_source, str) or not image_source:
                 raise RuntimeError("AI Horde вернул некорректную ссылку на изображение.")
             if image_source.startswith("data:image/"):
@@ -479,6 +963,7 @@ class ImageGenerationManager:
         client: httpx.AsyncClient,
         headers: dict[str, str],
         job: ImageJob,
+        preference: str,
     ) -> list[str]:
         await self._edit_status(
             job,
@@ -506,7 +991,23 @@ class ImageGenerationManager:
             and "hentai" not in item["name"].casefold()
         ]
         if not anime_models:
-            raise RuntimeError("Сейчас в AI Horde нет доступных аниме-моделей с воркерами.")
+            logging.warning(
+                "В AI Horde нет доступных аниме-моделей (job_id=%s); отдаю выбор модели сервису.",
+                job.job_id,
+            )
+            return []
+        preferred_markers = (
+            ("animagine", "anime", "anything")
+            if preference == "auto"
+            else (preference,)
+        )
+        for marker in preferred_markers:
+            preferred_models = [
+                item for item in anime_models if marker in item["name"].casefold()
+            ]
+            if preferred_models:
+                anime_models = preferred_models
+                break
         anime_models.sort(
             key=lambda item: (
                 float(item.get("performance") or 0),
