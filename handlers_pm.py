@@ -18,9 +18,11 @@ from telegram.ext import (
 )
 
 import database
-from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, MAX_HISTORY_SIZE
+from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, SUMMARY_HISTORY_LIMIT
+from duel import handle_duel_challenge
 from images import extract_image_request, image_manager
 from llm import build_prompt, generate_reply, is_summary_request, parse_meta
+from reactions import maybe_react
 
 ADMIN_MENU, WAIT_ADD_GROUP, WAIT_REMOVE_GROUP, WAIT_CREATE_KEY, WAIT_REVOKE_KEY = range(5)
 WAIT_KEY_DURATION, WAIT_REVOKE_USER, WAIT_REVOKE_ADMIN = range(5, 8)
@@ -630,6 +632,9 @@ async def _private_dialog(
 
     await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
 
+    if await handle_duel_challenge(update, context):
+        return
+
     if message_text.strip().casefold() == "дэл":
         replied = message.reply_to_message
         if replied and replied.from_user and replied.from_user.id == context.bot.id:
@@ -668,9 +673,14 @@ async def _private_dialog(
         if is_image_request:
             await image_manager.offer(update, context, image_prompt)
             return
-        history = await database.get_recent_history(
-            message.chat_id,
-            MAX_HISTORY_SIZE if summary else DEFAULT_CONTEXT_SIZE,
+        history = (
+            await database.get_history_for_summary(
+                message.chat_id,
+                hours=12,
+                limit=SUMMARY_HISTORY_LIMIT,
+            )
+            if summary
+            else await database.get_recent_history(message.chat_id, DEFAULT_CONTEXT_SIZE)
         )
         replied_data = None
         replied = message.reply_to_message
@@ -688,6 +698,7 @@ async def _private_dialog(
             display_name=user.first_name or user.username or str(user_id),
             current_message=message_text,
             summary=summary,
+            current_message_id=message.message_id,
             replied_message=replied_data,
         )
     except Exception:
@@ -699,21 +710,16 @@ async def _private_dialog(
         await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
     except TelegramError:
         logging.warning("Не удалось показать typing action в личном чате", exc_info=True)
-    answer, metadata = parse_meta(await generate_reply(prompt, summary))
+    answer, _ = parse_meta(await generate_reply(prompt, summary))
     if not answer:
         answer = "Чего уставился? Я просто немного смутилась..."
-    reaction = metadata.get("reaction") if metadata else None
-    if isinstance(reaction, str) and reaction in AVAILABLE_REACTIONS and random.random() < 0.15:
-        try:
-            await message.set_reaction(reaction=[ReactionTypeEmoji(reaction)])
-        except TelegramError:
-            logging.exception("Не удалось установить META-реакцию в личном чате")
     try:
         sent = await message.reply_text(answer)
     except TelegramError:
         logging.exception("Не удалось ответить в личном чате")
         return
     await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
+    await maybe_react(message)
     try:
         await database.save_message(
             message.chat_id,

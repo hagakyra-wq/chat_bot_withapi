@@ -13,11 +13,15 @@ from telegram.ext import ContextTypes
 import database
 from config import (
     AVAILABLE_REACTIONS,
+    DEFAULT_CONTEXT_SIZE,
     KNOWN_PEOPLE_TRIGGERS,
+    SUMMARY_HISTORY_LIMIT,
     UNKNOWN_GROUP_NOTICE_SECONDS,
 )
+from duel import handle_duel_challenge
 from images import extract_image_request, image_manager, is_image_command
 from llm import build_prompt, generate_reply, is_called, is_summary_request, parse_meta
+from reactions import maybe_react
 
 UNKNOWN_GROUP_NOTICE = (
     "Если хотите воспользоваться функциями бота, обратитесь за помощью "
@@ -73,7 +77,6 @@ async def _apply_meta(
     *,
     group_id: int,
     author_id: int,
-    message: object,
 ) -> None:
     if not metadata:
         return
@@ -97,13 +100,6 @@ async def _apply_meta(
                 group_id,
             )
             target_id = -1
-
-    reaction = metadata.get("reaction")
-    if isinstance(reaction, str) and reaction in AVAILABLE_REACTIONS and random.random() < 0.15:
-        try:
-            await message.set_reaction(reaction=[ReactionTypeEmoji(reaction)])
-        except TelegramError:
-            logging.exception("Telegram не установил реакцию META")
 
     if target_id == -1:
         return
@@ -192,6 +188,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logging.exception("Не удалось установить реакцию командой в группе %s", group_id)
         return
 
+    if await handle_duel_challenge(update, context):
+        return
+
     if text.strip().casefold() == "дэл" and replied_to_bot:
         try:
             await message.reply_to_message.delete()
@@ -230,9 +229,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     summary = is_summary_request(text)
     try:
-        history = await database.get_recent_history(
-            group_id,
-            100 if summary else 12,
+        history = (
+            await database.get_history_for_summary(
+                group_id,
+                hours=12,
+                limit=SUMMARY_HISTORY_LIMIT,
+            )
+            if summary
+            else await database.get_recent_history(group_id, DEFAULT_CONTEXT_SIZE)
         )
         replied = message.reply_to_message
         replied_data = None
@@ -254,6 +258,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             callsign=person["callsign"],
             current_message=text,
             summary=summary,
+            current_message_id=message.message_id,
             replied_message=replied_data,
             participants=participants,
         )
@@ -272,7 +277,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         answer = "Чего уставился? Я просто немного смутилась..."
 
     try:
-        await _apply_meta(metadata, group_id=group_id, author_id=user.id, message=message)
+        await _apply_meta(metadata, group_id=group_id, author_id=user.id)
     except Exception:
         logging.exception("Ошибка обработки META в группе %s", group_id)
 
@@ -297,4 +302,37 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except Exception:
             logging.exception("Не удалось сохранить ответ бота в истории группы %s", group_id)
+        await maybe_react(message)
         await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
+
+
+async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if (
+        message is None
+        or message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP)
+        or not message.new_chat_members
+    ):
+        return
+    try:
+        if not await database.is_group_allowed(message.chat_id):
+            return
+    except Exception:
+        logging.exception("Не удалось проверить доступ группы %s для приветствия.", message.chat_id)
+        return
+
+    names = [
+        member.first_name or member.username or "новый участник"
+        for member in message.new_chat_members
+        if not member.is_bot
+    ]
+    if not names:
+        return
+    welcome = ", ".join(names)
+    try:
+        await message.reply_text(
+            f"Добро пожаловать, {welcome}! Устраивайтесь поудобнее — "
+            "Юбара милостиво разрешает вам здесь освоиться."
+        )
+    except TelegramError:
+        logging.exception("Не удалось поприветствовать новых участников группы %s.", message.chat_id)

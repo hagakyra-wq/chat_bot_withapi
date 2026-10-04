@@ -7,6 +7,7 @@ import sqlite3
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +15,10 @@ import aiosqlite
 
 from config import (
     DATABASE_BACKUP_PATH,
+    DATABASE_ARCHIVE_DIR,
     DATABASE_PATH,
     MAX_TOTAL_MESSAGES_PER_CHAT,
+    DATABASE_SHARD_THRESHOLD_BYTES,
 )
 
 _write_lock = asyncio.Lock()
@@ -95,6 +98,12 @@ async def initialize() -> None:
                     negative_prompt TEXT NOT NULL DEFAULT '3d, photorealistic, realistic, 3d render, bad anatomy, bad hands',
                     seed TEXT
                 );
+                CREATE TABLE IF NOT EXISTS duel_players (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    balance_cents INTEGER NOT NULL DEFAULT 500,
+                    last_mined_on TEXT NOT NULL
+                );
                 CREATE TRIGGER IF NOT EXISTS dirty_image_settings_insert
                 AFTER INSERT ON image_settings BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
@@ -102,6 +111,16 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_image_settings_update
                 AFTER UPDATE ON image_settings BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_duel_players_insert
+                AFTER INSERT ON duel_players BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_duel_players_update
+                AFTER UPDATE ON duel_players BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -473,23 +492,270 @@ async def save_message(
                 )
             await db.commit()
         _record_write()
+        await _archive_messages_if_needed()
 
 
 async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, int, str]]:
+    rows = await _get_message_rows(chat_id, max(1, limit))
+    rows.sort(key=lambda row: int(row["id"]), reverse=True)
+    rows = rows[:max(1, limit)]
+    return [
+        (int(row["message_id"]), row["sender_name"], int(row["user_id"]), row["text"])
+        for row in reversed(rows)
+    ]
+
+
+async def get_history_for_summary(
+    chat_id: int,
+    *,
+    hours: int = 12,
+    limit: int = 300,
+) -> list[tuple[int, str, int, str]]:
+    rows = await _get_message_rows(chat_id, max(1, limit), hours=hours)
+    rows.sort(key=lambda row: int(row["id"]), reverse=True)
+    rows = rows[:max(1, limit)]
+    return [
+        (int(row["message_id"]), row["sender_name"], int(row["user_id"]), row["text"])
+        for row in reversed(rows)
+    ]
+
+
+async def _get_message_rows(
+    chat_id: int,
+    per_database_limit: int,
+    *,
+    hours: int | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    query = (
+        "SELECT id, message_id, sender_name, user_id, text FROM messages "
+        "WHERE chat_id = ? "
+    )
+    params: tuple[object, ...] = (chat_id,)
+    if hours is not None:
+        query += "AND created_at >= datetime('now', ?) "
+        params += (f"-{max(1, hours)} hours",)
+    query += "ORDER BY id DESC LIMIT ?"
+    params += (per_database_limit,)
+
     async with _connect() as db:
-        cursor = await db.execute(
-            """
-            SELECT message_id, sender_name, user_id, text
-            FROM messages WHERE chat_id = ?
-            ORDER BY id DESC LIMIT ?
-            """,
-            (chat_id, max(1, limit)),
-        )
-        rows = await cursor.fetchall()
-        return [
-            (int(row["message_id"]), row["sender_name"], int(row["user_id"]), row["text"])
-            for row in reversed(rows)
-        ]
+        cursor = await db.execute(query, params)
+        rows.extend(dict(row) for row in await cursor.fetchall())
+
+    for archive_path in _message_archive_paths():
+        try:
+            archive = await aiosqlite.connect(archive_path)
+            archive.row_factory = aiosqlite.Row
+            try:
+                cursor = await archive.execute(query, params)
+                rows.extend(dict(row) for row in await cursor.fetchall())
+            finally:
+                await archive.close()
+        except (OSError, sqlite3.Error):
+            logging.exception("Не удалось прочитать архив сообщений %s.", archive_path)
+    return rows
+
+
+def _utc7_date() -> date:
+    return datetime.now(timezone(timedelta(hours=7))).date()
+
+
+async def get_duel_balance(user_id: int, username: str | None) -> int:
+    today = _utc7_date()
+    today_text = today.isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO duel_players(user_id, username, balance_cents, last_mined_on)
+                VALUES (?, ?, 500, ?)
+                """,
+                (user_id, username, today_text),
+            )
+            changed = cursor.rowcount > 0
+            cursor = await db.execute(
+                "SELECT balance_cents, last_mined_on FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError(f"Не удалось создать игровой профиль user_id={user_id}.")
+            last_mined = datetime.fromisoformat(str(row["last_mined_on"])).date()
+            elapsed_days = max(0, (today - last_mined).days)
+            balance = int(row["balance_cents"]) + elapsed_days * 20
+            if elapsed_days:
+                await db.execute(
+                    """
+                    UPDATE duel_players
+                    SET balance_cents = ?, last_mined_on = ?, username = ?
+                    WHERE user_id = ?
+                    """,
+                    (balance, today_text, username, user_id),
+                )
+                changed = True
+            elif username is not None:
+                cursor = await db.execute(
+                    "UPDATE duel_players SET username = ? WHERE user_id = ? AND username IS NOT ?",
+                    (username, user_id, username),
+                )
+                changed = changed or cursor.rowcount > 0
+            await db.commit()
+        if changed:
+            _record_write()
+    return balance
+
+
+async def apply_duel_result(user_id: int, username: str | None, delta_cents: int) -> int:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE duel_players
+                SET balance_cents = MAX(0, balance_cents + ?), username = ?
+                WHERE user_id = ?
+                """,
+                (delta_cents, username, user_id),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError(f"Не найден игровой профиль user_id={user_id}.")
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+        _record_write()
+    if row is None:
+        raise sqlite3.DatabaseError(f"Не удалось прочитать баланс user_id={user_id}.")
+    return int(row["balance_cents"])
+
+
+async def mine_duel_coins_daily() -> int:
+    today = _utc7_date()
+    today_text = today.isoformat()
+    mined_players = 0
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "SELECT user_id, balance_cents, last_mined_on FROM duel_players"
+            )
+            players = await cursor.fetchall()
+            for player in players:
+                last_mined = datetime.fromisoformat(str(player["last_mined_on"])).date()
+                elapsed_days = max(0, (today - last_mined).days)
+                if elapsed_days == 0:
+                    continue
+                await db.execute(
+                    """
+                    UPDATE duel_players
+                    SET balance_cents = ?, last_mined_on = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        int(player["balance_cents"]) + elapsed_days * 20,
+                        today_text,
+                        int(player["user_id"]),
+                    ),
+                )
+                mined_players += 1
+            await db.commit()
+        if mined_players:
+            _record_write()
+    return mined_players
+
+
+def _message_archive_paths() -> list[Path]:
+    return sorted(DATABASE_ARCHIVE_DIR.glob("messages_*.db")) if DATABASE_ARCHIVE_DIR.exists() else []
+
+
+async def rotate_messages_if_needed() -> bool:
+    async with _write_lock:
+        rotated = await _archive_messages_if_needed()
+        if rotated:
+            _record_write()
+        return rotated
+
+
+async def _archive_messages_if_needed() -> bool:
+    if not DATABASE_PATH.is_file() or DATABASE_PATH.stat().st_size < DATABASE_SHARD_THRESHOLD_BYTES:
+        return False
+    DATABASE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_paths = _message_archive_paths()
+    archive_path = DATABASE_ARCHIVE_DIR / f"messages_{len(archive_paths) + 1:04d}.db"
+    if archive_path.exists():
+        raise FileExistsError(f"Архив БД уже существует: {archive_path}")
+    async with _connect() as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM messages")
+        message_count = int((await cursor.fetchone())[0])
+        if message_count == 0:
+            logging.warning(
+                "БД достигла порога %.2f МБ, но таблица messages пуста; ротация пропущена.",
+                DATABASE_SHARD_THRESHOLD_BYTES / (1024 * 1024),
+            )
+            return False
+        attached = False
+        committed = False
+        try:
+            await db.execute("ATTACH DATABASE ? AS message_archive", (str(archive_path),))
+            attached = True
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                CREATE TABLE message_archive.messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    sender_name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX message_archive.idx_messages_chat_id_id "
+                "ON messages(chat_id, id)"
+            )
+            await db.execute(
+                """
+                INSERT INTO message_archive.messages
+                    (id, chat_id, user_id, message_id, sender_name, text, created_at)
+                SELECT id, chat_id, user_id, message_id, sender_name, text, created_at
+                FROM main.messages
+                """
+            )
+            cursor = await db.execute("SELECT COUNT(*) FROM message_archive.messages")
+            archived_count = int((await cursor.fetchone())[0])
+            if archived_count != message_count:
+                raise sqlite3.DatabaseError(
+                    f"Архивировано {archived_count} сообщений вместо {message_count}."
+                )
+            await db.execute("DELETE FROM main.messages")
+            await db.commit()
+            committed = True
+            await db.execute("DETACH DATABASE message_archive")
+            attached = False
+            try:
+                await db.execute("VACUUM main")
+            except sqlite3.Error:
+                logging.exception(
+                    "Архив %s сохранён, но не удалось уменьшить размер активной БД.",
+                    archive_path.name,
+                )
+            logging.info(
+                "Создан архив сообщений %s: %s записей; активная БД освобождена.",
+                archive_path.name,
+                archived_count,
+            )
+            return True
+        except Exception:
+            if not committed:
+                await db.rollback()
+            if attached:
+                await db.execute("DETACH DATABASE message_archive")
+            if not committed:
+                archive_path.unlink(missing_ok=True)
+            raise
 
 
 async def get_authorized_user(user_id: int) -> dict[str, Any] | None:
@@ -683,6 +949,56 @@ async def get_meta(key: str) -> str | None:
         cursor = await db.execute("SELECT value FROM meta WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return str(row["value"]) if row else None
+
+
+def list_message_archives() -> list[Path]:
+    return _message_archive_paths()
+
+
+async def get_message_archive_file_id(filename: str) -> str | None:
+    key = f"message_archive_file_id:{Path(filename).name}"
+    return await get_meta(key)
+
+
+async def set_message_archive_backup_meta(
+    filename: str,
+    file_id: str,
+    message_id: int,
+) -> None:
+    archive_name = Path(filename).name
+    if not archive_name.startswith("messages_") or not archive_name.endswith(".db"):
+        raise ValueError("Недопустимое имя архива сообщений.")
+    async with _write_lock:
+        async with _connect() as db:
+            await db.executemany(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    (f"message_archive_file_id:{archive_name}", file_id),
+                    (f"message_archive_message_id:{archive_name}", str(message_id)),
+                ),
+            )
+            await db.commit()
+        _record_write()
+
+
+def get_message_archive_manifest(path: str | Path) -> dict[str, str]:
+    file_path = Path(path)
+    connection = sqlite3.connect(f"file:{file_path.as_posix()}?mode=ro", uri=True)
+    try:
+        rows = connection.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'message_archive_file_id:%'"
+        ).fetchall()
+    except sqlite3.Error:
+        logging.exception("Не удалось прочитать перечень архивов из %s.", file_path)
+        raise
+    finally:
+        connection.close()
+    return {
+        str(key).removeprefix("message_archive_file_id:"): str(file_id)
+        for key, file_id in rows
+        if str(key).removeprefix("message_archive_file_id:").startswith("messages_")
+    }
 
 
 async def set_backup_meta(file_id: str, message_id: int) -> None:

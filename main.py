@@ -5,8 +5,9 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from telegram import Update
 from telegram.error import TelegramError
@@ -30,12 +31,13 @@ from config import (
     BACKUP_CHANNEL_ID,
     BACKUP_INTERVAL_SECONDS,
     BACKUP_MAX_DOWNLOAD_SIZE,
+    DATABASE_ARCHIVE_DIR,
     DATABASE_BACKUP_PATH,
     DATABASE_PATH,
     PORT,
     TELEGRAM_TOKEN,
 )
-from handlers_group import on_group_message
+from handlers_group import on_group_message, on_new_members
 from handlers_pm import break_command, build_admin_conversation_handler, on_private_message
 from images import on_image_callback, stop_image_jobs
 
@@ -72,7 +74,9 @@ async def _restore_from_telegram(bot: object) -> tuple[str, int] | None:
         if not valid:
             logging.error("Закреплённый в канале файл не прошёл PRAGMA integrity_check.")
             return None
+        staged_archives = await _stage_message_archives(bot, temporary_path)
         await asyncio.to_thread(database.replace_database_from, temporary_path)
+        await _install_staged_archives(staged_archives)
         database.reset_backup_state()
         logging.info("Рабочая БД восстановлена из закреплённого файла канала.")
         return document.file_id, pinned_message.message_id
@@ -94,11 +98,13 @@ async def _restore_database(bot: object) -> tuple[str, int] | None:
 
     if await asyncio.to_thread(database.validate_sqlite, DATABASE_BACKUP_PATH):
         try:
+            staged_archives = await _stage_message_archives(bot, DATABASE_BACKUP_PATH)
             await asyncio.to_thread(database.replace_database_from, DATABASE_BACKUP_PATH)
+            await _install_staged_archives(staged_archives)
             database.reset_backup_state()
             logging.info("Рабочая БД восстановлена из локального database_backup.db.")
             return None
-        except (OSError, ValueError, sqlite3.Error):
+        except (TelegramError, OSError, ValueError, sqlite3.Error):
             logging.exception("Не удалось использовать локальный database_backup.db.")
 
     if await asyncio.to_thread(database.validate_sqlite, DATABASE_PATH):
@@ -117,6 +123,56 @@ async def _restore_database(bot: object) -> tuple[str, int] | None:
     return None
 
 
+async def _stage_message_archives(
+    bot: object,
+    manifest_path: str | os.PathLike[str],
+) -> list[tuple[Path, Path]]:
+    manifest = await asyncio.to_thread(database.get_message_archive_manifest, manifest_path)
+    if not manifest:
+        return []
+    DATABASE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for filename, file_id in sorted(manifest.items()):
+            if (
+                not filename.startswith("messages_")
+                or Path(filename).name != filename
+                or not filename.endswith(".db")
+            ):
+                raise ValueError(f"Недопустимое имя архива в manifest: {filename!r}")
+            target = DATABASE_ARCHIVE_DIR / filename
+            temporary = target.with_name(target.name + ".restore.tmp")
+            staged.append((temporary, target))
+            telegram_file = await bot.get_file(file_id)
+            if telegram_file.file_size and telegram_file.file_size > BACKUP_MAX_DOWNLOAD_SIZE:
+                raise ValueError(f"Архив {filename} превышает лимит Telegram на скачивание.")
+            await telegram_file.download_to_drive(custom_path=str(temporary))
+            if not await asyncio.to_thread(database.validate_sqlite, temporary):
+                raise sqlite3.DatabaseError(f"Архив сообщений повреждён: {filename}")
+    except Exception:
+        for temporary, _target in staged:
+            temporary.unlink(missing_ok=True)
+        raise
+    return staged
+
+
+async def _install_staged_archives(staged: list[tuple[Path, Path]]) -> None:
+    staged_names = {target.name for _temporary, target in staged}
+    orphan_dir = DATABASE_ARCHIVE_DIR / "orphaned"
+    for archive_path in database.list_message_archives():
+        if archive_path.name in staged_names:
+            continue
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        orphan_path = orphan_dir / archive_path.name
+        suffix = 1
+        while orphan_path.exists():
+            orphan_path = orphan_dir / f"{archive_path.name}.{suffix}"
+            suffix += 1
+        await asyncio.to_thread(os.replace, archive_path, orphan_path)
+    for temporary, target in staged:
+        await asyncio.to_thread(os.replace, temporary, target)
+
+
 async def _post_init(application: Application) -> None:
     log_handler = install_channel_log_handler(application.bot)
     application.bot_data["channel_log_handler"] = log_handler
@@ -126,6 +182,7 @@ async def _post_init(application: Application) -> None:
     )
     restored_info = await _restore_database(application.bot)
     await database.initialize()
+    await database.rotate_messages_if_needed()
     if restored_info is not None:
         await database.set_backup_meta(*restored_info)
     if application.job_queue is None:
@@ -138,6 +195,11 @@ async def _post_init(application: Application) -> None:
         first=BACKUP_INTERVAL_SECONDS,
         name="database-backup",
     )
+    application.job_queue.run_daily(
+        _daily_duel_mining_job,
+        time=datetime_time(0, 5, tzinfo=timezone(timedelta(hours=7))),
+        name="daily-duel-mining",
+    )
     await send_channel_event(
         application.bot,
         "✅ Юбара запущена: polling и резервное копирование активны.",
@@ -146,6 +208,42 @@ async def _post_init(application: Application) -> None:
 
 async def _perform_backup(bot: object) -> None:
     try:
+        caption = "📅 Дата и время: " + datetime.now(
+            timezone(timedelta(hours=7))
+        ).strftime("%d.%m.%Y в %H:%M:%S")
+        for archive_path in database.list_message_archives():
+            if await database.get_message_archive_file_id(archive_path.name):
+                continue
+            archive_size = archive_path.stat().st_size
+            if archive_size >= BACKUP_MAX_DOWNLOAD_SIZE - 1024 * 1024:
+                logging.warning(
+                    "Архив %s приблизился к лимиту скачивания Telegram: %.2f МБ.",
+                    archive_path.name,
+                    archive_size / (1024 * 1024),
+                )
+            with archive_path.open("rb") as archive_file:
+                archived_message = await bot.send_document(
+                    chat_id=BACKUP_CHANNEL_ID,
+                    document=archive_file,
+                    filename=archive_path.name,
+                    caption=f"{caption}\n🗄 Архив сообщений: {archive_path.name}",
+                    disable_notification=True,
+                )
+            if archived_message.document is None:
+                raise RuntimeError(
+                    f"Telegram принял отправку архива {archive_path.name} без document."
+                )
+            await database.set_message_archive_backup_meta(
+                archive_path.name,
+                archived_message.document.file_id,
+                archived_message.message_id,
+            )
+            logging.info(
+                "Архив сообщений загружен в канал (file=%s, message_id=%s).",
+                archive_path.name,
+                archived_message.message_id,
+            )
+
         generation = await database.create_consistent_backup()
         if generation is None:
             logging.info("Бэкап пропущен: после последней синхронизации записей не было.")
@@ -153,13 +251,10 @@ async def _perform_backup(bot: object) -> None:
         size = DATABASE_BACKUP_PATH.stat().st_size
         if size > BACKUP_MAX_DOWNLOAD_SIZE:
             logging.warning(
-                "database_backup.db больше лимита скачивания Telegram: %.2f МБ.",
+                "database_backup.db приблизилась к лимиту скачивания Telegram: %.2f МБ.",
                 size / (1024 * 1024),
             )
         previous_message_id = await database.get_meta("backup_message_id")
-        caption = "📅 Дата и время: " + datetime.now(
-            timezone(timedelta(hours=7))
-        ).strftime("%d.%m.%Y в %H:%M:%S")
         with DATABASE_BACKUP_PATH.open("rb") as backup_file:
             sent_message = await bot.send_document(
                 chat_id=BACKUP_CHANNEL_ID,
@@ -198,6 +293,13 @@ async def _backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await _perform_backup(context.bot)
 
 
+async def _daily_duel_mining_job(_context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await database.mine_duel_coins_daily()
+    except Exception:
+        logging.exception("Не удалось начислить ежедневные игровые монеты.")
+
+
 async def _post_shutdown(application: Application) -> None:
     logging.info("Остановка: проверяю, требуется ли финальный бэкап.")
     await send_channel_event(application.bot, "⏹ Юбара останавливается; завершаю задачи и проверяю бэкап.")
@@ -231,6 +333,12 @@ def build_application() -> Application:
         CommandHandler("break", break_command, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(build_admin_conversation_handler())
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            on_new_members,
+        )
+    )
     application.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.TEXT, on_group_message)
     )
