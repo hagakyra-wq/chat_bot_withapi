@@ -20,7 +20,14 @@ from config import (
 )
 from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager, is_image_command
-from llm import build_prompt, generate_reply, is_called, is_summary_request, parse_meta
+from llm import (
+    build_prompt,
+    extract_reported_age,
+    generate_reply,
+    is_called,
+    is_summary_request,
+    parse_meta,
+)
 from message_deletion import handle_delete_bot_messages
 from reactions import maybe_react
 
@@ -421,6 +428,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     raw_answer = await generate_reply(prompt, summary)
     answer, metadata = parse_meta(raw_answer)
+    reported_age = extract_reported_age(text)
+    if reported_age is not None:
+        metadata = {**(metadata or {}), "target_user_id": user.id, "age": reported_age}
     if not answer:
         answer = "Чего уставился? Я просто немного смутилась..."
 
@@ -478,9 +488,18 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     welcome = ", ".join(names)
     try:
-        await message.reply_text(
+        sent = await message.reply_text(
             f"Добро пожаловать, {welcome}! Устраивайтесь поудобнее — "
             "Юбара милостиво разрешает вам здесь освоиться."
         )
+        await database.save_message(
+            message.chat_id,
+            context.bot.id,
+            sent.message_id,
+            "Юбара",
+            sent.text or "Приветствие новых участников",
+        )
     except TelegramError:
         logging.exception("Не удалось поприветствовать новых участников группы %s.", message.chat_id)
+    except Exception:
+        logging.exception("Не удалось сохранить приветствие в истории группы %s.", message.chat_id)

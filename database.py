@@ -671,7 +671,7 @@ async def get_recent_bot_message_ids(
 ) -> list[int]:
     if limit <= 0:
         return []
-    rows: list[tuple[str, int, int]] = []
+    rows: list[tuple[int, str, int]] = []
     database_paths = [DATABASE_PATH, *_message_archive_paths()]
     for database_path in database_paths:
         try:
@@ -682,13 +682,13 @@ async def get_recent_bot_message_ids(
                     SELECT message_id, created_at, id
                     FROM messages
                     WHERE chat_id = ? AND user_id = ?
-                    ORDER BY created_at DESC, message_id DESC, id DESC
+                    ORDER BY message_id DESC, created_at DESC, id DESC
                     LIMIT ?
                     """,
                     (chat_id, bot_user_id, min(limit, 2_147_483_647)),
                 )
                 rows.extend(
-                    (str(row[1]), int(row[0]), int(row[2]))
+                    (int(row[0]), str(row[1]), int(row[2]))
                     for row in await cursor.fetchall()
                 )
             finally:
@@ -703,7 +703,7 @@ async def get_recent_bot_message_ids(
     rows.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
     message_ids: list[int] = []
     seen: set[int] = set()
-    for _created_at, message_id, _row_id in rows:
+    for message_id, _created_at, _row_id in rows:
         if message_id in seen:
             continue
         seen.add(message_id)

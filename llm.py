@@ -20,6 +20,12 @@ from config import (
 )
 
 WORD_RE = re.compile(r"[a-zа-яё]+", re.IGNORECASE)
+_REPORTED_AGE_RE = re.compile(
+    r"(?<!\w)(?:мне\s+(?:(?:уже|исполнилось|стукнуло)\s+)?|"
+    r"мой\s+возраст\s*(?:[:=—-]\s*)?)"
+    r"(?P<age>\d{1,3})(?:\s*(?:лет|года?|год))?(?!\w)",
+    re.IGNORECASE,
+)
 META_CLEAN_RE = re.compile(r"\[META:\s*.*?(?:\]|$)", re.DOTALL | re.IGNORECASE)
 JSON_EXTRACT_RE = re.compile(r"\[META:\s*({.*?})\s*\]", re.DOTALL | re.IGNORECASE)
 
@@ -73,6 +79,14 @@ def is_called(text: str) -> bool:
 def is_summary_request(text: str) -> bool:
     normalized = text.casefold()
     return any(phrase.casefold() in normalized for phrase in SUMMARY_TRIGGERS)
+
+
+def extract_reported_age(text: str) -> int | None:
+    matches = list(_REPORTED_AGE_RE.finditer(text))
+    if not matches:
+        return None
+    age = int(matches[-1].group("age"))
+    return age if 1 <= age <= 120 else None
 
 
 def build_prompt(

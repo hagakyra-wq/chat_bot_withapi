@@ -21,7 +21,13 @@ import database
 from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, PROFILE_TRIGGERS
 from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager
-from llm import build_prompt, generate_reply, is_summary_request, parse_meta
+from llm import (
+    build_prompt,
+    extract_reported_age,
+    generate_reply,
+    is_summary_request,
+    parse_meta,
+)
 from message_deletion import handle_delete_bot_messages
 from reactions import maybe_react
 
@@ -815,6 +821,9 @@ async def _private_dialog(
     except TelegramError:
         logging.warning("Не удалось показать typing action в личном чате", exc_info=True)
     answer, metadata = parse_meta(await generate_reply(prompt, summary))
+    reported_age = extract_reported_age(message_text)
+    if reported_age is not None:
+        metadata = {**(metadata or {}), "target_user_id": user_id, "age": reported_age}
     try:
         await _apply_private_profile_meta(
             metadata,
