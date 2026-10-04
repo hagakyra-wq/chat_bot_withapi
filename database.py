@@ -664,6 +664,25 @@ async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, i
     ]
 
 
+async def load_chat_history(
+    chat_id: int,
+    *,
+    summary: bool,
+    limit: int,
+    hours: int = 12,
+) -> list[tuple[int, str, int, str]]:
+    try:
+        if summary:
+            return await get_history_for_summary(chat_id, hours=hours)
+        return await get_recent_history(chat_id, limit)
+    except Exception:
+        logging.exception(
+            "Не удалось загрузить историю чата %s; продолжаю без контекста.",
+            chat_id,
+        )
+        return []
+
+
 async def get_recent_bot_message_ids(
     chat_id: int,
     bot_user_id: int,

@@ -362,13 +362,10 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     summary = is_summary_request(text)
     try:
-        history = (
-            await database.get_history_for_summary(
-                group_id,
-                hours=12,
-            )
-            if summary
-            else await database.get_recent_history(group_id, DEFAULT_CONTEXT_SIZE)
+        history = await database.load_chat_history(
+            group_id,
+            summary=summary,
+            limit=DEFAULT_CONTEXT_SIZE,
         )
         replied = message.reply_to_message
         replied_data = None

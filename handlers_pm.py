@@ -784,13 +784,10 @@ async def _private_dialog(
         if is_image_request:
             await image_manager.offer(update, context, image_prompt)
             return
-        history = (
-            await database.get_history_for_summary(
-                message.chat_id,
-                hours=12,
-            )
-            if summary
-            else await database.get_recent_history(message.chat_id, DEFAULT_CONTEXT_SIZE)
+        history = await database.load_chat_history(
+            message.chat_id,
+            summary=summary,
+            limit=DEFAULT_CONTEXT_SIZE,
         )
         replied_data = None
         replied = message.reply_to_message
