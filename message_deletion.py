@@ -5,19 +5,27 @@ import re
 
 from telegram import Update
 from telegram.error import TelegramError
+from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
 import database
 
 _DELETE_COMMAND_RE = re.compile(
-    r"^\s*(?:юбара|юбари|юбару|yubara)[,\s:!-]+\s*дэл\s+(\d+)\s*$",
+    r"^\s*(?P<address>(?:юбара|юбари|юбару|yubara)[,\s:!-]+)?\s*"
+    r"(?:(?:дэл\s+(?P<legacy_count>\d+))|"
+    r"(?:(?:удали|удалить|сотри|стереть|убери)\s+"
+    r"(?:(?:последн\w*)\s+)?(?P<natural_count>\d+)?\s*"
+    r"(?:последних\s+)?сообщени\w*))\s*$",
     re.IGNORECASE,
 )
 
 
-def _requested_count(text: str) -> int | None:
+def _requested_count(text: str) -> tuple[int, bool] | None:
     match = _DELETE_COMMAND_RE.fullmatch(text)
-    return int(match.group(1)) if match else None
+    if match is None:
+        return None
+    count = match.group("legacy_count") or match.group("natural_count")
+    return int(count) if count else 1, match.group("address") is not None
 
 
 async def handle_delete_bot_messages(
@@ -27,8 +35,16 @@ async def handle_delete_bot_messages(
     message = update.effective_message
     if message is None or not message.text:
         return False
-    count = _requested_count(message.text)
-    if count is None:
+    request = _requested_count(message.text)
+    if request is None:
+        return False
+    count, addressed = request
+    replied_to_bot = (
+        message.reply_to_message is not None
+        and message.reply_to_message.from_user is not None
+        and message.reply_to_message.from_user.id == context.bot.id
+    )
+    if not addressed and message.chat.type != ChatType.PRIVATE and not replied_to_bot:
         return False
     if count <= 0:
         await message.reply_text("Укажи положительное количество сообщений.")
