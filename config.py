@@ -85,6 +85,16 @@ KNOWN_PEOPLE_TRIGGERS = (
     "что ты про нас знаешь",
 )
 
+PROFILE_TRIGGERS = (
+    "что ты знаешь обо мне",
+    "что знаешь обо мне",
+    "что ты обо мне знаешь",
+    "что обо мне знаешь",
+    "расскажи обо мне",
+    "мой профиль",
+    "профиль обо мне",
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",

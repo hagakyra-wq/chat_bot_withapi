@@ -512,6 +512,98 @@ async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, i
     ]
 
 
+async def get_recent_bot_message_ids(
+    chat_id: int,
+    bot_user_id: int,
+    limit: int,
+) -> list[int]:
+    if limit <= 0:
+        return []
+    rows: list[tuple[str, int, int]] = []
+    database_paths = [DATABASE_PATH, *_message_archive_paths()]
+    for database_path in database_paths:
+        try:
+            connection = await aiosqlite.connect(database_path)
+            try:
+                cursor = await connection.execute(
+                    """
+                    SELECT message_id, created_at, id
+                    FROM messages
+                    WHERE chat_id = ? AND user_id = ?
+                    ORDER BY created_at DESC, message_id DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, bot_user_id, min(limit, 2_147_483_647)),
+                )
+                rows.extend(
+                    (str(row[1]), int(row[0]), int(row[2]))
+                    for row in await cursor.fetchall()
+                )
+            finally:
+                await connection.close()
+        except (OSError, sqlite3.Error):
+            logging.exception(
+                "Не удалось найти сообщения бота в истории %s.",
+                database_path,
+            )
+            raise
+
+    rows.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    message_ids: list[int] = []
+    seen: set[int] = set()
+    for _created_at, message_id, _row_id in rows:
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        message_ids.append(message_id)
+        if len(message_ids) >= limit:
+            break
+    return message_ids
+
+
+async def delete_message_records(
+    chat_id: int,
+    user_id: int,
+    message_ids: list[int],
+) -> int:
+    if not message_ids:
+        return 0
+    placeholders = ",".join("?" for _ in message_ids)
+    total_deleted = 0
+    changed_archives: list[str] = []
+    async with _write_lock:
+        for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+            async with aiosqlite.connect(database_path) as db:
+                cursor = await db.execute(
+                    f"""
+                    DELETE FROM messages
+                    WHERE chat_id = ? AND user_id = ?
+                    AND message_id IN ({placeholders})
+                    """,
+                    (chat_id, user_id, *message_ids),
+                )
+                total_deleted += cursor.rowcount
+                await db.commit()
+            if database_path != DATABASE_PATH and cursor.rowcount:
+                changed_archives.append(database_path.name)
+
+        if changed_archives:
+            async with _connect() as db:
+                for filename in changed_archives:
+                    await db.executemany(
+                        "DELETE FROM meta WHERE key = ?",
+                        (
+                            (f"message_archive_file_id:{filename}",),
+                            (f"message_archive_message_id:{filename}",),
+                        ),
+                    )
+                await db.commit()
+
+        if total_deleted:
+            _record_write()
+    return total_deleted
+
+
 async def get_history_for_summary(
     chat_id: int,
     *,

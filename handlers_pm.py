@@ -22,6 +22,7 @@ from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE
 from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager
 from llm import build_prompt, generate_reply, is_summary_request, parse_meta
+from message_deletion import handle_delete_bot_messages
 from reactions import maybe_react
 
 ADMIN_MENU, WAIT_ADD_GROUP, WAIT_REMOVE_GROUP, WAIT_CREATE_KEY, WAIT_REVOKE_KEY = range(5)
@@ -635,6 +636,9 @@ async def _private_dialog(
     if await handle_duel_challenge(update, context):
         return
     if await handle_balance_request(update, context):
+        return
+
+    if await handle_delete_bot_messages(update, context):
         return
 
     if message_text.strip().casefold() == "дэл":

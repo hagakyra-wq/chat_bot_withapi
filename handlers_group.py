@@ -15,11 +15,13 @@ from config import (
     AVAILABLE_REACTIONS,
     DEFAULT_CONTEXT_SIZE,
     KNOWN_PEOPLE_TRIGGERS,
+    PROFILE_TRIGGERS,
     UNKNOWN_GROUP_NOTICE_SECONDS,
 )
 from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager, is_image_command
 from llm import build_prompt, generate_reply, is_called, is_summary_request, parse_meta
+from message_deletion import handle_delete_bot_messages
 from reactions import maybe_react
 
 UNKNOWN_GROUP_NOTICE = (
@@ -140,6 +142,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     group_id = message.chat_id
     text = message.text
+    normalized_text = text.casefold()
+    profile_request = any(phrase in normalized_text for phrase in PROFILE_TRIGGERS)
     command = _command_name(text)
     replied_to_bot = _is_reply_to_bot(message, context.bot.id)
     called = is_called(text)
@@ -152,7 +156,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if not allowed:
-        if called or replied_to_bot or mentioned or command:
+        if called or replied_to_bot or mentioned or command or profile_request:
             await _send_unknown_group_notice(message, group_id)
         return
 
@@ -185,6 +189,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except TelegramError:
             logging.exception("Не удалось установить реакцию командой в группе %s", group_id)
+        return
+
+    if await handle_delete_bot_messages(update, context):
         return
 
     if await handle_duel_challenge(update, context):
@@ -225,7 +232,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await image_manager.offer(update, context, image_prompt)
         return
 
-    if not (called or replied_to_bot or mentioned or command):
+    if not (called or replied_to_bot or mentioned or command or profile_request):
         return
 
     summary = is_summary_request(text)
@@ -247,8 +254,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 replied.from_user.id if replied.from_user else None,
                 replied.text,
             )
-        known_people = any(phrase in text.casefold() for phrase in KNOWN_PEOPLE_TRIGGERS)
-        participants = await database.get_group_users(group_id) if known_people else None
+        known_people = any(phrase in normalized_text for phrase in KNOWN_PEOPLE_TRIGGERS)
+        participants = (
+            [person]
+            if profile_request
+            else await database.get_group_users(group_id)
+            if known_people
+            else None
+        )
         prompt = build_prompt(
             history=history,
             user_id=user.id,
@@ -258,6 +271,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             callsign=person["callsign"],
             current_message=text,
             summary=summary,
+            profile_request=profile_request,
             current_message_id=message.message_id,
             replied_message=replied_data,
             participants=participants,
