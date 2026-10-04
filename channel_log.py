@@ -7,7 +7,7 @@ import re
 from telegram import Bot
 from telegram.error import TelegramError
 
-from config import BACKUP_CHANNEL_ID, TELEGRAM_TOKEN
+from config import LOGS_CHAT, TELEGRAM_TOKEN
 
 _LOGGER_NAME = "yubara.channel_log"
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -27,7 +27,7 @@ def _safe_message(text: str) -> str:
 async def send_channel_event(bot: Bot, text: str) -> None:
     try:
         await bot.send_message(
-            chat_id=BACKUP_CHANNEL_ID,
+            chat_id=LOGS_CHAT,
             text=_safe_message(text),
             disable_notification=True,
         )

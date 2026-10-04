@@ -31,6 +31,7 @@ TELEGRAM_TOKEN = _required_text("TELEGRAM_TOKEN")
 GROQ_API_KEY = _required_text("GROQ_API_KEY")
 ADMIN_ID = _required_int("ADMIN_ID")
 BACKUP_CHANNEL_ID = _required_int("BACKUP_CHANNEL_ID")
+LOGS_CHAT = _required_int("LOGS_CHAT")
 
 try:
     PORT = int(os.getenv("PORT", "8080"))
@@ -90,6 +91,8 @@ KNOWN_PEOPLE_TRIGGERS = (
     "расскажи о нас",
     "профиль группы",
     "профиль чата",
+    "профиль группы по id",
+    "профиль группы по айди",
     "что ты знаешь об участниках",
     "что знаешь об участниках",
     "что ты знаешь про участников",

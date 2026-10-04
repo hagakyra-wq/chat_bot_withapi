@@ -92,6 +92,22 @@ async def _restore_from_telegram(bot: object) -> tuple[str, int] | None:
 
 async def _restore_database(bot: object) -> tuple[str, int] | None:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if await asyncio.to_thread(database.has_application_state, DATABASE_PATH):
+        try:
+            staged_archives = await _stage_message_archives(bot, DATABASE_PATH)
+            if staged_archives:
+                await _install_staged_archives(staged_archives)
+        except (TelegramError, OSError, ValueError, sqlite3.Error):
+            logging.exception(
+                "Не удалось восстановить архивы к существующей database.db; "
+                "текущая рабочая база сохранена."
+            )
+        logging.info(
+            "Используется существующая database.db; более старый закреплённый бэкап "
+            "не будет заменять актуальные локальные данные."
+        )
+        return None
+
     restored_info = await _restore_from_telegram(bot)
     if restored_info is not None:
         return restored_info

@@ -30,6 +30,12 @@ UNKNOWN_GROUP_NOTICE = (
 )
 _last_unknown_group_notice: dict[int, float] = {}
 _COMMAND_RE = re.compile(r"^/([a-z_]+)(?:@\w+)?", re.IGNORECASE)
+_PROFILE_GROUP_ID_RE = re.compile(
+    r"(?:профиль\s+(?:группы|чата)|(?:группа|чат)\s+профиль)"
+    r"(?:\s+(?:(?:по\s+)?(?:id|айди)\s*[:#]?\s*)?)\s*(-?\d+)",
+    re.IGNORECASE,
+)
+_PROFILE_COMMAND_RE = re.compile(r"^/profile(?:@\w+)?(?:\s+(-?\d+))?\s*$", re.IGNORECASE)
 
 
 def _user_name(user: object | None) -> str:
@@ -62,22 +68,32 @@ def _command_name(text: str) -> str | None:
 
 
 def _format_person_profile(person: dict[str, object]) -> str:
-    name = person.get("callsign") or person.get("username") or str(person["user_id"])
-    facts: list[str] = []
+    lines = [
+        f"Имя: {person.get('display_name') or person.get('username') or 'не указано'}",
+        f"Telegram ID: {person['user_id']}",
+        f"Username: @{person['username']}" if person.get("username") else "Username: не указан",
+    ]
+    callsign = person.get("callsign")
+    lines.append(f"Кличка: {callsign or 'не задана'}")
+    lines.append(f"Возраст: {person.get('age') or 'не указан'}")
     gender = person.get("gender")
-    if gender and gender != "неизвестен":
-        facts.append(f"пол: {gender}")
+    lines.append(f"Пол: {gender if gender and gender != 'неизвестен' else 'не указан'}")
+    if person.get("group_id") is not None:
+        lines.append(f"ID группы: {person['group_id']}")
     notes = str(person.get("notes") or "").strip()
-    if notes:
-        facts.extend(f"запомнила: {note}" for note in notes.splitlines() if note.strip())
-    if not facts:
-        facts.append("личные факты пока не записаны")
-    return f"• {name} — " + "; ".join(facts)
+    lines.append("Факты:")
+    lines.extend(f"• {note}" for note in notes.splitlines() if note.strip())
+    if not notes:
+        lines.append("• пока не записаны")
+    return "\n".join(lines)
 
 
 def _format_profile_response(
     person: dict[str, object],
     participants: list[dict[str, object]] | None,
+    *,
+    group_id: int | None = None,
+    group_title: str | None = None,
 ) -> str:
     if participants is None:
         return (
@@ -86,25 +102,27 @@ def _format_profile_response(
             "Будешь делиться фактами — я внесу их в свои записи."
         )
 
-    known_profiles = [
-        member
-        for member in participants
-        if (member.get("gender") and member.get("gender") != "неизвестен")
-        or str(member.get("notes") or "").strip()
-        or member.get("callsign")
-    ]
-    if not known_profiles:
-        return (
-            "Я заглянула в архив этого чата: пока там почти пусто. "
-            "Расскажите о себе что-нибудь достойное королевских записей."
-        )
     total = len(participants)
+    title = f"«{group_title}»" if group_title else "эта группа"
     lines = [
-        "Мой обзор этого чата — по сведениям, которые вы сами мне сообщили:",
-        *(_format_person_profile(member) for member in known_profiles),
-        f"Записи есть о {len(known_profiles)} из {total} участников.",
+        f"Профили участников {title} (ID группы: {group_id if group_id is not None else 'текущая'}):",
     ]
+    if not total:
+        lines.append("Участников пока нет в моём реестре.")
+        return "\n".join(lines)
+    for index, member in enumerate(participants, start=1):
+        lines.append(f"\n{index}.")
+        lines.append(_format_person_profile(member))
+    lines.append(f"\nВсего участников в реестре: {total}.")
     return "\n".join(lines)
+
+
+def _parse_profile_group_id(text: str, current_group_id: int) -> int:
+    command_match = _PROFILE_COMMAND_RE.fullmatch(text.strip())
+    if command_match and command_match.group(1):
+        return int(command_match.group(1))
+    phrase_match = _PROFILE_GROUP_ID_RE.search(text)
+    return int(phrase_match.group(1)) if phrase_match else current_group_id
 
 
 async def _send_unknown_group_notice(message: object, group_id: int) -> None:
@@ -117,6 +135,33 @@ async def _send_unknown_group_notice(message: object, group_id: int) -> None:
         await message.reply_text(UNKNOWN_GROUP_NOTICE)
     except TelegramError:
         logging.exception("Не удалось уведомить о закрытом доступе в группе %s", group_id)
+
+
+async def _send_profile_messages(
+    message: object,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    chunks: list[str] = []
+    current = ""
+    for line in text.splitlines():
+        if len(current) + len(line) + 1 > 3500 and current:
+            chunks.append(current)
+            current = ""
+        current += ("\n" if current else "") + line
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [text]
+    for chunk in chunks:
+        sent = await message.reply_text(chunk)
+        await database.save_message(
+            message.chat_id,
+            context.bot.id,
+            sent.message_id,
+            "Юбара",
+            chunk,
+        )
 
 
 async def _apply_meta(
@@ -164,12 +209,17 @@ async def _apply_meta(
     )
     note_value = metadata.get("note")
     note = note_value.strip()[:500] if isinstance(note_value, str) and note_value.strip() else None
-    if gender is not None or callsign is not None or note is not None:
+    age_value = metadata.get("age")
+    age: int | None = None
+    if isinstance(age_value, int) and not isinstance(age_value, bool) and 1 <= age_value <= 120:
+        age = age_value
+    if gender is not None or callsign is not None or age is not None or note is not None:
         await database.update_user_profile(
             target_id,
             group_id,
             gender=gender,
             callsign=callsign,
+            age=age,
             note=note,
         )
 
@@ -189,10 +239,15 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     group_id = message.chat_id
     text = message.text
     normalized_text = text.casefold()
-    profile_request = any(phrase in normalized_text for phrase in PROFILE_TRIGGERS)
+    profile_command = _PROFILE_COMMAND_RE.fullmatch(text.strip())
+    profile_request = (
+        any(phrase in normalized_text for phrase in PROFILE_TRIGGERS)
+        or bool(profile_command and not profile_command.group(1))
+    )
     group_profile_request = any(
         phrase in normalized_text for phrase in KNOWN_PEOPLE_TRIGGERS
-    )
+    ) or bool(profile_command and profile_command.group(1))
+    requested_group_id = _parse_profile_group_id(text, group_id)
     command = _command_name(text)
     replied_to_bot = _is_reply_to_bot(message, context.bot.id)
     called = is_called(text)
@@ -205,7 +260,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if not allowed:
-        if called or replied_to_bot or mentioned or command or profile_request:
+        if (
+            called
+            or replied_to_bot
+            or mentioned
+            or command
+            or profile_request
+            or group_profile_request
+        ):
             await _send_unknown_group_notice(message, group_id)
         return
 
@@ -257,7 +319,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     try:
-        await database.ensure_user(user.id, group_id, user.username)
+        await database.ensure_user(user.id, group_id, user.username, _user_name(user))
         person = await database.get_user_data(user.id, group_id)
         if person is None:
             logging.error("Профиль пользователя %s не создан в группе %s", user.id, group_id)
@@ -310,23 +372,28 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 replied.from_user.id if replied.from_user else None,
                 replied.text,
             )
-        participants = (
-            [person]
-            if profile_request
-            else await database.get_group_users(group_id)
-            if group_profile_request
-            else None
-        )
         if profile_request or group_profile_request:
-            answer = _format_profile_response(person, participants)
-            bot_message = await message.reply_text(answer)
-            await database.save_message(
-                group_id,
-                context.bot.id,
-                bot_message.message_id,
-                "Юбара",
-                answer,
+            if group_profile_request and not await database.is_group_allowed(requested_group_id):
+                await message.reply_text(
+                    f"Группа с ID {requested_group_id} не найдена в списке разрешённых."
+                )
+                return
+            participants = (
+                await database.get_group_users(requested_group_id)
+                if group_profile_request
+                else None
             )
+            answer = _format_profile_response(
+                person,
+                participants,
+                group_id=requested_group_id if group_profile_request else group_id,
+                group_title=(
+                    message.chat.title
+                    if group_profile_request and requested_group_id == group_id
+                    else None
+                ),
+            )
+            await _send_profile_messages(message, context, answer)
             await maybe_react(message)
             return
         prompt = build_prompt(

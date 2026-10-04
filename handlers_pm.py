@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 import database
-from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE
+from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, PROFILE_TRIGGERS
 from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager
 from llm import build_prompt, generate_reply, is_summary_request, parse_meta
@@ -39,6 +39,73 @@ ACCESS_MESSAGE = (
     "который можно получить у @BIGBACA"
 )
 _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
+
+
+def _format_private_profile(
+    profile: dict[str, object],
+    group_ids: list[int],
+) -> str:
+    notes = [
+        fact
+        for fact in str(profile.get("notes") or "").splitlines()
+        if fact.strip()
+    ]
+    facts = "\n".join(f"• {fact}" for fact in notes) or "• пока фактов нет"
+    lines = [
+        "Мой глобальный архив о тебе:\n"
+        f"Имя: {profile.get('display_name') or 'не указано'}",
+        f"Telegram ID: {profile['user_id']}",
+        f"Username: @{profile['username']}" if profile.get("username") else "Username: не указан",
+        f"Кличка: {profile.get('callsign') or 'не задана'}",
+        f"Возраст: {profile.get('age') or 'не указан'}",
+        f"Пол: {profile.get('gender') if profile.get('gender') != 'неизвестен' else 'не указан'}",
+        "ID групп: " + (", ".join(map(str, group_ids)) if group_ids else "пока нет"),
+        "Факты:",
+        facts,
+        "Будешь делиться фактами — я сохраню их в своих записях.",
+    ]
+    return "\n".join(lines)
+
+
+async def _apply_private_profile_meta(
+    metadata: dict[str, object] | None,
+    *,
+    user_id: int,
+    chat_id: int,
+) -> None:
+    if not metadata:
+        return
+    target = metadata.get("target_user_id")
+    if target not in (None, "", user_id, str(user_id)):
+        return
+    gender_value = metadata.get("gender")
+    gender = (
+        gender_value
+        if isinstance(gender_value, str) and gender_value in ("парень", "девушка")
+        else None
+    )
+    nickname_value = metadata.get("nickname", metadata.get("callsign"))
+    callsign = (
+        nickname_value.strip()[:80]
+        if isinstance(nickname_value, str) and nickname_value.strip()
+        else None
+    )
+    age_value = metadata.get("age")
+    age = (
+        age_value
+        if isinstance(age_value, int) and not isinstance(age_value, bool) and 1 <= age_value <= 120
+        else None
+    )
+    note_value = metadata.get("note")
+    note = note_value.strip()[:500] if isinstance(note_value, str) and note_value.strip() else None
+    await database.update_user_profile(
+        user_id,
+        chat_id,
+        gender=gender,
+        callsign=callsign,
+        age=age,
+        note=note,
+    )
 
 
 def _admin_keyboard() -> InlineKeyboardMarkup:
@@ -628,6 +695,38 @@ async def _private_dialog(
         except Exception:
             logging.exception("Не удалось обновить username пользователя %s", user_id)
 
+    try:
+        await database.ensure_user(
+            user_id,
+            message.chat_id,
+            user.username,
+            user.first_name or user.username or str(user_id),
+        )
+    except Exception:
+        logging.exception("Не удалось обновить глобальный профиль пользователя %s.", user_id)
+
+    profile_request = any(
+        phrase in message_text.casefold() for phrase in PROFILE_TRIGGERS
+    ) or re.fullmatch(r"/profile(?:@\w+)?", message_text.strip(), re.IGNORECASE) is not None
+    if profile_request:
+        try:
+            profile = await database.get_global_profile(user_id)
+            if profile is None:
+                raise RuntimeError(f"Глобальный профиль пользователя {user_id} отсутствует.")
+            group_ids = await database.get_user_group_ids(user_id)
+            sent = await message.reply_text(_format_private_profile(profile, group_ids))
+            await database.save_message(
+                message.chat_id,
+                context.bot.id,
+                sent.message_id,
+                "Юбара",
+                sent.text or "Профиль пользователя",
+            )
+        except Exception:
+            logging.exception("Не удалось показать глобальный профиль пользователя %s.", user_id)
+            await message.reply_text("Не удалось открыть профиль. Попробуй позже.")
+        return
+
     if await image_manager.consume_setting_input(update, context):
         return
 
@@ -715,7 +814,15 @@ async def _private_dialog(
         await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
     except TelegramError:
         logging.warning("Не удалось показать typing action в личном чате", exc_info=True)
-    answer, _ = parse_meta(await generate_reply(prompt, summary))
+    answer, metadata = parse_meta(await generate_reply(prompt, summary))
+    try:
+        await _apply_private_profile_meta(
+            metadata,
+            user_id=user_id,
+            chat_id=message.chat_id,
+        )
+    except Exception:
+        logging.exception("Не удалось сохранить факты личного профиля пользователя %s.", user_id)
     if not answer:
         answer = "Чего уставился? Я просто немного смутилась..."
     try:

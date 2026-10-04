@@ -58,6 +58,15 @@ async def initialize() -> None:
                     notes TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (user_id, group_id)
                 );
+                CREATE TABLE IF NOT EXISTS global_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    display_name TEXT,
+                    callsign TEXT,
+                    age INTEGER,
+                    gender TEXT NOT NULL DEFAULT 'неизвестен',
+                    notes TEXT NOT NULL DEFAULT ''
+                );
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id INTEGER NOT NULL,
@@ -136,6 +145,21 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_users_delete
                 AFTER DELETE ON users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_global_profiles_insert
+                AFTER INSERT ON global_profiles BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_global_profiles_update
+                AFTER UPDATE ON global_profiles BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_global_profiles_delete
+                AFTER DELETE ON global_profiles BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -224,6 +248,7 @@ async def initialize() -> None:
                 "image_settings",
                 {"pollinations_model": "TEXT NOT NULL DEFAULT 'flux'"},
             )
+            await _migrate_global_profiles(db)
             await db.commit()
             cursor = await db.execute("SELECT value FROM meta WHERE key = 'dirty'")
             dirty = await cursor.fetchone()
@@ -242,6 +267,56 @@ async def _ensure_columns(
     for column, declaration in columns.items():
         if column not in existing:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+async def _migrate_global_profiles(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute(
+        "SELECT value FROM meta WHERE key = 'global_profiles_migrated'"
+    )
+    if await cursor.fetchone():
+        return
+    cursor = await db.execute(
+        """
+        SELECT user_id, username, gender, callsign, notes
+        FROM users
+        ORDER BY group_id
+        """
+    )
+    for row in await cursor.fetchall():
+        user_id = int(row["user_id"])
+        await db.execute(
+            "INSERT OR IGNORE INTO global_profiles(user_id) VALUES (?)",
+            (user_id,),
+        )
+        profile_cursor = await db.execute(
+            "SELECT username, gender, callsign, notes FROM global_profiles WHERE user_id = ?",
+            (user_id,),
+        )
+        profile = await profile_cursor.fetchone()
+        if profile is None:
+            continue
+        notes = [line for line in str(profile["notes"] or "").splitlines() if line]
+        for line in str(row["notes"] or "").splitlines():
+            if line and line not in notes:
+                notes.append(line)
+        username = row["username"] or profile["username"]
+        gender = (
+            row["gender"]
+            if row["gender"] and row["gender"] != "неизвестен"
+            else profile["gender"]
+        )
+        callsign = row["callsign"] or profile["callsign"]
+        await db.execute(
+            """
+            UPDATE global_profiles
+            SET username = ?, gender = ?, callsign = ?, notes = ?
+            WHERE user_id = ?
+            """,
+            (username, gender or "неизвестен", callsign, "\n".join(notes), user_id),
+        )
+    await db.execute(
+        "INSERT INTO meta(key, value) VALUES ('global_profiles_migrated', '1')"
+    )
 
 
 async def is_group_allowed(group_id: int) -> bool:
@@ -355,7 +430,12 @@ async def remove_allowed_group(group_id: int) -> bool:
         return deleted
 
 
-async def ensure_user(user_id: int, group_id: int, username: str | None) -> None:
+async def ensure_user(
+    user_id: int,
+    group_id: int,
+    username: str | None,
+    display_name: str | None = None,
+) -> None:
     async with _write_lock:
         async with _connect() as db:
             cursor = await db.execute(
@@ -375,8 +455,23 @@ async def ensure_user(user_id: int, group_id: int, username: str | None) -> None
                     (username, user_id, group_id, username),
                 )
                 inserted = inserted or update.rowcount > 0
+            await db.execute(
+                """
+                INSERT INTO global_profiles(user_id, username, display_name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = COALESCE(excluded.username, global_profiles.username),
+                    display_name = COALESCE(excluded.display_name, global_profiles.display_name)
+                WHERE
+                    (excluded.username IS NOT NULL
+                     AND global_profiles.username IS NOT excluded.username)
+                    OR (excluded.display_name IS NOT NULL
+                        AND global_profiles.display_name IS NOT excluded.display_name)
+                """,
+                (user_id, username, display_name),
+            )
             await db.commit()
-        if inserted:
+        if inserted or username is not None or display_name is not None:
             _record_write()
 
 
@@ -384,8 +479,18 @@ async def get_user_data(user_id: int, group_id: int) -> dict[str, Any] | None:
     async with _connect() as db:
         cursor = await db.execute(
             """
-            SELECT user_id, group_id, username, gender, callsign, notes
-            FROM users WHERE user_id = ? AND group_id = ?
+            SELECT
+                users.user_id,
+                users.group_id,
+                COALESCE(global_profiles.username, users.username) AS username,
+                global_profiles.display_name,
+                global_profiles.gender,
+                global_profiles.callsign,
+                global_profiles.age,
+                global_profiles.notes
+            FROM users
+            LEFT JOIN global_profiles ON global_profiles.user_id = users.user_id
+            WHERE users.user_id = ? AND users.group_id = ?
             """,
             (user_id, group_id),
         )
@@ -393,13 +498,46 @@ async def get_user_data(user_id: int, group_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+async def get_global_profile(user_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT * FROM global_profiles WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_user_group_ids(user_id: int) -> list[int]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT group_id FROM users WHERE user_id = ? ORDER BY group_id",
+            (user_id,),
+        )
+        return [int(row["group_id"]) for row in await cursor.fetchall()]
+
+
 async def get_group_users(group_id: int) -> list[dict[str, Any]]:
     async with _connect() as db:
         cursor = await db.execute(
             """
-            SELECT user_id, username, gender, callsign, notes
-            FROM users WHERE group_id = ?
-            ORDER BY COALESCE(callsign, username, CAST(user_id AS TEXT))
+            SELECT
+                users.user_id,
+                users.group_id,
+                COALESCE(global_profiles.username, users.username) AS username,
+                global_profiles.display_name,
+                global_profiles.gender,
+                global_profiles.callsign,
+                global_profiles.age,
+                global_profiles.notes
+            FROM users
+            LEFT JOIN global_profiles ON global_profiles.user_id = users.user_id
+            WHERE users.group_id = ?
+            ORDER BY COALESCE(
+                global_profiles.display_name,
+                global_profiles.username,
+                CAST(users.user_id AS TEXT)
+            )
             """,
             (group_id,),
         )
@@ -412,30 +550,39 @@ async def update_user_profile(
     *,
     gender: str | None = None,
     callsign: str | None = None,
+    age: int | None = None,
     note: str | None = None,
 ) -> bool:
-    assignments: list[str] = []
-    values: list[str | int] = []
-    if gender is not None:
-        assignments.append("gender = ?")
-        values.append(gender)
-    if callsign is not None:
-        assignments.append("callsign = ?")
-        values.append(callsign)
-    if note is not None:
-        assignments.append(
-            "notes = CASE WHEN notes = '' THEN ? ELSE notes || char(10) || ? END"
-        )
-        values.extend((note, note))
-    if not assignments:
+    if gender is None and callsign is None and age is None and note is None:
         return False
 
     async with _write_lock:
         async with _connect() as db:
             cursor = await db.execute(
-                f"UPDATE users SET {', '.join(assignments)} "
-                "WHERE user_id = ? AND group_id = ?",
-                (*values, user_id, group_id),
+                "SELECT notes FROM global_profiles WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return False
+            notes = str(row["notes"] or "")
+            note_lines = [line for line in notes.splitlines() if line]
+            if note is not None and note not in note_lines:
+                note_lines.append(note)
+            cursor = await db.execute(
+                """
+                UPDATE global_profiles
+                SET gender = COALESCE(?, gender),
+                    callsign = COALESCE(?, callsign),
+                    age = COALESCE(?, age),
+                    notes = ?
+                WHERE user_id = ? AND EXISTS (
+                    SELECT 1 FROM users
+                    WHERE users.user_id = global_profiles.user_id
+                      AND users.group_id = ?
+                )
+                """,
+                (gender, callsign, age, "\n".join(note_lines), user_id, group_id),
             )
             await db.commit()
             updated = cursor.rowcount > 0
@@ -445,14 +592,19 @@ async def update_user_profile(
 
 
 async def forget_user(user_id: int, group_id: int) -> bool:
+    del group_id
     async with _write_lock:
         async with _connect() as db:
-            cursor = await db.execute(
-                "DELETE FROM users WHERE user_id = ? AND group_id = ?",
-                (user_id, group_id),
+            profile_cursor = await db.execute(
+                "DELETE FROM global_profiles WHERE user_id = ?",
+                (user_id,),
+            )
+            membership_cursor = await db.execute(
+                "DELETE FROM users WHERE user_id = ?",
+                (user_id,),
             )
             await db.commit()
-            deleted = cursor.rowcount > 0
+            deleted = profile_cursor.rowcount > 0 or membership_cursor.rowcount > 0
         if deleted:
             _record_write()
         return deleted
@@ -1189,6 +1341,35 @@ def validate_sqlite(path: str | Path) -> bool:
             connection.close()
     except sqlite3.Error:
         logging.exception("Файл не прошёл проверку SQLite: %s", file_path)
+        return False
+
+
+def has_application_state(path: str | Path) -> bool:
+    """Проверяет, содержит ли валидная база сохранённое состояние бота."""
+    file_path = Path(path)
+    if not validate_sqlite(file_path):
+        return False
+    try:
+        connection = sqlite3.connect(f"file:{file_path.as_posix()}?mode=ro", uri=True)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if not {"meta", "messages", "users", "duel_players"} <= tables:
+                return False
+            for table in ("messages", "users", "duel_players", "allowed_groups"):
+                if table not in tables:
+                    continue
+                if connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                    return True
+            return False
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        logging.exception("Не удалось проверить сохранённые данные в %s.", file_path)
         return False
 
 
