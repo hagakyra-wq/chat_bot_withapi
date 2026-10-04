@@ -361,6 +361,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     summary = is_summary_request(text)
+    participants = None
     try:
         history = await database.load_chat_history(
             group_id,
@@ -416,7 +417,25 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     except Exception:
         logging.exception("Не удалось собрать контекст группы %s", group_id)
-        return
+        if profile_request or group_profile_request:
+            await message.reply_text("Не удалось собрать профиль. Попробуй позже.")
+            return
+        try:
+            prompt = build_prompt(
+                history=[],
+                user_id=user.id,
+                user_name=_user_name(user),
+                display_name=display_name,
+                gender=person["gender"],
+                callsign=person["callsign"],
+                current_message=text,
+                summary=summary,
+                current_message_id=message.message_id,
+            )
+        except Exception:
+            logging.exception("Не удалось создать запрос без контекста группы %s", group_id)
+            await message.reply_text("Не удалось подготовить ответ. Попробуй позже.")
+            return
 
     try:
         await context.bot.send_chat_action(group_id, ChatAction.TYPING)

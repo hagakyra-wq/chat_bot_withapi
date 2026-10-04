@@ -24,6 +24,7 @@ from config import (
 _write_lock = asyncio.Lock()
 _dirty_generation = 0
 _synced_generation = 0
+_CHAT_CONTEXT_ENABLED_KEY = "chat_context_enabled"
 
 
 @asynccontextmanager
@@ -672,9 +673,11 @@ async def load_chat_history(
     hours: int = 12,
 ) -> list[tuple[int, str, int, str]]:
     try:
+        if (await get_meta(_CHAT_CONTEXT_ENABLED_KEY)) == "0":
+            return []
         if summary:
             return await get_history_for_summary(chat_id, hours=hours)
-        return await get_recent_history(chat_id, limit)
+        return await get_recent_history(chat_id, limit + 1)
     except Exception:
         logging.exception(
             "Не удалось загрузить историю чата %s; продолжаю без контекста.",
@@ -1233,6 +1236,25 @@ async def get_meta(key: str) -> str | None:
         cursor = await db.execute("SELECT value FROM meta WHERE key = ?", (key,))
         row = await cursor.fetchone()
         return str(row["value"]) if row else None
+
+
+async def is_chat_context_enabled() -> bool:
+    return (await get_meta(_CHAT_CONTEXT_ENABLED_KEY)) != "0"
+
+
+async def set_chat_context_enabled(enabled: bool) -> None:
+    value = "1" if enabled else "0"
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute(
+                """
+                INSERT INTO meta(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (_CHAT_CONTEXT_ENABLED_KEY, value),
+            )
+            await db.commit()
+        _record_write()
 
 
 def list_message_archives() -> list[Path]:

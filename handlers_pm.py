@@ -114,9 +114,15 @@ async def _apply_private_profile_meta(
     )
 
 
-def _admin_keyboard() -> InlineKeyboardMarkup:
+def _admin_keyboard(context_enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [
+                InlineKeyboardButton(
+                    f"🧠 Контекст: {'ВКЛ' if context_enabled else 'ВЫКЛ'}",
+                    callback_data="admin:toggle_context",
+                )
+            ],
             [InlineKeyboardButton("➕ Добавить группу", callback_data="admin:add_group")],
             [InlineKeyboardButton("➖ Удалить группу", callback_data="admin:remove_group")],
             [InlineKeyboardButton("🔑 Ключ обычного доступа", callback_data="admin:create_user_key")],
@@ -132,12 +138,28 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
 
 async def _show_admin_menu(update: Update) -> None:
     query = update.callback_query
+    try:
+        context_enabled = await database.is_chat_context_enabled()
+    except Exception:
+        logging.exception("Не удалось загрузить настройку контекста для админ-панели.")
+        if query:
+            await query.edit_message_text(
+                "Не удалось загрузить настройки. Попробуй открыть меню ещё раз."
+            )
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                "Не удалось загрузить настройки. Попробуй открыть меню ещё раз."
+            )
+        return
     if query:
-        await query.edit_message_text("Панель администратора Юбары:", reply_markup=_admin_keyboard())
+        await query.edit_message_text(
+            "Панель администратора Юбары:",
+            reply_markup=_admin_keyboard(context_enabled),
+        )
     elif update.effective_message:
         await update.effective_message.reply_text(
             "Панель администратора Юбары:",
-            reply_markup=_admin_keyboard(),
+            reply_markup=_admin_keyboard(context_enabled),
         )
 
 
@@ -221,6 +243,22 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         ADMIN_PANEL_USERS.discard(user.id)
         await query.edit_message_text("Админ-панель закрыта. Диалоговый режим снова включён.")
         return ConversationHandler.END
+    if action == "admin:toggle_context":
+        try:
+            await database.set_chat_context_enabled(
+                not await database.is_chat_context_enabled()
+            )
+        except Exception:
+            logging.exception("Не удалось переключить использование контекста.")
+            await query.edit_message_text(
+                "Не удалось изменить настройку контекста из-за ошибки базы данных.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+                ),
+            )
+            return ADMIN_MENU
+        await _show_admin_menu(update)
+        return ADMIN_MENU
     if action == "admin:add_group":
         await query.edit_message_text(
             "Отправь ID группы или супергруппы (обычно отрицательное число).",
@@ -810,8 +848,20 @@ async def _private_dialog(
         )
     except Exception:
         logging.exception("Ошибка сохранения личного диалога в SQLite")
-        await message.reply_text("Не удалось подготовить диалог. Попробуй позже.")
-        return
+        try:
+            prompt = build_prompt(
+                history=[],
+                user_id=user_id,
+                user_name=user.first_name or user.username or str(user_id),
+                display_name=user.first_name or user.username or str(user_id),
+                current_message=message_text,
+                summary=summary,
+                current_message_id=message.message_id,
+            )
+        except Exception:
+            logging.exception("Не удалось собрать личный запрос без контекста.")
+            await message.reply_text("Не удалось подготовить диалог. Попробуй позже.")
+            return
 
     try:
         await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
