@@ -497,7 +497,14 @@ async def save_message(
 
 async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, int, str]]:
     rows = await _get_message_rows(chat_id, max(1, limit))
-    rows.sort(key=lambda row: int(row["id"]), reverse=True)
+    rows.sort(
+        key=lambda row: (
+            str(row["created_at"]),
+            int(row["message_id"]),
+            int(row["id"]),
+        ),
+        reverse=True,
+    )
     rows = rows[:max(1, limit)]
     return [
         (int(row["message_id"]), row["sender_name"], int(row["user_id"]), row["text"])
@@ -516,7 +523,14 @@ async def get_history_for_summary(
         max(1, limit) if limit is not None else None,
         hours=hours,
     )
-    rows.sort(key=lambda row: int(row["id"]), reverse=True)
+    rows.sort(
+        key=lambda row: (
+            str(row["created_at"]),
+            int(row["message_id"]),
+            int(row["id"]),
+        ),
+        reverse=True,
+    )
     if limit is not None:
         rows = rows[:max(1, limit)]
     return [
@@ -533,14 +547,14 @@ async def _get_message_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     query = (
-        "SELECT id, message_id, sender_name, user_id, text FROM messages "
+        "SELECT id, message_id, sender_name, user_id, text, created_at FROM messages "
         "WHERE chat_id = ? "
     )
     params: tuple[object, ...] = (chat_id,)
     if hours is not None:
         query += "AND created_at >= datetime('now', ?) "
         params += (f"-{max(1, hours)} hours",)
-    query += "ORDER BY id DESC"
+    query += "ORDER BY created_at DESC, message_id DESC, id DESC"
     if per_database_limit is not None:
         query += " LIMIT ?"
         params += (per_database_limit,)
