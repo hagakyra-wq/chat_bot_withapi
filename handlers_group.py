@@ -61,6 +61,52 @@ def _command_name(text: str) -> str | None:
     return match.group(1).casefold() if match else None
 
 
+def _format_person_profile(person: dict[str, object]) -> str:
+    name = person.get("callsign") or person.get("username") or str(person["user_id"])
+    facts: list[str] = []
+    gender = person.get("gender")
+    if gender and gender != "неизвестен":
+        facts.append(f"пол: {gender}")
+    notes = str(person.get("notes") or "").strip()
+    if notes:
+        facts.extend(f"запомнила: {note}" for note in notes.splitlines() if note.strip())
+    if not facts:
+        facts.append("личные факты пока не записаны")
+    return f"• {name} — " + "; ".join(facts)
+
+
+def _format_profile_response(
+    person: dict[str, object],
+    participants: list[dict[str, object]] | None,
+) -> str:
+    if participants is None:
+        return (
+            "Мой королевский архив о тебе:\n"
+            f"{_format_person_profile(person)}\n"
+            "Будешь делиться фактами — я внесу их в свои записи."
+        )
+
+    known_profiles = [
+        member
+        for member in participants
+        if (member.get("gender") and member.get("gender") != "неизвестен")
+        or str(member.get("notes") or "").strip()
+        or member.get("callsign")
+    ]
+    if not known_profiles:
+        return (
+            "Я заглянула в архив этого чата: пока там почти пусто. "
+            "Расскажите о себе что-нибудь достойное королевских записей."
+        )
+    total = len(participants)
+    lines = [
+        "Мой обзор этого чата — по сведениям, которые вы сами мне сообщили:",
+        *(_format_person_profile(member) for member in known_profiles),
+        f"Записи есть о {len(known_profiles)} из {total} участников.",
+    ]
+    return "\n".join(lines)
+
+
 async def _send_unknown_group_notice(message: object, group_id: int) -> None:
     now = time.monotonic()
     previous = _last_unknown_group_notice.get(group_id, 0.0)
@@ -144,6 +190,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text = message.text
     normalized_text = text.casefold()
     profile_request = any(phrase in normalized_text for phrase in PROFILE_TRIGGERS)
+    group_profile_request = any(
+        phrase in normalized_text for phrase in KNOWN_PEOPLE_TRIGGERS
+    )
     command = _command_name(text)
     replied_to_bot = _is_reply_to_bot(message, context.bot.id)
     called = is_called(text)
@@ -232,7 +281,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await image_manager.offer(update, context, image_prompt)
         return
 
-    if not (called or replied_to_bot or mentioned or command or profile_request):
+    if not (
+        called
+        or replied_to_bot
+        or mentioned
+        or command
+        or profile_request
+        or group_profile_request
+    ):
         return
 
     summary = is_summary_request(text)
@@ -254,14 +310,25 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 replied.from_user.id if replied.from_user else None,
                 replied.text,
             )
-        known_people = any(phrase in normalized_text for phrase in KNOWN_PEOPLE_TRIGGERS)
         participants = (
             [person]
             if profile_request
             else await database.get_group_users(group_id)
-            if known_people
+            if group_profile_request
             else None
         )
+        if profile_request or group_profile_request:
+            answer = _format_profile_response(person, participants)
+            bot_message = await message.reply_text(answer)
+            await database.save_message(
+                group_id,
+                context.bot.id,
+                bot_message.message_id,
+                "Юбара",
+                answer,
+            )
+            await maybe_react(message)
+            return
         prompt = build_prompt(
             history=history,
             user_id=user.id,

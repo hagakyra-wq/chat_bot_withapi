@@ -9,6 +9,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+from bot_message_history import record_bot_message
 from config import DICE_ANIMATION_DELAY_SECONDS
 
 _DUEL_CHALLENGE_PATTERNS = (
@@ -57,11 +58,18 @@ async def handle_duel_challenge(
         return True
 
     try:
-        await message.reply_text("Вызов принят. Сначала бросок за тебя.")
+        accepted = await message.reply_text("Вызов принят. Сначала бросок за тебя.")
+        await record_bot_message(accepted)
         user_roll = await context.bot.send_dice(chat_id=message.chat_id, emoji="🎲")
+        await record_bot_message(user_roll, "Бросок кубика участника дуэли")
         await asyncio.sleep(DICE_ANIMATION_DELAY_SECONDS)
-        await context.bot.send_message(chat_id=message.chat_id, text="Теперь мой бросок.")
+        announcement = await context.bot.send_message(
+            chat_id=message.chat_id,
+            text="Теперь мой бросок.",
+        )
+        await record_bot_message(announcement)
         yubara_roll = await context.bot.send_dice(chat_id=message.chat_id, emoji="🎲")
+        await record_bot_message(yubara_roll, "Бросок кубика Юбары")
         await asyncio.sleep(DICE_ANIMATION_DELAY_SECONDS)
     except TelegramError:
         logging.exception("Не удалось бросить кости в дуэли с пользователем %s.", user.id)
@@ -117,13 +125,7 @@ async def handle_duel_challenge(
         )
     try:
         sent = await message.reply_text(result)
-        await database.save_message(
-            message.chat_id,
-            context.bot.id,
-            sent.message_id,
-            "Юбара",
-            result,
-        )
+        await record_bot_message(sent, result)
     except TelegramError:
         logging.exception("Не удалось отправить итог дуэли пользователю %s.", user.id)
     except Exception:
@@ -146,5 +148,6 @@ async def handle_balance_request(
         logging.exception("Не удалось получить баланс игрока %s.", user.id)
         await message.reply_text("Не удалось проверить баланс. Попробуй позже.")
         return True
-    await message.reply_text(f"У тебя {_format_coins(balance)} монет.")
+    sent = await message.reply_text(f"У тебя {_format_coins(balance)} монет.")
+    await record_bot_message(sent)
     return True

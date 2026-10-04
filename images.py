@@ -17,6 +17,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+from bot_message_history import record_bot_message
 from config import BACKUP_CHANNEL_ID
 
 POLLINATIONS_URL = "https://image.pollinations.ai/prompt"
@@ -208,10 +209,11 @@ class ImageGenerationManager:
             chat_id=message.chat_id,
         )
         try:
-            await message.reply_text(
+            menu_message = await message.reply_text(
                 "Настроить параметры или запустить генерацию изображения?",
                 reply_markup=_mode_keyboard(request_id),
             )
+            await record_bot_message(menu_message)
         except TelegramError:
             self.pending.pop(request_id, None)
             logging.exception("Не удалось показать кнопки выбора генерации изображения.")
@@ -776,7 +778,7 @@ class ImageGenerationManager:
 
         image_file.seek(0)
         try:
-            await context.bot.send_photo(
+            delivered_photo = await context.bot.send_photo(
                 chat_id=job.chat_id,
                 photo=image_file,
                 caption=f"Милостиво готово. Модель: {model_name}",
@@ -790,6 +792,7 @@ class ImageGenerationManager:
             )
             return
 
+        await record_bot_message(delivered_photo)
         await self._edit_status(
             job,
             "Готово! Изображение отправлено сюда.",
@@ -836,6 +839,18 @@ class ImageGenerationManager:
                     await bot.delete_message(chat_id, job.status_message_id)
                 except TelegramError:
                     logging.info("Предыдущее сообщение статуса %s удалить не удалось.", job.job_id)
+                else:
+                    try:
+                        await database.delete_message_records(
+                            chat_id,
+                            getattr(bot, "id"),
+                            [job.status_message_id],
+                        )
+                    except Exception:
+                        logging.exception(
+                            "Не удалось убрать старое сообщение статуса %s из истории.",
+                            job.job_id,
+                        )
                 try:
                     status_message = await bot.send_message(
                         chat_id=chat_id,
@@ -847,6 +862,7 @@ class ImageGenerationManager:
                         reply_markup=_cancel_keyboard(job.job_id),
                     )
                     job.status_message_id = status_message.message_id
+                    await record_bot_message(status_message)
                 except TelegramError:
                     logging.exception("Не удалось переместить статус задачи %s вниз чата.", job.job_id)
 
