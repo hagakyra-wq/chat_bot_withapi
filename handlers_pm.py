@@ -18,8 +18,8 @@ from telegram.ext import (
 )
 
 import database
-from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, SUMMARY_HISTORY_LIMIT
-from duel import handle_duel_challenge
+from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE
+from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager
 from llm import build_prompt, generate_reply, is_summary_request, parse_meta
 from reactions import maybe_react
@@ -634,6 +634,8 @@ async def _private_dialog(
 
     if await handle_duel_challenge(update, context):
         return
+    if await handle_balance_request(update, context):
+        return
 
     if message_text.strip().casefold() == "дэл":
         replied = message.reply_to_message
@@ -677,7 +679,6 @@ async def _private_dialog(
             await database.get_history_for_summary(
                 message.chat_id,
                 hours=12,
-                limit=SUMMARY_HISTORY_LIMIT,
             )
             if summary
             else await database.get_recent_history(message.chat_id, DEFAULT_CONTEXT_SIZE)

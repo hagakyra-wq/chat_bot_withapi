@@ -509,11 +509,16 @@ async def get_history_for_summary(
     chat_id: int,
     *,
     hours: int = 12,
-    limit: int = 300,
+    limit: int | None = None,
 ) -> list[tuple[int, str, int, str]]:
-    rows = await _get_message_rows(chat_id, max(1, limit), hours=hours)
+    rows = await _get_message_rows(
+        chat_id,
+        max(1, limit) if limit is not None else None,
+        hours=hours,
+    )
     rows.sort(key=lambda row: int(row["id"]), reverse=True)
-    rows = rows[:max(1, limit)]
+    if limit is not None:
+        rows = rows[:max(1, limit)]
     return [
         (int(row["message_id"]), row["sender_name"], int(row["user_id"]), row["text"])
         for row in reversed(rows)
@@ -522,7 +527,7 @@ async def get_history_for_summary(
 
 async def _get_message_rows(
     chat_id: int,
-    per_database_limit: int,
+    per_database_limit: int | None,
     *,
     hours: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -535,8 +540,10 @@ async def _get_message_rows(
     if hours is not None:
         query += "AND created_at >= datetime('now', ?) "
         params += (f"-{max(1, hours)} hours",)
-    query += "ORDER BY id DESC LIMIT ?"
-    params += (per_database_limit,)
+    query += "ORDER BY id DESC"
+    if per_database_limit is not None:
+        query += " LIMIT ?"
+        params += (per_database_limit,)
 
     async with _connect() as db:
         cursor = await db.execute(query, params)

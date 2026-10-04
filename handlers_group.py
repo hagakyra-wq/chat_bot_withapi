@@ -15,10 +15,9 @@ from config import (
     AVAILABLE_REACTIONS,
     DEFAULT_CONTEXT_SIZE,
     KNOWN_PEOPLE_TRIGGERS,
-    SUMMARY_HISTORY_LIMIT,
     UNKNOWN_GROUP_NOTICE_SECONDS,
 )
-from duel import handle_duel_challenge
+from duel import handle_balance_request, handle_duel_challenge
 from images import extract_image_request, image_manager, is_image_command
 from llm import build_prompt, generate_reply, is_called, is_summary_request, parse_meta
 from reactions import maybe_react
@@ -190,6 +189,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if await handle_duel_challenge(update, context):
         return
+    if await handle_balance_request(update, context):
+        return
 
     if text.strip().casefold() == "дэл" and replied_to_bot:
         try:
@@ -233,7 +234,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await database.get_history_for_summary(
                 group_id,
                 hours=12,
-                limit=SUMMARY_HISTORY_LIMIT,
             )
             if summary
             else await database.get_recent_history(group_id, DEFAULT_CONTEXT_SIZE)

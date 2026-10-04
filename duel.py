@@ -1,5 +1,6 @@
 """Мини-игра с дуэлью на костях и накоплением монет."""
 
+import asyncio
 import logging
 import re
 
@@ -8,13 +9,24 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+from config import DICE_ANIMATION_DELAY_SECONDS
 
-_DUEL_CHALLENGE_RE = re.compile(
-    r"\b(?:(?:юбара|yubara)[\s,!.?—-]*)?(?:я\s+)?вызываю\s+(?:тебя\s+)?на\s+дуэль\b",
-    re.IGNORECASE,
+_DUEL_CHALLENGE_PATTERNS = (
+    re.compile(r"\b(?:я\s+)?вызываю\b.{0,40}\bна\s+дуэль\b", re.IGNORECASE),
+    re.compile(r"\b(?:бросаю|кидаю)\s+(?:тебе\s+)?вызов\b.{0,30}\bдуэль\b", re.IGNORECASE),
+    re.compile(r"\b(?:давай|пойд[её]м|выходи)\s+на\s+дуэль\b", re.IGNORECASE),
+    re.compile(r"\b(?:юбара|yubara)\b.{0,30}\b(?:дуэль|сразимся|побь[её]мся)\b", re.IGNORECASE),
 )
+
+_BALANCE_REQUEST_RE = re.compile(r"\bбаланс\b", re.IGNORECASE)
+
+
 def is_duel_challenge(text: str) -> bool:
-    return _DUEL_CHALLENGE_RE.search(text) is not None
+    return any(pattern.search(text) is not None for pattern in _DUEL_CHALLENGE_PATTERNS)
+
+
+def is_balance_request(text: str) -> bool:
+    return _BALANCE_REQUEST_RE.search(text) is not None
 
 
 def _format_coins(balance_cents: int) -> str:
@@ -47,8 +59,10 @@ async def handle_duel_challenge(
     try:
         await message.reply_text("Вызов принят. Сначала бросок за тебя.")
         user_roll = await context.bot.send_dice(chat_id=message.chat_id, emoji="🎲")
+        await asyncio.sleep(DICE_ANIMATION_DELAY_SECONDS)
         await context.bot.send_message(chat_id=message.chat_id, text="Теперь мой бросок.")
         yubara_roll = await context.bot.send_dice(chat_id=message.chat_id, emoji="🎲")
+        await asyncio.sleep(DICE_ANIMATION_DELAY_SECONDS)
     except TelegramError:
         logging.exception("Не удалось бросить кости в дуэли с пользователем %s.", user.id)
         await message.reply_text("Кости не легли на стол. Дуэль пока откладывается.")
@@ -114,4 +128,23 @@ async def handle_duel_challenge(
         logging.exception("Не удалось отправить итог дуэли пользователю %s.", user.id)
     except Exception:
         logging.exception("Не удалось сохранить итог дуэли в истории.")
+    return True
+
+
+async def handle_balance_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    del context
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None or not message.text or not is_balance_request(message.text):
+        return False
+    try:
+        balance = await database.get_duel_balance(user.id, user.username)
+    except Exception:
+        logging.exception("Не удалось получить баланс игрока %s.", user.id)
+        await message.reply_text("Не удалось проверить баланс. Попробуй позже.")
+        return True
+    await message.reply_text(f"У тебя {_format_coins(balance)} монет.")
     return True
