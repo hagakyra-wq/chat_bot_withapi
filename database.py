@@ -1012,6 +1012,35 @@ async def mine_duel_coins_daily() -> int:
     return mined_players
 
 
+async def get_duel_leaderboard(limit: int = 10) -> list[dict[str, Any]]:
+    await mine_duel_coins_daily()
+    safe_limit = max(1, min(limit, 50))
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT
+                duel_players.user_id,
+                duel_players.username,
+                COALESCE(
+                    NULLIF(global_profiles.callsign, ''),
+                    NULLIF(global_profiles.display_name, ''),
+                    CASE
+                        WHEN NULLIF(duel_players.username, '') IS NOT NULL
+                        THEN '@' || duel_players.username
+                    END,
+                    'Игрок ' || duel_players.user_id
+                ) AS display_name,
+                duel_players.balance_cents
+            FROM duel_players
+            LEFT JOIN global_profiles ON global_profiles.user_id = duel_players.user_id
+            ORDER BY duel_players.balance_cents DESC, duel_players.user_id ASC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
 def _message_archive_paths() -> list[Path]:
     return sorted(DATABASE_ARCHIVE_DIR.glob("messages_*.db")) if DATABASE_ARCHIVE_DIR.exists() else []
 

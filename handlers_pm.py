@@ -19,7 +19,11 @@ from telegram.ext import (
 
 import database
 from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, PROFILE_TRIGGERS
-from duel import handle_balance_request, handle_duel_challenge
+from duel import (
+    handle_balance_request,
+    handle_coin_leaderboard_request,
+    handle_duel_challenge,
+)
 from images import extract_image_request, image_manager
 from llm import (
     build_prompt,
@@ -782,6 +786,8 @@ async def _private_dialog(
     await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
 
     if await handle_duel_challenge(update, context):
+        return
+    if await handle_coin_leaderboard_request(update, context):
         return
     if await handle_balance_request(update, context):
         return

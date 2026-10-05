@@ -18,7 +18,11 @@ from config import (
     PROFILE_TRIGGERS,
     UNKNOWN_GROUP_NOTICE_SECONDS,
 )
-from duel import handle_balance_request, handle_duel_challenge
+from duel import (
+    handle_balance_request,
+    handle_coin_leaderboard_request,
+    handle_duel_challenge,
+)
 from images import extract_image_request, image_manager, is_image_command
 from llm import (
     build_prompt,
@@ -314,6 +318,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if await handle_duel_challenge(update, context):
+        return
+    if await handle_coin_leaderboard_request(update, context):
         return
     if await handle_balance_request(update, context):
         return

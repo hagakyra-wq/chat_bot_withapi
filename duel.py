@@ -24,6 +24,10 @@ _DUEL_CHALLENGE_PATTERNS = (
 )
 _BATTLE_WORD_RE = re.compile(r"\bбат{1,2}л\w*\b", re.IGNORECASE)
 _USERNAME_RE = re.compile(r"^@([a-z0-9_]{5,32})$", re.IGNORECASE)
+_COIN_LEADERBOARD_REQUEST_RE = re.compile(
+    r"\b(?:топ\s+(?:монет|по\s+монетам)|рейтинг\s+монет)\b",
+    re.IGNORECASE,
+)
 
 _BALANCE_REQUEST_RE = re.compile(r"\bбаланс\b", re.IGNORECASE)
 _PLAYER_DUEL_CHALLENGE_TTL_SECONDS = 120
@@ -323,6 +327,7 @@ async def _run_player_duel(
         except Exception:
             logging.exception("Не удалось рассчитаться после дуэли участников.")
             result = (
+                "🏁 БАТЛ ЗАВЕРШЁН\n"
                 f"{display_name}: {first_value}, {target_name}: {second_value}. "
                 "Победитель определён, но баланс не удалось обновить."
             )
@@ -330,10 +335,14 @@ async def _run_player_duel(
             first_balance = winner_balance if first_won else loser_balance
             second_balance = loser_balance if first_won else winner_balance
             result = (
-                f"{display_name}: {first_value}, {target_name}: {second_value}. "
-                f"Победил {winner_name}, получает 1 монету от {loser_name}.\n"
-                f"Баланс {display_name}: {_format_coins(first_balance)}; "
-                f"{target_name}: {_format_coins(second_balance)}."
+                "🏁 БАТЛ ЗАВЕРШЁН\n"
+                "━━━━━━━━━━━━━━\n"
+                f"🎲 {display_name}: {first_value}\n"
+                f"🎲 {target_name}: {second_value}\n\n"
+                f"🏆 Победитель: {winner_name}\n"
+                f"💰 Награда: +1 монета от {loser_name}\n"
+                f"💳 Баланс: {display_name} — {_format_coins(first_balance)} | "
+                f"{target_name} — {_format_coins(second_balance)}"
             )
     try:
         sent = await context.bot.send_message(chat_id=challenge.chat_id, text=result)
@@ -355,13 +364,17 @@ async def handle_duel_challenge(
     has_battle_word = _BATTLE_WORD_RE.search(message.text) is not None
     if not challenge_text and not has_battle_word:
         return False
+    standalone_battle = message.text.strip().casefold().rstrip("!?.;,:") in {
+        "батл",
+        "баттл",
+    }
     try:
         target = await _duel_target(message, context)
     except Exception:
         logging.exception("Не удалось определить соперника дуэли.")
         target = None
     targeted_battle = target is not None and _BATTLE_WORD_RE.search(message.text) is not None
-    if not challenge_text and not targeted_battle:
+    if not challenge_text and not targeted_battle and not standalone_battle:
         return False
 
     if target is not None and target[0] != context.bot.id:
@@ -435,24 +448,40 @@ async def handle_duel_challenge(
         return True
 
     if user_value > yubara_value:
-        outcome = "Ты победил. Забирай +2 монеты; сегодня королева щедра."
+        result = (
+            "🏁 БАТЛ ЗАВЕРШЁН\n"
+            "━━━━━━━━━━━━━━\n"
+            f"🎲 Ты: {user_value}\n"
+            f"🎲 Юбара: {yubara_value}\n\n"
+            "🏆 Победа за тобой!\n"
+            "💰 Награда: +2 монеты\n"
+            f"💳 Твой баланс: {_format_coins(balance)} монет.\n\n"
+            "У меня ещё несколько миллионов: потеря двух монет — капля в море. "
+            "Считай, я просто поддалась."
+        )
     elif user_value < yubara_value:
-        outcome = (
-            "Я победила, как и следовало ожидать. Баланс уже нулевой, ниже не опускаю."
+        loss_message = (
+            "У тебя уже ноль, ниже не опускаю."
             if starting_balance == 0
-            else "Я победила, как и следовало ожидать. С тебя −1 монета."
+            else "С тебя −1 монета."
+        )
+        result = (
+            "🏁 БАТЛ ЗАВЕРШЁН\n"
+            "━━━━━━━━━━━━━━\n"
+            f"🎲 Ты: {user_value}\n"
+            f"🎲 Юбара: {yubara_value}\n\n"
+            "👑 Этот раунд за Юбарой.\n"
+            f"💰 {loss_message}\n"
+            f"💳 Твой баланс: {_format_coins(balance)} монет."
         )
     else:
-        outcome = "Ничья. Монеты остаются при своих — можно бросить кости ещё раз."
-
-    result = (
-        f"Тебе выпало {user_value}, мне — {yubara_value}. {outcome}\n"
-        f"Твой баланс: {_format_coins(balance)} монет."
-    )
-    if user_value > yubara_value:
-        result += (
-            "\nУ меня ещё несколько миллионов: потеря двух монет — капля в море. "
-            "Считай, я просто поддалась."
+        result = (
+            "🏁 БАТЛ ЗАВЕРШЁН\n"
+            "━━━━━━━━━━━━━━\n"
+            f"🎲 Ты: {user_value}\n"
+            f"🎲 Юбара: {yubara_value}\n\n"
+            "🤝 Ничья. Монеты остаются при своих.\n"
+            f"💳 Твой баланс: {_format_coins(balance)} монет."
         )
     try:
         sent = await message.reply_text(result)
@@ -481,4 +510,41 @@ async def handle_balance_request(
         return True
     sent = await message.reply_text(f"У тебя {_format_coins(balance)} монет.")
     await record_bot_message(sent)
+    return True
+
+
+async def handle_coin_leaderboard_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    if (
+        message is None
+        or user is None
+        or not message.text
+        or _COIN_LEADERBOARD_REQUEST_RE.search(message.text) is None
+    ):
+        return False
+
+    try:
+        players = await database.get_duel_leaderboard(limit=10)
+    except Exception:
+        logging.exception("Не удалось загрузить топ игроков по монетам.")
+        await message.reply_text("Не удалось загрузить рейтинг. Попробуй позже.")
+        return True
+
+    lines = ["🏆 ТОП-10 ПО МОНЕТАМ", "━━━━━━━━━━━━━━"]
+    medals = ("🥇", "🥈", "🥉")
+    for rank, player in enumerate(players, start=1):
+        medal = medals[rank - 1] if rank <= len(medals) else f"{rank}."
+        name = str(player["display_name"])
+        balance = _format_coins(int(player["balance_cents"]))
+        lines.append(f"{medal} {name} — {balance} 🪙")
+    if not players:
+        lines.append("Пока нет игроков. Запусти батл, чтобы попасть в рейтинг.")
+
+    result = "\n".join(lines)
+    sent = await message.reply_text(result)
+    await record_bot_message(sent, result)
     return True
