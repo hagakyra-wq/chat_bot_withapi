@@ -37,6 +37,7 @@ from config import (
     PORT,
     TELEGRAM_TOKEN,
 )
+from duel import handle_player_duel_callback
 from handlers_group import on_group_message, on_new_members
 from handlers_pm import break_command, build_admin_conversation_handler, on_private_message
 from images import on_image_callback, stop_image_jobs
@@ -345,6 +346,9 @@ def build_application() -> Application:
         .build()
     )
     application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
+    application.add_handler(
+        CallbackQueryHandler(handle_player_duel_callback, pattern=r"^pvp:")
+    )
     application.add_handler(
         CommandHandler("break", break_command, filters=filters.ChatType.PRIVATE)
     )

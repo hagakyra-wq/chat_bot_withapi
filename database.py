@@ -917,6 +917,67 @@ async def apply_duel_result(user_id: int, username: str | None, delta_cents: int
     return int(row["balance_cents"])
 
 
+class InsufficientDuelBalanceError(ValueError):
+    """Баланс проигравшего меньше ставки в одну монету."""
+
+
+async def settle_player_duel(
+    winner_id: int,
+    winner_username: str | None,
+    loser_id: int,
+    loser_username: str | None,
+) -> tuple[int, int]:
+    if winner_id == loser_id:
+        raise ValueError("Игрок не может выиграть дуэль у самого себя.")
+
+    async with _write_lock:
+        async with _connect() as db:
+            try:
+                cursor = await db.execute(
+                    "SELECT user_id, balance_cents FROM duel_players WHERE user_id IN (?, ?)",
+                    (winner_id, loser_id),
+                )
+                balances = {
+                    int(row["user_id"]): int(row["balance_cents"])
+                    for row in await cursor.fetchall()
+                }
+                if winner_id not in balances or loser_id not in balances:
+                    raise sqlite3.DatabaseError("Не найден игровой профиль участника дуэли.")
+                if balances[loser_id] < 100:
+                    raise InsufficientDuelBalanceError(
+                        "Баланс проигравшего меньше ставки в одну монету."
+                    )
+
+                cursor = await db.execute(
+                    "UPDATE duel_players SET balance_cents = balance_cents - 100, username = ? "
+                    "WHERE user_id = ? AND balance_cents >= 100",
+                    (loser_username, loser_id),
+                )
+                if cursor.rowcount != 1:
+                    raise InsufficientDuelBalanceError(
+                        "Баланс проигравшего меньше ставки в одну монету."
+                    )
+                await db.execute(
+                    "UPDATE duel_players SET balance_cents = balance_cents + 100, username = ? "
+                    "WHERE user_id = ?",
+                    (winner_username, winner_id),
+                )
+                cursor = await db.execute(
+                    "SELECT user_id, balance_cents FROM duel_players WHERE user_id IN (?, ?)",
+                    (winner_id, loser_id),
+                )
+                settled_balances = {
+                    int(row["user_id"]): int(row["balance_cents"])
+                    for row in await cursor.fetchall()
+                }
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        _record_write()
+    return settled_balances[winner_id], settled_balances[loser_id]
+
+
 async def mine_duel_coins_daily() -> int:
     today = _utc7_date()
     today_text = today.isoformat()
