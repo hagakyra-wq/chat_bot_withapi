@@ -4,7 +4,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from telegram import Audio, Document, Message, VideoNote, Voice
+from telegram import Audio, Document, Message, Voice
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -38,11 +38,9 @@ _AUDIO_MIME_SUFFIXES = {
 
 def _audio_attachment(
     message: Message | None,
-) -> tuple[Audio | Document | VideoNote | Voice, str] | None:
+) -> tuple[Audio | Document | Voice, str] | None:
     if message is None:
         return None
-    if message.video_note is not None:
-        return message.video_note, "video_note.mp4"
     if message.voice is not None:
         return message.voice, "voice.ogg"
 
