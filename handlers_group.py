@@ -30,6 +30,7 @@ from llm import (
 )
 from message_deletion import handle_delete_bot_messages
 from reactions import maybe_react
+from voice_transcription import handle_voice_transcription, is_transcription_request
 
 UNKNOWN_GROUP_NOTICE = (
     "Если хотите воспользоваться функциями бота, обратитесь за помощью "
@@ -341,6 +342,10 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     except Exception:
         logging.exception("Ошибка сохранения группового сообщения в SQLite")
+        return
+
+    if is_transcription_request(text, message):
+        await handle_voice_transcription(message, context)
         return
 
     is_image_request, image_prompt = extract_image_request(text)

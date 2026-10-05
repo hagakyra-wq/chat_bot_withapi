@@ -30,6 +30,7 @@ from llm import (
 )
 from message_deletion import handle_delete_bot_messages
 from reactions import maybe_react
+from voice_transcription import handle_voice_transcription, is_transcription_request
 
 ADMIN_MENU, WAIT_ADD_GROUP, WAIT_REMOVE_GROUP, WAIT_CREATE_KEY, WAIT_REVOKE_KEY = range(5)
 WAIT_KEY_DURATION, WAIT_REVOKE_USER, WAIT_REVOKE_ADMIN = range(5, 8)
@@ -748,6 +749,10 @@ async def _private_dialog(
         )
     except Exception:
         logging.exception("Не удалось обновить глобальный профиль пользователя %s.", user_id)
+
+    if is_transcription_request(message_text, message):
+        await handle_voice_transcription(message, context)
+        return
 
     profile_request = any(
         phrase in message_text.casefold() for phrase in PROFILE_TRIGGERS

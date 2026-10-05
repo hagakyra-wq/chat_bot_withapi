@@ -5,7 +5,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, BinaryIO
 
 from openai import AsyncOpenAI
 
@@ -210,6 +210,15 @@ async def generate_reply(prompt: str, summary: bool) -> str:
     except Exception:
         logging.exception("Ошибка вызова Groq API")
         return "Ой, я немного задумалась... Повтори ещё раз, пожалуйста!"
+
+
+async def transcribe_audio(audio_file: BinaryIO, filename: str) -> str:
+    response = await _client.audio.transcriptions.create(
+        file=(filename, audio_file),
+        model="whisper-large-v3",
+        language="ru",
+    )
+    return response.text.strip()
 
 
 def parse_meta(raw_answer: str) -> tuple[str, dict[str, Any] | None]:
