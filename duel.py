@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from secrets import token_hex
 from time import monotonic
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, MessageEntityType, Update
-from telegram.constants import ChatType
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.constants import ChatType, MessageEntityType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
