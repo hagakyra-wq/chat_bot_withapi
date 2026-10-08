@@ -32,7 +32,10 @@ from llm import (
     is_summary_request,
     parse_meta,
 )
-from message_deletion import handle_delete_bot_messages
+from message_deletion import (
+    handle_delete_bot_messages,
+    handle_delete_replied_message,
+)
 from reactions import maybe_react
 from voice_transcription import handle_voice_transcription, is_transcription_request
 
@@ -324,12 +327,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if await handle_balance_request(update, context):
         return
 
-    if text.strip().casefold() == "дэл" and replied_to_bot:
-        try:
-            await message.reply_to_message.delete()
-            await message.delete()
-        except TelegramError:
-            logging.exception("Не удалось выполнить «дэл» в группе %s", group_id)
+    if await handle_delete_replied_message(update):
         return
 
     try:

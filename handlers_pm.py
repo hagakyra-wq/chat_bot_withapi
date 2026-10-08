@@ -32,7 +32,10 @@ from llm import (
     is_summary_request,
     parse_meta,
 )
-from message_deletion import handle_delete_bot_messages
+from message_deletion import (
+    handle_delete_bot_messages,
+    handle_delete_replied_message,
+)
 from reactions import maybe_react
 from voice_transcription import handle_voice_transcription, is_transcription_request
 
@@ -795,15 +798,8 @@ async def _private_dialog(
     if await handle_delete_bot_messages(update, context):
         return
 
-    if message_text.strip().casefold() == "дэл":
-        replied = message.reply_to_message
-        if replied and replied.from_user and replied.from_user.id == context.bot.id:
-            try:
-                await replied.delete()
-                await message.delete()
-            except TelegramError:
-                logging.exception("Не удалось выполнить «дэл» в личном чате")
-            return
+    if await handle_delete_replied_message(update):
+        return
 
     command = message_text.strip().casefold()
     if (

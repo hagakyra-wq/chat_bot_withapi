@@ -28,6 +28,51 @@ def _requested_count(text: str) -> tuple[int, bool] | None:
     return int(count) if count else 1, match.group("address") is not None
 
 
+async def handle_delete_replied_message(
+    update: Update,
+) -> bool:
+    message = update.effective_message
+    if message is None or not message.text or message.text.strip().casefold() != "дэл":
+        return False
+
+    replied = message.reply_to_message
+    if replied is None:
+        return False
+
+    target_deleted = False
+    try:
+        await replied.delete()
+        target_deleted = True
+    except TelegramError:
+        logging.exception(
+            "Не удалось удалить сообщение по команде «дэл» "
+            "chat_id=%s message_id=%s.",
+            message.chat_id,
+            replied.message_id,
+        )
+
+    command_deleted = False
+    try:
+        await message.delete()
+        command_deleted = True
+    except TelegramError:
+        logging.exception(
+            "Не удалось удалить команду «дэл» chat_id=%s message_id=%s.",
+            message.chat_id,
+            message.message_id,
+        )
+
+    if not target_deleted:
+        await message.reply_text(
+            "Не удалось удалить сообщение. В группе боту нужны права "
+            "администратора на удаление сообщений; также Telegram ограничивает "
+            "удаление старых сообщений."
+        )
+    elif not command_deleted:
+        await message.reply_text("Сообщение удалено, но команду удалить не удалось.")
+    return True
+
+
 async def handle_delete_bot_messages(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
