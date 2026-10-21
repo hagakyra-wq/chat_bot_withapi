@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from telethon import TelegramClient
+from telethon.tl.custom import QRLogin
 from telethon.errors import (
     PasswordHashInvalidError,
     PhoneCodeExpiredError,
@@ -17,6 +18,10 @@ from config import TELEGRAM_API_HASH, TELEGRAM_API_ID, TELEGRAM_USER_SESSION_PAT
 _client: TelegramClient | None = None
 _authorized = False
 _auth_owner_id: int | None = None
+_qr_login: QRLogin | None = None
+_code_delivery_hint = (
+    "Проверь приложение Telegram на уже авторизованном устройстве; код может прийти не по SMS."
+)
 
 
 class AuthFlowBusyError(RuntimeError):
@@ -155,7 +160,7 @@ async def startup() -> bool:
 
 async def begin_login(user_id: int, phone: str) -> str | None:
     """Запрашивает код и возвращает только временный phone_code_hash."""
-    global _auth_owner_id, _authorized
+    global _auth_owner_id, _authorized, _code_delivery_hint
     if _auth_owner_id not in (None, user_id):
         raise AuthFlowBusyError
     _auth_owner_id = user_id
@@ -167,12 +172,82 @@ async def begin_login(user_id: int, phone: str) -> str | None:
             _secure_session_file()
             return None
         sent_code = await client.send_code_request(phone)
+        delivery_type = type(sent_code.type).__name__
+        delivery_hints = {
+            "SentCodeTypeApp": (
+                "в сообщении от Telegram в приложении на уже авторизованном устройстве; "
+                "SMS может не прийти"
+            ),
+            "SentCodeTypeSms": "в SMS",
+            "SentCodeTypeCall": "в звонке от Telegram",
+            "SentCodeTypeFlashCall": "в автоматическом звонке от Telegram",
+            "SentCodeTypeEmailCode": "на привязанной к Telegram почте",
+        }
+        _code_delivery_hint = delivery_hints.get(
+            delivery_type,
+            "способ доставки определяет Telegram; проверь приложение Telegram и SMS",
+        )
+        logging.info("Telegram выбрал способ доставки кода: %s.", delivery_type)
         return sent_code.phone_code_hash
     except Exception:
         _auth_owner_id = None
         if not _authorized:
             await _disconnect_client()
         raise
+
+
+def get_code_delivery_hint() -> str:
+    return _code_delivery_hint
+
+
+async def begin_qr_login(user_id: int) -> QRLogin | None:
+    """Создаёт QR-токен для входа с ранее авторизованного Telegram-устройства."""
+    global _auth_owner_id, _authorized, _qr_login
+    if _auth_owner_id not in (None, user_id):
+        raise AuthFlowBusyError
+    _auth_owner_id = user_id
+    try:
+        client = await _connected_client()
+        if await client.is_user_authorized():
+            _authorized = True
+            _auth_owner_id = None
+            _secure_session_file()
+            return None
+        _qr_login = await client.qr_login()
+        return _qr_login
+    except Exception:
+        if _auth_owner_id == user_id:
+            _auth_owner_id = None
+        raise
+
+
+def get_qr_login(user_id: int) -> QRLogin:
+    _check_auth_owner(user_id)
+    if _qr_login is None:
+        raise RuntimeError("QR-авторизация не запущена.")
+    return _qr_login
+
+
+async def wait_for_qr_login(user_id: int) -> None:
+    global _auth_owner_id, _authorized, _qr_login
+    qr_login = get_qr_login(user_id)
+    try:
+        await qr_login.wait()
+    except SessionPasswordNeededError as exc:
+        raise TwoFactorRequiredError from exc
+    _authorized = True
+    _auth_owner_id = None
+    _qr_login = None
+    _secure_session_file()
+
+
+async def recreate_qr_login(user_id: int) -> QRLogin:
+    global _qr_login
+    _check_auth_owner(user_id)
+    if _qr_login is None:
+        raise RuntimeError("QR-авторизация не запущена.")
+    await _qr_login.recreate()
+    return _qr_login
 
 
 def _check_auth_owner(user_id: int) -> None:
@@ -220,17 +295,19 @@ async def submit_two_factor_password(user_id: int, password: str) -> None:
 
 
 async def cancel_login(user_id: int) -> None:
-    global _auth_owner_id
+    global _auth_owner_id, _qr_login
     if _auth_owner_id == user_id:
         _auth_owner_id = None
+        _qr_login = None
         if not _authorized:
             await _disconnect_client()
 
 
 async def disconnect() -> None:
     """Отключает клиент, сохраняя файл авторизованной сессии."""
-    global _auth_owner_id
+    global _auth_owner_id, _qr_login
     _auth_owner_id = None
+    _qr_login = None
     await _disconnect_client()
 
 

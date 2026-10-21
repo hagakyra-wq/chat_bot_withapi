@@ -1,11 +1,13 @@
 """Обработчики личных сообщений, ключей доступа и админ-панели."""
 
+import asyncio
+from io import BytesIO
 import logging
 import random
 import re
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction, ChatType
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -44,8 +46,14 @@ from voice_transcription import handle_voice_transcription, is_transcription_req
 ADMIN_MENU, WAIT_ADD_GROUP, WAIT_REMOVE_GROUP, WAIT_CREATE_KEY, WAIT_REVOKE_KEY = range(5)
 WAIT_KEY_DURATION, WAIT_REVOKE_USER, WAIT_REVOKE_ADMIN = range(5, 8)
 WAIT_USERBOT_PHONE, WAIT_USERBOT_CODE, WAIT_USERBOT_PASSWORD = range(8, 11)
+WAIT_USERBOT_QR = 11
 ADMIN_PANEL_USERS: set[int] = set()
-_USERBOT_LOGIN_KEYS = ("userbot_phone", "userbot_phone_code_hash")
+_USERBOT_LOGIN_KEYS = (
+    "userbot_phone",
+    "userbot_phone_code_hash",
+    "userbot_qr_needs_password",
+)
+_USERBOT_QR_TASK_KEY = "userbot_qr_task"
 ACCESS_DURATIONS = {
     "forever": (None, "навсегда"),
     "month": (30 * 24 * 60 * 60, "30 дней"),
@@ -340,6 +348,7 @@ async def _show_userbot_menu(
 
     keyboard = [
         [InlineKeyboardButton("🔐 Подключить / включить", callback_data="admin:userbot_connect")],
+        [InlineKeyboardButton("📷 Войти по QR-коду", callback_data="admin:userbot_qr_connect")],
     ]
     if enabled or (connected and authorized):
         keyboard.append(
@@ -378,9 +387,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except Exception:
         logging.exception("Не удалось проверить право администратора для /adm")
         return ConversationHandler.END
-    await personal_account.cancel_login(user.id)
-    for key in _USERBOT_LOGIN_KEYS:
-        context.user_data.pop(key, None)
+    await _cancel_userbot_login(user.id, context)
     ADMIN_PANEL_USERS.add(user.id)
     await _show_admin_menu(update)
     return ADMIN_MENU
@@ -426,9 +433,7 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     user = update.effective_user
     if user:
         ADMIN_PANEL_USERS.discard(user.id)
-        await personal_account.cancel_login(user.id)
-    for key in _USERBOT_LOGIN_KEYS:
-        context.user_data.pop(key, None)
+        await _cancel_userbot_login(user.id, context)
     if update.effective_message:
         await update.effective_message.reply_text("Админ-панель закрыта. Диалоговый режим снова включён.")
     return ConversationHandler.END
@@ -448,6 +453,7 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     action = query.data or ""
     if action == "admin:exit":
         ADMIN_PANEL_USERS.discard(user.id)
+        await _cancel_userbot_login(user.id, context)
         await query.edit_message_text("Админ-панель закрыта. Диалоговый режим снова включён.")
         return ConversationHandler.END
     if action == "admin:toggle_context":
@@ -648,12 +654,92 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return ADMIN_MENU
         await query.edit_message_text(
             "Отправь номер телефона аккаунта в международном формате "
-            "(например, +79991234567). Сообщение с номером будет удалено.",
+            "(например, +79991234567). Сообщение с номером будет удалено. "
+            "Если код не приходит, можно подключиться по QR.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+                [
+                    [InlineKeyboardButton("📷 Войти по QR-коду", callback_data="admin:userbot_qr_connect")],
+                    [InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")],
+                ]
             ),
         )
         return WAIT_USERBOT_PHONE
+    if action == "admin:userbot_qr_connect":
+        if not personal_account.is_configured():
+            await query.edit_message_text(
+                "Для QR-входа задайте TELEGRAM_API_ID и TELEGRAM_API_HASH "
+                "в переменных окружения.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        await _cancel_userbot_login(user.id, context)
+        try:
+            if await personal_account.connect_saved_session():
+                personal_account.set_enabled(True)
+                await autoresponder.refresh_user_client()
+                await _show_userbot_menu(update, context)
+                return ADMIN_MENU
+        except Exception:
+            logging.exception("Не удалось подключить сохранённую user-сессию.")
+            await query.edit_message_text(
+                "Не удалось подключить сохранённую сессию. Проверьте настройки и повторите попытку.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        try:
+            qr_login = await personal_account.begin_qr_login(user.id)
+        except personal_account.AuthFlowBusyError:
+            await query.edit_message_text(
+                "Другой администратор уже проходит авторизацию. Попробуй позже."
+            )
+            return ADMIN_MENU
+        except Exception:
+            logging.exception("Не удалось создать QR-код для входа user-аккаунта.")
+            await query.edit_message_text(
+                "Не удалось создать QR-код. Проверьте настройки Telegram API и повторите попытку.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        if qr_login is None:
+            personal_account.set_enabled(True)
+            await autoresponder.refresh_user_client()
+            await _show_userbot_menu(update, context)
+            return ADMIN_MENU
+        qr_url = qr_login.url
+        context.user_data["userbot_qr_needs_password"] = False
+        task = context.application.create_task(
+            _wait_for_userbot_qr_login(user.id, context),
+            update=update,
+        )
+        context.user_data[_USERBOT_QR_TASK_KEY] = task
+        try:
+            qr_message = await _send_userbot_qr(context, user.id, qr_url)
+            try:
+                active_qr_url = personal_account.get_qr_login(user.id).url
+            except RuntimeError:
+                active_qr_url = None
+            if (
+                task.done()
+                or personal_account.get_status()[1]
+                or active_qr_url != qr_url
+            ):
+                try:
+                    await qr_message.delete()
+                except TelegramError:
+                    logging.info("Не удалось удалить устаревший QR-код.")
+            else:
+                context.user_data["userbot_qr_message"] = qr_message
+        except Exception:
+            logging.exception("Не удалось отправить QR-код администратору.")
+            await _cancel_userbot_login(user.id, context)
+            return ADMIN_MENU
+        return WAIT_USERBOT_QR
     if action == "admin:userbot_disable":
         try:
             personal_account.set_enabled(False)
@@ -705,9 +791,10 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _show_userbot_menu(update, context)
         return ADMIN_MENU
     if action == "admin:userbot_cancel":
-        await personal_account.cancel_login(user.id)
-        for key in _USERBOT_LOGIN_KEYS:
-            context.user_data.pop(key, None)
+        await _cancel_userbot_login(user.id, context)
+        await _show_userbot_menu(update, context)
+        return ADMIN_MENU
+    if action == "admin:userbot_qr_done":
         await _show_userbot_menu(update, context)
         return ADMIN_MENU
     if action == "admin:add_group":
@@ -841,6 +928,146 @@ def _clear_userbot_login(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(key, None)
 
 
+async def _cancel_userbot_login(
+    user_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    task = context.user_data.pop(_USERBOT_QR_TASK_KEY, None)
+    if isinstance(task, asyncio.Task) and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await personal_account.cancel_login(user_id)
+    _clear_userbot_login(context)
+    await _delete_userbot_qr_message(context)
+
+
+async def _delete_userbot_qr_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+    qr_message = context.user_data.pop("userbot_qr_message", None)
+    if not isinstance(qr_message, Message):
+        return
+    try:
+        await qr_message.delete()
+    except TelegramError:
+        logging.info("Не удалось удалить сообщение с QR после завершения входа.")
+
+
+def _make_userbot_qr_image(url: str) -> BytesIO:
+    import qrcode
+
+    image = qrcode.make(url)
+    photo = BytesIO()
+    image.save(photo, format="PNG")
+    photo.seek(0)
+    photo.name = "telegram_login_qr.png"
+    return photo
+
+
+async def _send_userbot_qr(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    url: str,
+) -> Message:
+    photo = await asyncio.to_thread(_make_userbot_qr_image, url)
+    try:
+        return await context.bot.send_photo(
+            chat_id=user_id,
+            photo=photo,
+            caption=(
+                "QR для входа в личный Telegram-аккаунт. В приложении Telegram "
+                "на другом устройстве откройте Настройки → Устройства → "
+                "Подключить устройство и отсканируйте этот код. "
+                "Окно входа открыто; при истечении срока код обновится автоматически. "
+                "Не пересылайте QR и не показывайте его другим людям."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+            ),
+        )
+    finally:
+        photo.close()
+
+
+async def _wait_for_userbot_qr_login(
+    user_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    current_task = asyncio.current_task()
+    try:
+        while True:
+            try:
+                await personal_account.wait_for_qr_login(user_id)
+                personal_account.set_enabled(True)
+                await autoresponder.refresh_user_client()
+                await _delete_userbot_qr_message(context)
+                _clear_userbot_login(context)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="Личный Telegram-аккаунт подключён по QR и включён.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "Готово",
+                                    callback_data="admin:userbot_qr_done",
+                                )
+                            ]
+                        ]
+                    ),
+                )
+                return
+            except asyncio.TimeoutError:
+                await _delete_userbot_qr_message(context)
+                qr_login = await personal_account.recreate_qr_login(user_id)
+                qr_message = await _send_userbot_qr(context, user_id, qr_login.url)
+                context.user_data["userbot_qr_message"] = qr_message
+            except personal_account.TwoFactorRequiredError:
+                context.user_data["userbot_qr_needs_password"] = True
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "Telegram запросил пароль 2FA. Отправь его следующим "
+                        "сообщением; бот удалит сообщение до проверки."
+                    ),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+                    ),
+                )
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.exception("Не удалось завершить авторизацию user-аккаунта по QR.")
+        try:
+            await autoresponder.stop_user_client()
+            personal_account.set_enabled(False)
+            await personal_account.disconnect()
+        except Exception:
+            logging.exception("Не удалось отключить частично подключённый QR-сеанс.")
+        await personal_account.cancel_login(user_id)
+        await _delete_userbot_qr_message(context)
+        _clear_userbot_login(context)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Не удалось завершить вход по QR. Начни подключение заново через /adm.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Открыть меню аккаунта",
+                            callback_data="admin:userbot_qr_done",
+                        )
+                    ]
+                ]
+            ),
+        )
+    finally:
+        if context.user_data.get(_USERBOT_QR_TASK_KEY) is current_task:
+            context.user_data.pop(_USERBOT_QR_TASK_KEY, None)
+
+
 async def _consume_userbot_secret(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -860,8 +1087,7 @@ async def _consume_userbot_secret(
         )
         user = update.effective_user
         if user is not None:
-            await personal_account.cancel_login(user.id)
-        _clear_userbot_login(context)
+            await _cancel_userbot_login(user.id, context)
         if update.effective_chat is not None:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -933,11 +1159,18 @@ async def _userbot_phone_input(
     await context.bot.send_message(
         chat_id=user.id,
         text=(
-            "Отправь код, полученный от Telegram. Сообщение с кодом будет удалено "
-            "до передачи кода в Telegram."
+            "Telegram отправил код способом: "
+            f"{personal_account.get_code_delivery_hint()}.\n"
+            "Проверь официальный чат Telegram на уже авторизованном устройстве "
+            "или указанное место доставки (не чат с ботом). "
+            "Введённое сюда сообщение с кодом бот удалит до проверки. "
+            "Если код недоступен, выбери вход по QR."
         ),
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+            [
+                [InlineKeyboardButton("📷 Войти по QR-коду", callback_data="admin:userbot_qr_connect")],
+                [InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")],
+            ]
         ),
     )
     return WAIT_USERBOT_CODE
@@ -1074,6 +1307,42 @@ async def _userbot_password_input(
     await context.bot.send_message(chat_id=user.id, text="Telegram-аккаунт подключён.")
     await _show_userbot_menu(update, context)
     return ADMIN_MENU
+
+
+async def _userbot_qr_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is None or not await _is_admin(user.id):
+        return ConversationHandler.END
+    if context.user_data.get("userbot_qr_needs_password") is True:
+        return await _userbot_password_input(update, context)
+    if personal_account.get_status()[1]:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="QR-вход завершён. Нажми «Готово», чтобы открыть меню аккаунта.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Готово",
+                            callback_data="admin:userbot_qr_done",
+                        )
+                    ]
+                ]
+            ),
+        )
+        return WAIT_USERBOT_QR
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=(
+            "Вводить текст не нужно: открой QR в этом чате на другом устройстве "
+            "и отсканируй его через Telegram → Настройки → Устройства → "
+            "Подключить устройство."
+        ),
+    )
+    return WAIT_USERBOT_QR
 
 
 def _format_access_record(record: dict[str, object]) -> str:
@@ -1349,7 +1618,7 @@ def build_admin_conversation_handler() -> ConversationHandler:
             WAIT_USERBOT_PHONE: [
                 CallbackQueryHandler(
                     admin_menu_callback,
-                    pattern=r"^admin:userbot_cancel$",
+                    pattern=r"^admin:userbot_(?:cancel|qr_connect)$",
                 ),
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
@@ -1359,7 +1628,7 @@ def build_admin_conversation_handler() -> ConversationHandler:
             WAIT_USERBOT_CODE: [
                 CallbackQueryHandler(
                     admin_menu_callback,
-                    pattern=r"^admin:userbot_cancel$",
+                    pattern=r"^admin:userbot_(?:cancel|qr_connect)$",
                 ),
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
@@ -1374,6 +1643,16 @@ def build_admin_conversation_handler() -> ConversationHandler:
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND,
                     _userbot_password_input,
+                ),
+            ],
+            WAIT_USERBOT_QR: [
+                CallbackQueryHandler(
+                    admin_menu_callback,
+                    pattern=r"^admin:userbot_(?:cancel|qr_done)$",
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    _userbot_qr_input,
                 ),
             ],
         },
