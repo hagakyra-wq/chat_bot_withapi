@@ -2,6 +2,7 @@
 
 import logging
 import os
+from datetime import timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,6 +33,8 @@ GROQ_API_KEY = _required_text("GROQ_API_KEY")
 ADMIN_ID = _required_int("ADMIN_ID")
 BACKUP_CHANNEL_ID = _required_int("BACKUP_CHANNEL_ID")
 LOGS_CHAT = _required_int("LOGS_CHAT")
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
 
 try:
     PORT = int(os.getenv("PORT", "8080"))
@@ -45,8 +48,12 @@ BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "database.db"
 DATABASE_BACKUP_PATH = BASE_DIR / "database_backup.db"
 DATABASE_ARCHIVE_DIR = BASE_DIR / "database_archives"
+TELEGRAM_USER_SESSION_PATH = Path(
+    os.getenv("TELEGRAM_USER_SESSION_PATH", str(BASE_DIR / "telegram_user_session"))
+)
 DATABASE_SHARD_THRESHOLD_BYTES = 19 * 1024 * 1024
 MODEL_NAME = "openai/gpt-oss-120b"
+PERSONAL_ACCOUNT_TIMEZONE = timezone(timedelta(hours=5))
 
 DEFAULT_CONTEXT_SIZE = 5
 CONTEXT_CHAR_LIMIT = 80_000

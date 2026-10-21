@@ -331,7 +331,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     try:
-        await database.ensure_user(user.id, group_id, user.username, _user_name(user))
+        await database.ensure_user(
+            user.id,
+            group_id,
+            user.username,
+            _user_name(user),
+            is_bot=user.is_bot,
+        )
         person = await database.get_user_data(user.id, group_id)
         if person is None:
             logging.error("Профиль пользователя %s не создан в группе %s", user.id, group_id)

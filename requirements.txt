@@ -3,3 +3,5 @@ openai==1.68.2
 aiosqlite==0.21.0
 python-dotenv==1.0.1
 httpx==0.28.1
+Telethon==1.42.0
+qrcode[pil]==8.2

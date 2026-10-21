@@ -1,6 +1,7 @@
 """Асинхронный доступ к SQLite и создание согласованных копий БД."""
 
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -25,6 +26,11 @@ _write_lock = asyncio.Lock()
 _dirty_generation = 0
 _synced_generation = 0
 _CHAT_CONTEXT_ENABLED_KEY = "chat_context_enabled"
+_AUTORESPONDER_TIMEZONE_KEY = "autoresponder_timezone_offset"
+_AUTORESPONDER_NIGHT_ENABLED_KEY = "autoresponder_night_enabled"
+_AUTORESPONDER_PRIVATE_ENABLED_KEY = "autoresponder_private_enabled"
+_AUTORESPONDER_GROUPS_KEY = "autoresponder_night_groups"
+_AUTORESPONDER_DEFAULT_TIMEZONE_OFFSET = 5
 
 
 @asynccontextmanager
@@ -54,6 +60,7 @@ async def initialize() -> None:
                     user_id INTEGER NOT NULL,
                     group_id INTEGER NOT NULL,
                     username TEXT,
+                    is_bot INTEGER NOT NULL DEFAULT 0,
                     gender TEXT NOT NULL DEFAULT 'неизвестен',
                     callsign TEXT,
                     notes TEXT NOT NULL DEFAULT '',
@@ -112,7 +119,8 @@ async def initialize() -> None:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     balance_cents INTEGER NOT NULL DEFAULT 500,
-                    last_mined_on TEXT NOT NULL
+                    last_mined_on TEXT NOT NULL,
+                    is_bot INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TRIGGER IF NOT EXISTS dirty_image_settings_insert
                 AFTER INSERT ON image_settings BEGIN
@@ -248,6 +256,12 @@ async def initialize() -> None:
                 db,
                 "image_settings",
                 {"pollinations_model": "TEXT NOT NULL DEFAULT 'flux'"},
+            )
+            await _ensure_columns(db, "users", {"is_bot": "INTEGER NOT NULL DEFAULT 0"})
+            await _ensure_columns(
+                db,
+                "duel_players",
+                {"is_bot": "INTEGER NOT NULL DEFAULT 0"},
             )
             await _migrate_global_profiles(db)
             await db.commit()
@@ -436,17 +450,27 @@ async def ensure_user(
     group_id: int,
     username: str | None,
     display_name: str | None = None,
+    is_bot: bool = False,
 ) -> None:
     async with _write_lock:
         async with _connect() as db:
             cursor = await db.execute(
                 """
-                INSERT OR IGNORE INTO users(user_id, group_id, username)
-                VALUES (?, ?, ?)
+                INSERT OR IGNORE INTO users(user_id, group_id, username, is_bot)
+                VALUES (?, ?, ?, ?)
                 """,
-                (user_id, group_id, username),
+                (user_id, group_id, username, int(is_bot)),
             )
             inserted = cursor.rowcount > 0
+            if is_bot:
+                update = await db.execute(
+                    """
+                    UPDATE users SET is_bot = 1
+                    WHERE user_id = ? AND group_id = ? AND is_bot = 0
+                    """,
+                    (user_id, group_id),
+                )
+                inserted = inserted or update.rowcount > 0
             if username is not None:
                 update = await db.execute(
                     """
@@ -483,6 +507,7 @@ async def get_user_data(user_id: int, group_id: int) -> dict[str, Any] | None:
             SELECT
                 users.user_id,
                 users.group_id,
+                users.is_bot,
                 COALESCE(global_profiles.username, users.username) AS username,
                 global_profiles.display_name,
                 global_profiles.gender,
@@ -847,19 +872,32 @@ def _utc7_date() -> date:
     return datetime.now(timezone(timedelta(hours=7))).date()
 
 
-async def get_duel_balance(user_id: int, username: str | None) -> int:
+async def get_duel_balance(
+    user_id: int,
+    username: str | None,
+    *,
+    is_bot: bool = False,
+) -> int:
     today = _utc7_date()
     today_text = today.isoformat()
     async with _write_lock:
         async with _connect() as db:
             cursor = await db.execute(
                 """
-                INSERT OR IGNORE INTO duel_players(user_id, username, balance_cents, last_mined_on)
-                VALUES (?, ?, 500, ?)
+                INSERT OR IGNORE INTO duel_players(
+                    user_id, username, balance_cents, last_mined_on, is_bot
+                )
+                VALUES (?, ?, 500, ?, ?)
                 """,
-                (user_id, username, today_text),
+                (user_id, username, today_text, int(is_bot)),
             )
             changed = cursor.rowcount > 0
+            if is_bot:
+                cursor = await db.execute(
+                    "UPDATE duel_players SET is_bot = 1 WHERE user_id = ? AND is_bot = 0",
+                    (user_id,),
+                )
+                changed = changed or cursor.rowcount > 0
             cursor = await db.execute(
                 "SELECT balance_cents, last_mined_on FROM duel_players WHERE user_id = ?",
                 (user_id,),
@@ -1033,6 +1071,7 @@ async def get_duel_leaderboard(limit: int = 10) -> list[dict[str, Any]]:
                 duel_players.balance_cents
             FROM duel_players
             LEFT JOIN global_profiles ON global_profiles.user_id = duel_players.user_id
+            WHERE duel_players.is_bot = 0
             ORDER BY duel_players.balance_cents DESC, duel_players.user_id ASC
             LIMIT ?
             """,
@@ -1328,6 +1367,21 @@ async def get_meta(key: str) -> str | None:
         return str(row["value"]) if row else None
 
 
+async def set_meta(key: str, value: str) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute(
+                """
+                INSERT INTO meta(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                WHERE meta.value IS NOT excluded.value
+                """,
+                (key, value),
+            )
+            await db.commit()
+        _record_write()
+
+
 async def is_chat_context_enabled() -> bool:
     return (await get_meta(_CHAT_CONTEXT_ENABLED_KEY)) != "0"
 
@@ -1345,6 +1399,71 @@ async def set_chat_context_enabled(enabled: bool) -> None:
             )
             await db.commit()
         _record_write()
+
+
+async def get_autoresponder_settings() -> tuple[int, bool, bool]:
+    """Возвращает смещение UTC, статус ночной рассылки и автоответа в ЛС."""
+    timezone_value = await get_meta(_AUTORESPONDER_TIMEZONE_KEY)
+    night_value = await get_meta(_AUTORESPONDER_NIGHT_ENABLED_KEY)
+    private_value = await get_meta(_AUTORESPONDER_PRIVATE_ENABLED_KEY)
+
+    try:
+            timezone_offset = (
+                _AUTORESPONDER_DEFAULT_TIMEZONE_OFFSET
+                if timezone_value is None
+                else int(timezone_value)
+            )
+    except ValueError as exc:
+            raise ValueError("В базе сохранено некорректное смещение UTC.") from exc
+    if not -12 <= timezone_offset <= 14:
+            raise ValueError("Смещение UTC должно быть от -12 до +14 часов.")
+
+    if night_value not in (None, "0", "1") or private_value not in (
+            None,
+            "0",
+            "1",
+    ):
+            raise ValueError("В базе сохранено некорректное состояние автоответчика.")
+    return timezone_offset, night_value == "1", private_value == "1"
+
+
+async def set_autoresponder_timezone_offset(offset: int) -> None:
+    if not -12 <= offset <= 14:
+            raise ValueError("Смещение UTC должно быть от -12 до +14 часов.")
+    await set_meta(_AUTORESPONDER_TIMEZONE_KEY, str(offset))
+
+
+async def set_autoresponder_night_enabled(enabled: bool) -> None:
+    await set_meta(_AUTORESPONDER_NIGHT_ENABLED_KEY, "1" if enabled else "0")
+
+
+async def set_autoresponder_private_enabled(enabled: bool) -> None:
+    await set_meta(_AUTORESPONDER_PRIVATE_ENABLED_KEY, "1" if enabled else "0")
+
+
+async def get_autoresponder_night_groups() -> list[int]:
+    raw_value = await get_meta(_AUTORESPONDER_GROUPS_KEY)
+    if raw_value is None:
+        return []
+    try:
+        values = json.loads(raw_value)
+        if not isinstance(values, list) or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in values
+        ):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("В базе сохранён некорректный список групп авторассылки.") from exc
+    return sorted(set(values))
+
+
+async def set_autoresponder_night_groups(group_ids: list[int]) -> None:
+    if any(isinstance(group_id, bool) or not isinstance(group_id, int) for group_id in group_ids):
+        raise ValueError("ID группы должен быть целым числом.")
+    await set_meta(
+        _AUTORESPONDER_GROUPS_KEY,
+        json.dumps(sorted(set(group_ids)), separators=(",", ":")),
+    )
 
 
 def list_message_archives() -> list[Path]:

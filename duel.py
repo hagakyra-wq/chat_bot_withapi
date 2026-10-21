@@ -69,13 +69,14 @@ def _entity_text(text: str, offset: int, length: int) -> str:
 async def _duel_target(
     message: Message,
     context: ContextTypes.DEFAULT_TYPE,
-) -> tuple[int, str | None, str] | None:
+) -> tuple[int, str | None, str, bool] | None:
     replied_user = message.reply_to_message.from_user if message.reply_to_message else None
     if replied_user is not None:
         return (
             replied_user.id,
             replied_user.username,
             replied_user.first_name or replied_user.username or str(replied_user.id),
+            replied_user.is_bot,
         )
 
     text = message.text or ""
@@ -87,6 +88,7 @@ async def _duel_target(
                 mentioned_user.id,
                 mentioned_user.username,
                 mentioned_user.first_name or mentioned_user.username or str(mentioned_user.id),
+                mentioned_user.is_bot,
             )
         if entity.type == MessageEntityType.MENTION:
             match = _USERNAME_RE.fullmatch(_entity_text(text, entity.offset, entity.length))
@@ -97,7 +99,7 @@ async def _duel_target(
         return None
     bot_username = (context.bot.username or "").casefold()
     if bot_username and bot_username in mention_usernames:
-        return context.bot.id, bot_username, "Юбара"
+        return context.bot.id, bot_username, "Юбара", True
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return None
 
@@ -111,6 +113,7 @@ async def _duel_target(
                 user_id,
                 str(participant["username"]) if participant.get("username") else None,
                 str(participant.get("display_name") or f"@{username}"),
+                bool(participant.get("is_bot")),
             )
     return None
 
@@ -359,6 +362,8 @@ async def handle_duel_challenge(
     user = update.effective_user
     if message is None or user is None or not message.text:
         return False
+    if user.is_bot:
+        return False
 
     challenge_text = is_duel_challenge(message.text)
     has_battle_word = _BATTLE_WORD_RE.search(message.text) is not None
@@ -377,6 +382,14 @@ async def handle_duel_challenge(
     if not challenge_text and not targeted_battle and not standalone_battle:
         return False
 
+    if target is not None and target[0] != context.bot.id and target[3]:
+        try:
+            await database.get_duel_balance(target[0], target[1], is_bot=True)
+        except Exception:
+            logging.exception("Не удалось отметить профиль бота %s в рейтинге.", target[0])
+        await message.reply_text("Ботов на батл не вызывают. Выбери настоящего соперника.")
+        return True
+
     if target is not None and target[0] != context.bot.id:
         return await _handle_player_duel(
             message,
@@ -384,7 +397,7 @@ async def handle_duel_challenge(
             user.id,
             user.username,
             user.first_name or user.username or str(user.id),
-            *target,
+            *target[:3],
         )
 
     try:

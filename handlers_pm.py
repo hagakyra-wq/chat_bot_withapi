@@ -18,6 +18,8 @@ from telegram.ext import (
 )
 
 import database
+import autoresponder
+import personal_account
 from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, PROFILE_TRIGGERS
 from duel import (
     handle_balance_request,
@@ -41,7 +43,9 @@ from voice_transcription import handle_voice_transcription, is_transcription_req
 
 ADMIN_MENU, WAIT_ADD_GROUP, WAIT_REMOVE_GROUP, WAIT_CREATE_KEY, WAIT_REVOKE_KEY = range(5)
 WAIT_KEY_DURATION, WAIT_REVOKE_USER, WAIT_REVOKE_ADMIN = range(5, 8)
+WAIT_USERBOT_PHONE, WAIT_USERBOT_CODE, WAIT_USERBOT_PASSWORD = range(8, 11)
 ADMIN_PANEL_USERS: set[int] = set()
+_USERBOT_LOGIN_KEYS = ("userbot_phone", "userbot_phone_code_hash")
 ACCESS_DURATIONS = {
     "forever": (None, "навсегда"),
     "month": (30 * 24 * 60 * 60, "30 дней"),
@@ -139,6 +143,8 @@ def _admin_keyboard(context_enabled: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👥 Список людей с доступом", callback_data="admin:people")],
             [InlineKeyboardButton("🚫 Отозвать доступ пользователя", callback_data="admin:revoke_user")],
             [InlineKeyboardButton("🚫 Отозвать админа", callback_data="admin:revoke_admin")],
+            [InlineKeyboardButton("👤 Личный Telegram-аккаунт", callback_data="admin:userbot")],
+            [InlineKeyboardButton("🌙 Настройки автоответчика", callback_data="admin:autoresponder_settings")],
             [InlineKeyboardButton("🚪 Выйти из админ-панели", callback_data="admin:exit")],
         ]
     )
@@ -171,8 +177,196 @@ async def _show_admin_menu(update: Update) -> None:
         )
 
 
-async def admin_start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> int:
-    del _context
+def _format_utc_offset(offset: int) -> str:
+    return f"UTC{offset:+d}"
+
+
+async def _show_autoresponder_settings(update: Update) -> None:
+    timezone_offset, night_enabled, private_enabled = (
+        await database.get_autoresponder_settings()
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"🌙 Ночная рассылка: {'ВКЛ' if night_enabled else 'ВЫКЛ'}",
+                    callback_data="admin:autoresponder_toggle_night",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"💬 Автоответ в ЛС: {'ВКЛ' if private_enabled else 'ВЫКЛ'}",
+                    callback_data="admin:autoresponder_toggle_private",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"🕒 Часовой пояс: {_format_utc_offset(timezone_offset)}",
+                    callback_data="admin:autoresponder_select_timezone",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "👥 Группы ночной рассылки",
+                    callback_data="admin:autoresponder_groups",
+                )
+            ],
+            [InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")],
+        ]
+    )
+    text = (
+        "Настройки автоответчика:\n"
+        f"Часовой пояс: {_format_utc_offset(timezone_offset)}\n"
+        f"Ночная рассылка: {'включена' if night_enabled else 'выключена'}\n"
+        f"Автоответ в ЛС: {'включён' if private_enabled else 'выключен'}"
+    )
+    query = update.callback_query
+    if query is not None:
+        await query.edit_message_text(text, reply_markup=keyboard)
+    elif update.effective_message is not None:
+        await update.effective_message.reply_text(text, reply_markup=keyboard)
+
+
+async def _show_autoresponder_groups(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int = 0,
+) -> None:
+    common_groups = await autoresponder.list_common_groups(context.bot)
+    common_ids = {group_id for group_id, _ in common_groups}
+    selected_ids = set(await database.get_autoresponder_night_groups())
+    valid_selected_ids = selected_ids & common_ids
+    if valid_selected_ids != selected_ids:
+        await database.set_autoresponder_night_groups(sorted(valid_selected_ids))
+
+    page_size = 8
+    page_count = max(1, (len(common_groups) + page_size - 1) // page_size)
+    page = min(max(page, 0), page_count - 1)
+    start = page * page_size
+    page_groups = common_groups[start : start + page_size]
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅' if group_id in valid_selected_ids else '⬜'} {title[:45]}",
+                callback_data=f"admin:autoresponder_group:{group_id}:{page}",
+            )
+        ]
+        for group_id, title in page_groups
+    ]
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️",
+                callback_data=f"admin:autoresponder_groups_page:{page - 1}",
+            )
+        )
+    if page + 1 < page_count:
+        navigation.append(
+            InlineKeyboardButton(
+                "➡️",
+                callback_data=f"admin:autoresponder_groups_page:{page + 1}",
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "↩️ К настройкам",
+                callback_data="admin:autoresponder_settings",
+            )
+        ]
+    )
+    if common_groups:
+        text = (
+            "Выбери группы для ночной рассылки.\n"
+            "Показаны только группы из списка бота, в которых состоят "
+            "и личный аккаунт, и бот Юбара.\n"
+            f"Страница {page + 1}/{page_count}; выбрано: {len(valid_selected_ids)}."
+        )
+    else:
+        text = (
+            "Нет доступных общих групп. В список попадут только разрешённые "
+            "группы, где состоят и личный аккаунт, и бот Юбара."
+        )
+    query = update.callback_query
+    if query is not None:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _show_autoresponder_timezones(update: Update) -> None:
+    timezone_offset, _, _ = await database.get_autoresponder_settings()
+    offsets = range(-12, 15)
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✓ ' if offset == timezone_offset else ''}{_format_utc_offset(offset)}",
+                callback_data=f"admin:autoresponder_timezone:{offset}",
+            )
+            for offset in offsets
+        ][start : start + 3]
+        for start in range(0, len(offsets), 3)
+    ]
+    rows.append(
+        [InlineKeyboardButton("↩️ Назад", callback_data="admin:autoresponder_settings")]
+    )
+    query = update.callback_query
+    if query is not None:
+        await query.edit_message_text(
+            "Выбери смещение часового пояса относительно UTC:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+
+async def _show_userbot_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    connected, authorized = personal_account.get_status()
+    enabled = personal_account.is_enabled()
+    if not personal_account.is_configured():
+        status = (
+            "Не настроен: задайте TELEGRAM_API_ID и TELEGRAM_API_HASH "
+            "в переменных окружения."
+        )
+    elif authorized:
+        status = "Подключён и авторизован." if connected else "Авторизованная сессия отключена."
+        status += " Автоматические действия включены." if enabled else " Автоматические действия отключены."
+    elif personal_account.session_exists():
+        status = "Файл сессии найден, но аккаунт сейчас не подключён."
+    else:
+        status = "Аккаунт не подключён."
+
+    keyboard = [
+        [InlineKeyboardButton("🔐 Подключить / включить", callback_data="admin:userbot_connect")],
+    ]
+    if enabled or (connected and authorized):
+        keyboard.append(
+            [InlineKeyboardButton("⏸ Отключить", callback_data="admin:userbot_disable")]
+        )
+    keyboard.extend(
+        [
+            [InlineKeyboardButton("🧹 Сбросить сессию", callback_data="admin:userbot_reset")],
+            [InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")],
+        ]
+    )
+    message = f"Личный Telegram-аккаунт:\n{status}"
+    query = update.callback_query
+    if query is not None:
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    elif update.effective_chat is not None:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     if user is None or update.effective_chat is None:
         return ConversationHandler.END
@@ -184,6 +378,9 @@ async def admin_start(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> in
     except Exception:
         logging.exception("Не удалось проверить право администратора для /adm")
         return ConversationHandler.END
+    await personal_account.cancel_login(user.id)
+    for key in _USERBOT_LOGIN_KEYS:
+        context.user_data.pop(key, None)
     ADMIN_PANEL_USERS.add(user.id)
     await _show_admin_menu(update)
     return ADMIN_MENU
@@ -225,11 +422,13 @@ async def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID or await database.is_admin_user(user_id)
 
 
-async def admin_cancel(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> int:
-    del _context
+async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     if user:
         ADMIN_PANEL_USERS.discard(user.id)
+        await personal_account.cancel_login(user.id)
+    for key in _USERBOT_LOGIN_KEYS:
+        context.user_data.pop(key, None)
     if update.effective_message:
         await update.effective_message.reply_text("Админ-панель закрыта. Диалоговый режим снова включён.")
     return ConversationHandler.END
@@ -266,6 +465,250 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return ADMIN_MENU
         await _show_admin_menu(update)
+        return ADMIN_MENU
+    if action == "admin:autoresponder_settings":
+        try:
+            await _show_autoresponder_settings(update)
+        except Exception:
+            logging.exception("Не удалось загрузить настройки автоответчика.")
+            await query.edit_message_text(
+                "Не удалось загрузить настройки автоответчика.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+                ),
+            )
+        return ADMIN_MENU
+    if action == "admin:autoresponder_groups":
+        page = 0
+    elif action.startswith("admin:autoresponder_groups_page:"):
+        try:
+            page = int(action.rsplit(":", 1)[1])
+        except ValueError:
+            page = 0
+    elif action.startswith("admin:autoresponder_group:"):
+        try:
+            _, _, raw_group_id, raw_page = action.split(":")
+            group_id = int(raw_group_id)
+            page = int(raw_page)
+            common_groups = await autoresponder.list_common_groups(context.bot)
+            if group_id not in {candidate_id for candidate_id, _ in common_groups}:
+                await _show_autoresponder_groups(update, context, page)
+                return ADMIN_MENU
+            selected_ids = set(await database.get_autoresponder_night_groups())
+            if group_id in selected_ids:
+                selected_ids.remove(group_id)
+            else:
+                selected_ids.add(group_id)
+            await database.set_autoresponder_night_groups(sorted(selected_ids))
+        except (ValueError, TypeError):
+            logging.exception("Получен некорректный выбор группы авторассылки.")
+            await query.edit_message_text(
+                "Некорректный выбор группы.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К настройкам", callback_data="admin:autoresponder_settings")]]
+                ),
+            )
+            return ADMIN_MENU
+        except Exception:
+            logging.exception("Не удалось изменить выбор группы авторассылки.")
+            await query.edit_message_text(
+                "Не удалось изменить список групп авторассылки.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К настройкам", callback_data="admin:autoresponder_settings")]]
+                ),
+            )
+            return ADMIN_MENU
+    else:
+        page = None
+    if page is not None:
+        try:
+            await _show_autoresponder_groups(update, context, page)
+        except Exception:
+            logging.exception("Не удалось загрузить общие группы авторассылки.")
+            await query.edit_message_text(
+                "Не удалось загрузить группы. Убедись, что личный аккаунт "
+                "подключён и бот имеет доступ к разрешённым группам.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К настройкам", callback_data="admin:autoresponder_settings")]]
+                ),
+            )
+        return ADMIN_MENU
+    if action == "admin:autoresponder_select_timezone":
+        try:
+            await _show_autoresponder_timezones(update)
+        except Exception:
+            logging.exception("Не удалось загрузить список часовых поясов.")
+            await query.edit_message_text(
+                "Не удалось загрузить часовой пояс.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "↩️ К настройкам",
+                                callback_data="admin:autoresponder_settings",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        return ADMIN_MENU
+    if action.startswith("admin:autoresponder_timezone:"):
+        raw_offset = action.removeprefix("admin:autoresponder_timezone:")
+        try:
+            offset = int(raw_offset)
+            await database.set_autoresponder_timezone_offset(offset)
+            await _show_autoresponder_timezones(update)
+        except (ValueError, TypeError):
+            logging.exception("Получено некорректное смещение часового пояса: %r.", raw_offset)
+            await query.edit_message_text(
+                "Некорректное смещение часового пояса.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "↩️ К настройкам",
+                                callback_data="admin:autoresponder_settings",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить часовой пояс автоответчика.")
+            await query.edit_message_text(
+                "Не удалось сохранить часовой пояс.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "↩️ К настройкам",
+                                callback_data="admin:autoresponder_settings",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        return ADMIN_MENU
+    if action in (
+        "admin:autoresponder_toggle_night",
+        "admin:autoresponder_toggle_private",
+    ):
+        try:
+            _, night_enabled, private_enabled = (
+                await database.get_autoresponder_settings()
+            )
+            if action == "admin:autoresponder_toggle_night":
+                await database.set_autoresponder_night_enabled(not night_enabled)
+            else:
+                await database.set_autoresponder_private_enabled(not private_enabled)
+            await _show_autoresponder_settings(update)
+        except Exception:
+            logging.exception("Не удалось изменить настройку автоответчика.")
+            await query.edit_message_text(
+                "Не удалось изменить настройку автоответчика.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "↩️ К настройкам",
+                                callback_data="admin:autoresponder_settings",
+                            )
+                        ]
+                    ]
+                ),
+            )
+        return ADMIN_MENU
+    if action == "admin:userbot":
+        await _show_userbot_menu(update, context)
+        return ADMIN_MENU
+    if action == "admin:userbot_connect":
+        if not personal_account.is_configured():
+            await query.edit_message_text(
+                "Для подключения задайте TELEGRAM_API_ID и TELEGRAM_API_HASH "
+                "в переменных окружения.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        try:
+            if await personal_account.connect_saved_session():
+                personal_account.set_enabled(True)
+                await autoresponder.refresh_user_client()
+                await _show_userbot_menu(update, context)
+                return ADMIN_MENU
+        except Exception:
+            logging.exception("Не удалось проверить сохранённую user-сессию.")
+            await query.edit_message_text(
+                "Не удалось подключить сохранённую сессию. Проверьте настройки и повторите попытку.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        await query.edit_message_text(
+            "Отправь номер телефона аккаунта в международном формате "
+            "(например, +79991234567). Сообщение с номером будет удалено.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+            ),
+        )
+        return WAIT_USERBOT_PHONE
+    if action == "admin:userbot_disable":
+        try:
+            personal_account.set_enabled(False)
+            await autoresponder.stop_user_client()
+            await personal_account.disconnect()
+        except Exception:
+            logging.exception("Не удалось отключить user-аккаунт.")
+            await query.edit_message_text(
+                "Не удалось отключить аккаунт. Проверьте журнал ошибок.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        await _show_userbot_menu(update, context)
+        return ADMIN_MENU
+    if action == "admin:userbot_reset":
+        await query.edit_message_text(
+            "Сбросить сессию? Файл авторизации будет удалён, и аккаунт потребуется подключить заново.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Да, сбросить",
+                            callback_data="admin:userbot_reset_confirm",
+                        )
+                    ],
+                    [InlineKeyboardButton("↩️ Отмена", callback_data="admin:userbot")],
+                ]
+            ),
+        )
+        return ADMIN_MENU
+    if action == "admin:userbot_reset_confirm":
+        try:
+            personal_account.set_enabled(False)
+            await autoresponder.stop_user_client()
+            removed = await personal_account.reset_session()
+        except Exception:
+            logging.exception("Не удалось сбросить user-сессию.")
+            await query.edit_message_text(
+                "Не удалось сбросить сессию. Автоматическое подключение отключено; "
+                "проверьте журнал ошибок.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Назад", callback_data="admin:userbot")]]
+                ),
+            )
+            return ADMIN_MENU
+        logging.info("Сброшена user-сессия; удалено файлов: %s.", len(removed))
+        await _show_userbot_menu(update, context)
+        return ADMIN_MENU
+    if action == "admin:userbot_cancel":
+        await personal_account.cancel_login(user.id)
+        for key in _USERBOT_LOGIN_KEYS:
+            context.user_data.pop(key, None)
+        await _show_userbot_menu(update, context)
         return ADMIN_MENU
     if action == "admin:add_group":
         await query.edit_message_text(
@@ -390,6 +833,246 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if action == "admin:menu":
         await _show_admin_menu(update)
         return ADMIN_MENU
+    return ADMIN_MENU
+
+
+def _clear_userbot_login(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in _USERBOT_LOGIN_KEYS:
+        context.user_data.pop(key, None)
+
+
+async def _consume_userbot_secret(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    description: str,
+) -> str | None:
+    message = update.effective_message
+    if message is None or message.text is None:
+        return None
+    secret = message.text
+    try:
+        await message.delete()
+    except TelegramError:
+        logging.exception(
+            "Не удалось удалить сообщение с данными авторизации user-аккаунта "
+            "(message_id=%s).",
+            message.message_id,
+        )
+        user = update.effective_user
+        if user is not None:
+            await personal_account.cancel_login(user.id)
+        _clear_userbot_login(context)
+        if update.effective_chat is not None:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=(
+                    f"Не удалось удалить сообщение {description}. "
+                    "Данные не были отправлены Telegram для авторизации; "
+                    "проверь права бота и начни подключение заново."
+                ),
+            )
+        return None
+    return secret
+
+
+async def _userbot_phone_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is None or not await _is_admin(user.id):
+        return ConversationHandler.END
+    raw_phone = await _consume_userbot_secret(update, context, "номером телефона")
+    if raw_phone is None:
+        return ADMIN_MENU
+    phone = re.sub(r"[\s()-]", "", raw_phone)
+    if not re.fullmatch(r"\+[1-9]\d{6,14}", phone):
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Нужен номер в международном формате, например +79991234567.",
+        )
+        return WAIT_USERBOT_PHONE
+    try:
+        phone_code_hash = await personal_account.begin_login(user.id, phone)
+    except personal_account.AuthFlowBusyError:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Другой администратор уже проходит авторизацию. Попробуй позже.",
+        )
+        return ADMIN_MENU
+    except Exception:
+        logging.exception("Не удалось запросить код авторизации user-аккаунта.")
+        await personal_account.cancel_login(user.id)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Не удалось запросить код Telegram. Проверь настройки и повтори подключение.",
+        )
+        return ADMIN_MENU
+    if phone_code_hash is None:
+        try:
+            personal_account.set_enabled(True)
+            await autoresponder.refresh_user_client()
+        except Exception:
+            logging.exception("Не удалось сохранить включение user-аккаунта.")
+            await autoresponder.stop_user_client()
+            await personal_account.disconnect()
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="Аккаунт авторизован, но настройку не удалось сохранить; сессия отключена.",
+            )
+            return ADMIN_MENU
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Сохранённая сессия уже авторизована и включена.",
+        )
+        await _show_userbot_menu(update, context)
+        return ADMIN_MENU
+
+    context.user_data["userbot_phone"] = phone
+    context.user_data["userbot_phone_code_hash"] = phone_code_hash
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=(
+            "Отправь код, полученный от Telegram. Сообщение с кодом будет удалено "
+            "до передачи кода в Telegram."
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+        ),
+    )
+    return WAIT_USERBOT_CODE
+
+
+async def _userbot_code_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is None or not await _is_admin(user.id):
+        return ConversationHandler.END
+    code = await _consume_userbot_secret(update, context, "кодом авторизации")
+    if code is None:
+        return ADMIN_MENU
+    code = re.sub(r"\s+", "", code)
+    if not re.fullmatch(r"\d{4,8}", code):
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Код должен состоять из 4–8 цифр. Отправь код ещё раз.",
+        )
+        return WAIT_USERBOT_CODE
+    phone = context.user_data.get("userbot_phone")
+    phone_code_hash = context.user_data.get("userbot_phone_code_hash")
+    if not isinstance(phone, str) or not isinstance(phone_code_hash, str):
+        _clear_userbot_login(context)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Шаг авторизации завершился. Начни подключение заново через /adm.",
+        )
+        return ADMIN_MENU
+    try:
+        await personal_account.submit_login_code(
+            user.id,
+            phone,
+            code,
+            phone_code_hash,
+        )
+    except personal_account.TwoFactorRequiredError:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "Для аккаунта включена двухфакторная защита. Отправь пароль 2FA; "
+                "сообщение будет удалено до проверки."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Отмена", callback_data="admin:userbot_cancel")]]
+            ),
+        )
+        return WAIT_USERBOT_PASSWORD
+    except personal_account.InvalidLoginCodeError:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Telegram отклонил код. Проверь его и отправь новый код.",
+        )
+        return WAIT_USERBOT_CODE
+    except personal_account.ExpiredLoginCodeError:
+        await personal_account.cancel_login(user.id)
+        _clear_userbot_login(context)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Срок действия кода истёк. Начни подключение заново через /adm.",
+        )
+        return ADMIN_MENU
+    except Exception:
+        logging.exception("Не удалось завершить вход user-аккаунта по коду.")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Не удалось проверить код. Повтори попытку или отмени авторизацию.",
+        )
+        return WAIT_USERBOT_CODE
+
+    _clear_userbot_login(context)
+    try:
+        personal_account.set_enabled(True)
+        await autoresponder.refresh_user_client()
+    except Exception:
+        logging.exception("Не удалось сохранить включение user-аккаунта.")
+        await autoresponder.stop_user_client()
+        await personal_account.disconnect()
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Аккаунт авторизован, но настройку не удалось сохранить; сессия отключена.",
+        )
+        return ADMIN_MENU
+    await context.bot.send_message(chat_id=user.id, text="Telegram-аккаунт подключён.")
+    await _show_userbot_menu(update, context)
+    return ADMIN_MENU
+
+
+async def _userbot_password_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is None or not await _is_admin(user.id):
+        return ConversationHandler.END
+    password = await _consume_userbot_secret(update, context, "паролем 2FA")
+    if password is None:
+        return ADMIN_MENU
+    if not password:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Пароль 2FA пустой. Отправь пароль ещё раз.",
+        )
+        return WAIT_USERBOT_PASSWORD
+    try:
+        await personal_account.submit_two_factor_password(user.id, password)
+    except personal_account.InvalidTwoFactorPasswordError:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Telegram отклонил пароль 2FA. Проверь его и отправь ещё раз.",
+        )
+        return WAIT_USERBOT_PASSWORD
+    except Exception:
+        logging.exception("Не удалось завершить вход user-аккаунта с паролем 2FA.")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Не удалось проверить пароль 2FA. Повтори попытку или отмени авторизацию.",
+        )
+        return WAIT_USERBOT_PASSWORD
+
+    _clear_userbot_login(context)
+    try:
+        personal_account.set_enabled(True)
+    except Exception:
+        logging.exception("Не удалось сохранить включение user-аккаунта.")
+        await personal_account.disconnect()
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Аккаунт авторизован, но настройку не удалось сохранить; сессия отключена.",
+        )
+        return ADMIN_MENU
+    await context.bot.send_message(chat_id=user.id, text="Telegram-аккаунт подключён.")
+    await _show_userbot_menu(update, context)
     return ADMIN_MENU
 
 
@@ -661,6 +1344,36 @@ def build_admin_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(
                     revoke_authorized_callback,
                     pattern=r"^admin:revoke_admin:",
+                ),
+            ],
+            WAIT_USERBOT_PHONE: [
+                CallbackQueryHandler(
+                    admin_menu_callback,
+                    pattern=r"^admin:userbot_cancel$",
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    _userbot_phone_input,
+                ),
+            ],
+            WAIT_USERBOT_CODE: [
+                CallbackQueryHandler(
+                    admin_menu_callback,
+                    pattern=r"^admin:userbot_cancel$",
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    _userbot_code_input,
+                ),
+            ],
+            WAIT_USERBOT_PASSWORD: [
+                CallbackQueryHandler(
+                    admin_menu_callback,
+                    pattern=r"^admin:userbot_cancel$",
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    _userbot_password_input,
                 ),
             ],
         },

@@ -21,6 +21,8 @@ from telegram.ext import (
 )
 
 import database
+import autoresponder
+import personal_account
 from channel_log import (
     TelegramChannelLogHandler,
     install_channel_log_handler,
@@ -200,6 +202,11 @@ async def _post_init(application: Application) -> None:
     restored_info = await _restore_database(application.bot)
     await database.initialize()
     await database.rotate_messages_if_needed()
+    try:
+        if await personal_account.startup():
+            logging.info("Сохранённая Telegram user-сессия восстановлена.")
+    except Exception:
+        logging.exception("Не удалось восстановить Telegram user-сессию.")
     if restored_info is not None:
         await database.set_backup_meta(*restored_info)
     if application.job_queue is None:
@@ -217,6 +224,7 @@ async def _post_init(application: Application) -> None:
         time=datetime_time(0, 5, tzinfo=timezone(timedelta(hours=7))),
         name="daily-duel-mining",
     )
+    await autoresponder.initialize(application)
     await send_channel_event(
         application.bot,
         "✅ Юбара запущена: polling и резервное копирование активны.",
@@ -320,6 +328,14 @@ async def _daily_duel_mining_job(_context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _post_shutdown(application: Application) -> None:
     logging.info("Остановка: проверяю, требуется ли финальный бэкап.")
     await send_channel_event(application.bot, "⏹ Юбара останавливается; завершаю задачи и проверяю бэкап.")
+    try:
+        await autoresponder.shutdown()
+    except Exception:
+        logging.exception("Не удалось корректно остановить автоответчик.")
+    try:
+        await personal_account.disconnect()
+    except Exception:
+        logging.exception("Не удалось корректно отключить Telegram user-сессию.")
     await stop_image_jobs()
     await _perform_backup(application.bot)
     log_handler = application.bot_data.pop("channel_log_handler", None)
