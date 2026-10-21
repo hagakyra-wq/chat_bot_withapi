@@ -1,31 +1,56 @@
-"""Управление Telegram user-сессией администратора."""
+"""Управление отдельными Telegram user-сессиями пользователей автоответчика."""
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from telethon import TelegramClient
-from telethon.tl.custom import QRLogin
 from telethon.errors import (
     PasswordHashInvalidError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     SessionPasswordNeededError,
 )
+from telethon.tl.custom import QRLogin
 
-from config import TELEGRAM_API_HASH, TELEGRAM_API_ID, TELEGRAM_USER_SESSION_PATH
-
-_client: TelegramClient | None = None
-_authorized = False
-_auth_owner_id: int | None = None
-_qr_login: QRLogin | None = None
-_code_delivery_hint = (
-    "Проверь приложение Telegram на уже авторизованном устройстве; код может прийти не по SMS."
+from config import (
+    ADMIN_ID,
+    TELEGRAM_API_HASH,
+    TELEGRAM_API_ID,
+    TELEGRAM_USER_SESSION_PATH,
 )
+
+_code_delivery_hints = {
+    "SentCodeTypeApp": (
+        "в сообщении от Telegram в приложении на уже авторизованном устройстве; "
+        "SMS может не прийти"
+    ),
+    "SentCodeTypeSms": "в SMS",
+    "SentCodeTypeCall": "в звонке от Telegram",
+    "SentCodeTypeFlashCall": "в автоматическом звонке от Telegram",
+    "SentCodeTypeEmailCode": "на привязанной к Telegram почте",
+}
+
+
+@dataclass
+class _AccountState:
+    client: TelegramClient | None = None
+    authorized: bool = False
+    qr_login: QRLogin | None = None
+    code_delivery_hint: str = (
+        "Проверь приложение Telegram на уже авторизованном устройстве; "
+        "код может прийти не по SMS."
+    )
+
+
+_accounts: dict[int, _AccountState] = {}
+_auth_owners: dict[int, int] = {}
 
 
 class AuthFlowBusyError(RuntimeError):
-    """Другая админ-сессия уже проходит авторизацию."""
+    """Другая сессия этого аккаунта уже проходит авторизацию."""
 
 
 class TwoFactorRequiredError(RuntimeError):
@@ -48,30 +73,36 @@ def is_configured() -> bool:
     return bool(TELEGRAM_API_ID and TELEGRAM_API_HASH)
 
 
-def _session_file_path() -> Path:
-    path = TELEGRAM_USER_SESSION_PATH
-    if not str(path).endswith(".session"):
-        path = Path(f"{path}.session")
-    return path
+def _state(user_id: int = ADMIN_ID) -> _AccountState:
+    return _accounts.setdefault(user_id, _AccountState())
 
 
-def session_exists() -> bool:
-    return _session_file_path().is_file()
+def _session_file_path(user_id: int = ADMIN_ID) -> Path:
+    base_path = TELEGRAM_USER_SESSION_PATH
+    if user_id != ADMIN_ID:
+        base_path = Path(f"{base_path}.accounts") / str(user_id)
+    if not str(base_path).endswith(".session"):
+        base_path = Path(f"{base_path}.session")
+    return base_path
 
 
-def _enabled_marker_path() -> Path:
-    return Path(f"{_session_file_path()}.enabled")
+def session_exists(user_id: int = ADMIN_ID) -> bool:
+    return _session_file_path(user_id).is_file()
 
 
-def is_enabled() -> bool:
+def _enabled_marker_path(user_id: int = ADMIN_ID) -> Path:
+    return Path(f"{_session_file_path(user_id)}.enabled")
+
+
+def is_enabled(user_id: int = ADMIN_ID) -> bool:
     try:
-        return _enabled_marker_path().read_text(encoding="ascii").strip() == "1"
+        return _enabled_marker_path(user_id).read_text(encoding="ascii").strip() == "1"
     except FileNotFoundError:
         return False
 
 
-def set_enabled(enabled: bool) -> None:
-    marker_path = _enabled_marker_path()
+def set_enabled(enabled: bool, user_id: int = ADMIN_ID) -> None:
+    marker_path = _enabled_marker_path(user_id)
     marker_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary_path = Path(f"{marker_path}.tmp")
     temporary_path.write_text("1" if enabled else "0", encoding="ascii")
@@ -80,19 +111,21 @@ def set_enabled(enabled: bool) -> None:
         os.chmod(marker_path, 0o600)
 
 
-def get_status() -> tuple[bool, bool]:
-    connected = _client is not None and _client.is_connected()
-    return connected, _authorized
+def get_status(user_id: int = ADMIN_ID) -> tuple[bool, bool]:
+    state = _state(user_id)
+    connected = state.client is not None and state.client.is_connected()
+    return connected, state.authorized
 
 
-def get_authorized_client() -> TelegramClient | None:
-    if _authorized and _client is not None and _client.is_connected():
-        return _client
+def get_authorized_client(user_id: int = ADMIN_ID) -> TelegramClient | None:
+    state = _state(user_id)
+    if state.authorized and state.client is not None and state.client.is_connected():
+        return state.client
     return None
 
 
-def _get_client() -> TelegramClient:
-    global _client
+def _get_client(user_id: int = ADMIN_ID) -> TelegramClient:
+    state = _state(user_id)
     if not is_configured():
         raise RuntimeError(
             "Для user-аккаунта задайте TELEGRAM_API_ID и TELEGRAM_API_HASH."
@@ -101,157 +134,160 @@ def _get_client() -> TelegramClient:
         api_id = int(TELEGRAM_API_ID)
     except ValueError as exc:
         raise RuntimeError("TELEGRAM_API_ID должен быть целым числом.") from exc
-    if _client is None:
-        session_path = _session_file_path()
+    if state.client is None:
+        session_path = _session_file_path(user_id)
         session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _client = TelegramClient(
+        state.client = TelegramClient(
             str(session_path),
             api_id,
             TELEGRAM_API_HASH,
         )
-    return _client
+    return state.client
 
 
-async def _connected_client() -> TelegramClient:
-    client = _get_client()
+async def _connected_client(user_id: int = ADMIN_ID) -> TelegramClient:
+    client = _get_client(user_id)
     if not client.is_connected():
         await client.connect()
     return client
 
 
-async def _disconnect_client() -> None:
-    global _client, _authorized
-    client = _client
+async def _disconnect_client(user_id: int = ADMIN_ID) -> None:
+    state = _state(user_id)
+    client = state.client
     if client is not None and client.is_connected():
         await client.disconnect()
-    _client = None
-    _authorized = False
+    state.client = None
+    state.authorized = False
 
 
-def _secure_session_file() -> None:
+def _secure_session_file(user_id: int = ADMIN_ID) -> None:
     if os.name != "nt":
-        session_path = _session_file_path()
+        session_path = _session_file_path(user_id)
         if session_path.is_file():
             os.chmod(session_path, 0o600)
 
 
-async def connect_saved_session() -> bool:
-    """Подключает сохранённую сессию, если она уже авторизована."""
-    global _authorized
+async def connect_saved_session(user_id: int = ADMIN_ID) -> bool:
+    """Подключает сохранённую сессию указанного владельца."""
+    state = _state(user_id)
     if not is_configured():
         logging.warning(
-            "User-аккаунт не подключён: не заданы TELEGRAM_API_ID и TELEGRAM_API_HASH."
+            "User-аккаунт %s не подключён: не заданы TELEGRAM_API_ID и TELEGRAM_API_HASH.",
+            user_id,
         )
         return False
-    client = await _connected_client()
+    client = await _connected_client(user_id)
     if not await client.is_user_authorized():
-        await _disconnect_client()
+        await _disconnect_client(user_id)
         return False
-    _authorized = True
-    _secure_session_file()
+    state.authorized = True
+    _secure_session_file(user_id)
     return True
 
 
-async def startup() -> bool:
-    if not is_enabled():
-        return False
-    return await connect_saved_session()
+async def startup(user_ids: Iterable[int] = ()) -> list[int]:
+    """Восстанавливает только включённые сессии и возвращает подключённые ID."""
+    connected_ids: list[int] = []
+    for user_id in dict.fromkeys((ADMIN_ID, *user_ids)):
+        if not is_enabled(user_id):
+            continue
+        try:
+            if await connect_saved_session(user_id):
+                connected_ids.append(user_id)
+            else:
+                set_enabled(False, user_id)
+        except Exception:
+            logging.exception("Не удалось восстановить Telegram user-сессию user_id=%s.", user_id)
+            await _disconnect_client(user_id)
+    return connected_ids
 
 
 async def begin_login(user_id: int, phone: str) -> str | None:
-    """Запрашивает код и возвращает только временный phone_code_hash."""
-    global _auth_owner_id, _authorized, _code_delivery_hint
-    if _auth_owner_id not in (None, user_id):
+    """Запрашивает код и возвращает временный phone_code_hash."""
+    state = _state(user_id)
+    if user_id in _auth_owners:
         raise AuthFlowBusyError
-    _auth_owner_id = user_id
+    _auth_owners[user_id] = user_id
     try:
-        client = await _connected_client()
+        client = await _connected_client(user_id)
         if await client.is_user_authorized():
-            _authorized = True
-            _auth_owner_id = None
-            _secure_session_file()
+            state.authorized = True
+            _auth_owners.pop(user_id, None)
+            _secure_session_file(user_id)
             return None
         sent_code = await client.send_code_request(phone)
         delivery_type = type(sent_code.type).__name__
-        delivery_hints = {
-            "SentCodeTypeApp": (
-                "в сообщении от Telegram в приложении на уже авторизованном устройстве; "
-                "SMS может не прийти"
-            ),
-            "SentCodeTypeSms": "в SMS",
-            "SentCodeTypeCall": "в звонке от Telegram",
-            "SentCodeTypeFlashCall": "в автоматическом звонке от Telegram",
-            "SentCodeTypeEmailCode": "на привязанной к Telegram почте",
-        }
-        _code_delivery_hint = delivery_hints.get(
+        state.code_delivery_hint = _code_delivery_hints.get(
             delivery_type,
             "способ доставки определяет Telegram; проверь приложение Telegram и SMS",
         )
-        logging.info("Telegram выбрал способ доставки кода: %s.", delivery_type)
+        logging.info(
+            "Telegram выбрал способ доставки кода для user_id=%s: %s.",
+            user_id,
+            delivery_type,
+        )
         return sent_code.phone_code_hash
     except Exception:
-        _auth_owner_id = None
-        if not _authorized:
-            await _disconnect_client()
+        _auth_owners.pop(user_id, None)
+        if not state.authorized:
+            await _disconnect_client(user_id)
         raise
 
 
-def get_code_delivery_hint() -> str:
-    return _code_delivery_hint
+def get_code_delivery_hint(user_id: int = ADMIN_ID) -> str:
+    return _state(user_id).code_delivery_hint
 
 
 async def begin_qr_login(user_id: int) -> QRLogin | None:
     """Создаёт QR-токен для входа с ранее авторизованного Telegram-устройства."""
-    global _auth_owner_id, _authorized, _qr_login
-    if _auth_owner_id not in (None, user_id):
+    state = _state(user_id)
+    if user_id in _auth_owners:
         raise AuthFlowBusyError
-    _auth_owner_id = user_id
+    _auth_owners[user_id] = user_id
     try:
-        client = await _connected_client()
+        client = await _connected_client(user_id)
         if await client.is_user_authorized():
-            _authorized = True
-            _auth_owner_id = None
-            _secure_session_file()
+            state.authorized = True
+            _auth_owners.pop(user_id, None)
+            _secure_session_file(user_id)
             return None
-        _qr_login = await client.qr_login()
-        return _qr_login
+        state.qr_login = await client.qr_login()
+        return state.qr_login
     except Exception:
-        if _auth_owner_id == user_id:
-            _auth_owner_id = None
+        _auth_owners.pop(user_id, None)
         raise
 
 
 def get_qr_login(user_id: int) -> QRLogin:
     _check_auth_owner(user_id)
-    if _qr_login is None:
+    qr_login = _state(user_id).qr_login
+    if qr_login is None:
         raise RuntimeError("QR-авторизация не запущена.")
-    return _qr_login
+    return qr_login
 
 
 async def wait_for_qr_login(user_id: int) -> None:
-    global _auth_owner_id, _authorized, _qr_login
+    state = _state(user_id)
     qr_login = get_qr_login(user_id)
     try:
         await qr_login.wait()
     except SessionPasswordNeededError as exc:
         raise TwoFactorRequiredError from exc
-    _authorized = True
-    _auth_owner_id = None
-    _qr_login = None
-    _secure_session_file()
+    state.authorized = True
+    _auth_owners.pop(user_id, None)
+    state.qr_login = None
+    _secure_session_file(user_id)
 
 
 async def recreate_qr_login(user_id: int) -> QRLogin:
-    global _qr_login
-    _check_auth_owner(user_id)
-    if _qr_login is None:
-        raise RuntimeError("QR-авторизация не запущена.")
-    await _qr_login.recreate()
-    return _qr_login
+    qr_login = get_qr_login(user_id)
+    await qr_login.recreate()
+    return qr_login
 
 
 def _check_auth_owner(user_id: int) -> None:
-    if _auth_owner_id != user_id:
+    if _auth_owners.get(user_id) != user_id:
         raise RuntimeError("Шаг авторизации уже отменён или истёк.")
 
 
@@ -261,9 +297,9 @@ async def submit_login_code(
     code: str,
     phone_code_hash: str,
 ) -> None:
-    global _auth_owner_id, _authorized
+    state = _state(user_id)
     _check_auth_owner(user_id)
-    client = await _connected_client()
+    client = await _connected_client(user_id)
     try:
         await client.sign_in(
             phone=phone,
@@ -276,57 +312,67 @@ async def submit_login_code(
         raise InvalidLoginCodeError from exc
     except PhoneCodeExpiredError as exc:
         raise ExpiredLoginCodeError from exc
-    _authorized = True
-    _auth_owner_id = None
-    _secure_session_file()
+    state.authorized = True
+    _auth_owners.pop(user_id, None)
+    _secure_session_file(user_id)
 
 
 async def submit_two_factor_password(user_id: int, password: str) -> None:
-    global _auth_owner_id, _authorized
+    state = _state(user_id)
     _check_auth_owner(user_id)
-    client = await _connected_client()
+    client = await _connected_client(user_id)
     try:
         await client.sign_in(password=password)
     except PasswordHashInvalidError as exc:
         raise InvalidTwoFactorPasswordError from exc
-    _authorized = True
-    _auth_owner_id = None
-    _secure_session_file()
+    state.authorized = True
+    _auth_owners.pop(user_id, None)
+    state.qr_login = None
+    _secure_session_file(user_id)
 
 
 async def cancel_login(user_id: int) -> None:
-    global _auth_owner_id, _qr_login
-    if _auth_owner_id == user_id:
-        _auth_owner_id = None
-        _qr_login = None
-        if not _authorized:
-            await _disconnect_client()
+    state = _state(user_id)
+    if _auth_owners.get(user_id) == user_id:
+        _auth_owners.pop(user_id, None)
+        state.qr_login = None
+        if not state.authorized:
+            await _disconnect_client(user_id)
 
 
-async def disconnect() -> None:
-    """Отключает клиент, сохраняя файл авторизованной сессии."""
-    global _auth_owner_id, _qr_login
-    _auth_owner_id = None
-    _qr_login = None
-    await _disconnect_client()
+async def disconnect(user_id: int = ADMIN_ID) -> None:
+    """Отключает user-клиент, сохраняя файл сессии."""
+    state = _state(user_id)
+    _auth_owners.pop(user_id, None)
+    state.qr_login = None
+    await _disconnect_client(user_id)
 
 
-async def reset_session() -> list[Path]:
-    """Отключает user-аккаунт и удаляет только его SQLite session-файлы."""
-    global _auth_owner_id
-    _auth_owner_id = None
-    await _disconnect_client()
-    session_path = _session_file_path()
+async def disconnect_all() -> None:
+    """Отключает все user-сессии, известные этому процессу."""
+    for user_id in tuple(_accounts):
+        await disconnect(user_id)
+
+
+async def reset_session(user_id: int = ADMIN_ID) -> list[Path]:
+    """Отключает аккаунт и удаляет только файлы его сессии."""
+    state = _state(user_id)
+    _auth_owners.pop(user_id, None)
+    state.qr_login = None
+    await _disconnect_client(user_id)
+    session_path = _session_file_path(user_id)
+    marker_path = _enabled_marker_path(user_id)
     removed: list[Path] = []
     for path in (
         session_path,
         Path(f"{session_path}-journal"),
         Path(f"{session_path}-wal"),
         Path(f"{session_path}-shm"),
-        _enabled_marker_path(),
-        Path(f"{_enabled_marker_path()}.tmp"),
+        marker_path,
+        Path(f"{marker_path}.tmp"),
     ):
         if path.exists():
             path.unlink()
             removed.append(path)
+    _accounts.pop(user_id, None)
     return removed

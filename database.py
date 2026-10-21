@@ -15,6 +15,7 @@ from typing import Any
 import aiosqlite
 
 from config import (
+    ADMIN_ID,
     DATABASE_BACKUP_PATH,
     DATABASE_ARCHIVE_DIR,
     DATABASE_PATH,
@@ -31,6 +32,16 @@ _AUTORESPONDER_NIGHT_ENABLED_KEY = "autoresponder_night_enabled"
 _AUTORESPONDER_PRIVATE_ENABLED_KEY = "autoresponder_private_enabled"
 _AUTORESPONDER_GROUPS_KEY = "autoresponder_night_groups"
 _AUTORESPONDER_DEFAULT_TIMEZONE_OFFSET = 5
+_AUTORESPONDER_DEFAULT_NIGHT_TEXT = (
+    "Всем сладких снов!!! "
+    "(хоть это и автоответчик, я мысленно пожелал вам это <3!)"
+)
+
+
+def _autoresponder_meta_key(key: str, user_id: int | None) -> str:
+    if user_id is None or user_id == ADMIN_ID:
+        return key
+    return f"{key}:{user_id}"
 
 
 @asynccontextmanager
@@ -102,6 +113,13 @@ async def initialize() -> None:
                     username TEXT,
                     access_level TEXT NOT NULL DEFAULT 'user',
                     expires_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS user_features (
+                    user_id INTEGER NOT NULL,
+                    feature TEXT NOT NULL,
+                    authorized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at REAL,
+                    PRIMARY KEY (user_id, feature)
                 );
                 CREATE TABLE IF NOT EXISTS meta (
                     key TEXT PRIMARY KEY,
@@ -229,6 +247,21 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_authorized_users_delete
                 AFTER DELETE ON authorized_users BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_user_features_insert
+                AFTER INSERT ON user_features BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_user_features_update
+                AFTER UPDATE ON user_features BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_user_features_delete
+                AFTER DELETE ON user_features BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -1197,6 +1230,73 @@ async def is_admin_user(user_id: int) -> bool:
     return bool(record and record["access_level"] == "admin")
 
 
+async def is_feature_authorized(user_id: int, feature: str) -> bool:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT 1 FROM user_features
+            WHERE user_id = ? AND feature = ?
+              AND (expires_at IS NULL OR expires_at > ?)
+            """,
+            (user_id, feature, time.time()),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def list_feature_user_ids(
+    feature: str,
+    include_expired: bool = False,
+) -> list[int]:
+    async with _connect() as db:
+        if include_expired:
+            cursor = await db.execute(
+                """
+                SELECT user_id FROM user_features
+                WHERE feature = ?
+                ORDER BY user_id
+                """,
+                (feature,),
+            )
+        else:
+            cursor = await db.execute(
+                """
+                SELECT user_id FROM user_features
+                WHERE feature = ? AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY user_id
+                """,
+                (feature, time.time()),
+            )
+        return [int(row["user_id"]) for row in await cursor.fetchall()]
+
+
+async def list_feature_authorized_users(feature: str) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, authorized_at, expires_at
+            FROM user_features
+            WHERE feature = ? AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY user_id
+            """,
+            (feature, time.time()),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def revoke_feature_access(user_id: int, feature: str) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM user_features WHERE user_id = ? AND feature = ?",
+                (user_id, feature),
+            )
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            _record_write()
+        return deleted
+
+
 async def consume_access_key(
     key: str,
     user_id: int,
@@ -1231,6 +1331,24 @@ async def consume_access_key(
                 else None
             )
             granted_level = str(key_record["access_level"])
+            if granted_level == "autoresponder":
+                await db.execute("DELETE FROM access_keys WHERE key = ?", (key,))
+                await db.execute(
+                    """
+                    INSERT INTO user_features(user_id, feature, expires_at)
+                    VALUES (?, 'autoresponder', ?)
+                    ON CONFLICT(user_id, feature) DO UPDATE SET
+                        expires_at = excluded.expires_at,
+                        authorized_at = CURRENT_TIMESTAMP
+                    """,
+                    (user_id, expires_at),
+                )
+                await db.commit()
+                _record_write()
+                return {
+                    "access_level": "autoresponder",
+                    "expires_at": expires_at,
+                }
             if previous_record and previous_record["access_level"] == "admin" and granted_level == "user":
                 granted_level = "admin"
                 expires_at = previous_record["expires_at"]
@@ -1263,8 +1381,8 @@ async def create_access_key(
     duration_seconds: int | None = None,
     created_by: int | None = None,
 ) -> bool:
-    if access_level not in ("user", "admin"):
-        raise ValueError("access_level должен быть user или admin.")
+    if access_level not in ("user", "admin", "autoresponder"):
+        raise ValueError("access_level должен быть user, admin или autoresponder.")
     if duration_seconds is not None and duration_seconds <= 0:
         raise ValueError("duration_seconds должен быть положительным.")
     async with _write_lock:
@@ -1401,11 +1519,19 @@ async def set_chat_context_enabled(enabled: bool) -> None:
         _record_write()
 
 
-async def get_autoresponder_settings() -> tuple[int, bool, bool]:
+async def get_autoresponder_settings(
+    user_id: int | None = None,
+) -> tuple[int, bool, bool]:
     """Возвращает смещение UTC, статус ночной рассылки и автоответа в ЛС."""
-    timezone_value = await get_meta(_AUTORESPONDER_TIMEZONE_KEY)
-    night_value = await get_meta(_AUTORESPONDER_NIGHT_ENABLED_KEY)
-    private_value = await get_meta(_AUTORESPONDER_PRIVATE_ENABLED_KEY)
+    timezone_value = await get_meta(
+        _autoresponder_meta_key(_AUTORESPONDER_TIMEZONE_KEY, user_id)
+    )
+    night_value = await get_meta(
+        _autoresponder_meta_key(_AUTORESPONDER_NIGHT_ENABLED_KEY, user_id)
+    )
+    private_value = await get_meta(
+        _autoresponder_meta_key(_AUTORESPONDER_PRIVATE_ENABLED_KEY, user_id)
+    )
 
     try:
             timezone_offset = (
@@ -1427,22 +1553,40 @@ async def get_autoresponder_settings() -> tuple[int, bool, bool]:
     return timezone_offset, night_value == "1", private_value == "1"
 
 
-async def set_autoresponder_timezone_offset(offset: int) -> None:
+async def set_autoresponder_timezone_offset(
+    offset: int,
+    user_id: int | None = None,
+) -> None:
     if not -12 <= offset <= 14:
             raise ValueError("Смещение UTC должно быть от -12 до +14 часов.")
-    await set_meta(_AUTORESPONDER_TIMEZONE_KEY, str(offset))
+    await set_meta(
+        _autoresponder_meta_key(_AUTORESPONDER_TIMEZONE_KEY, user_id),
+        str(offset),
+    )
 
 
-async def set_autoresponder_night_enabled(enabled: bool) -> None:
-    await set_meta(_AUTORESPONDER_NIGHT_ENABLED_KEY, "1" if enabled else "0")
+async def set_autoresponder_night_enabled(
+    enabled: bool,
+    user_id: int | None = None,
+) -> None:
+    await set_meta(
+        _autoresponder_meta_key(_AUTORESPONDER_NIGHT_ENABLED_KEY, user_id),
+        "1" if enabled else "0",
+    )
 
 
-async def set_autoresponder_private_enabled(enabled: bool) -> None:
-    await set_meta(_AUTORESPONDER_PRIVATE_ENABLED_KEY, "1" if enabled else "0")
+async def set_autoresponder_private_enabled(
+    enabled: bool,
+    user_id: int | None = None,
+) -> None:
+    await set_meta(
+        _autoresponder_meta_key(_AUTORESPONDER_PRIVATE_ENABLED_KEY, user_id),
+        "1" if enabled else "0",
+    )
 
 
-async def get_autoresponder_night_groups() -> list[int]:
-    raw_value = await get_meta(_AUTORESPONDER_GROUPS_KEY)
+async def get_autoresponder_night_groups(user_id: int | None = None) -> list[int]:
+    raw_value = await get_meta(_autoresponder_meta_key(_AUTORESPONDER_GROUPS_KEY, user_id))
     if raw_value is None:
         return []
     try:
@@ -1457,12 +1601,36 @@ async def get_autoresponder_night_groups() -> list[int]:
     return sorted(set(values))
 
 
-async def set_autoresponder_night_groups(group_ids: list[int]) -> None:
+async def set_autoresponder_night_groups(
+    group_ids: list[int],
+    user_id: int | None = None,
+) -> None:
     if any(isinstance(group_id, bool) or not isinstance(group_id, int) for group_id in group_ids):
         raise ValueError("ID группы должен быть целым числом.")
     await set_meta(
-        _AUTORESPONDER_GROUPS_KEY,
+        _autoresponder_meta_key(_AUTORESPONDER_GROUPS_KEY, user_id),
         json.dumps(sorted(set(group_ids)), separators=(",", ":")),
+    )
+
+
+async def get_autoresponder_night_text(user_id: int | None = None) -> str:
+    value = await get_meta(
+        _autoresponder_meta_key("autoresponder_night_text", user_id)
+    )
+    return _AUTORESPONDER_DEFAULT_NIGHT_TEXT if value is None else value
+
+
+async def set_autoresponder_night_text(
+    text: str,
+    user_id: int | None = None,
+) -> None:
+    if not text.strip():
+        raise ValueError("Текст ночного пожелания не может быть пустым.")
+    if len(text) > 1000:
+        raise ValueError("Текст ночного пожелания не должен превышать 1000 символов.")
+    await set_meta(
+        _autoresponder_meta_key("autoresponder_night_text", user_id),
+        text,
     )
 
 

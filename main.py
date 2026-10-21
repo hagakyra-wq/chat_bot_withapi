@@ -41,7 +41,12 @@ from config import (
 )
 from duel import handle_player_duel_callback
 from handlers_group import on_group_message, on_new_members
-from handlers_pm import break_command, build_admin_conversation_handler, on_private_message
+from handlers_pm import (
+    break_command,
+    build_admin_conversation_handler,
+    build_personal_autoresponder_conversation_handler,
+    on_private_message,
+)
 from images import on_image_callback, stop_image_jobs
 
 
@@ -333,7 +338,7 @@ async def _post_shutdown(application: Application) -> None:
     except Exception:
         logging.exception("Не удалось корректно остановить автоответчик.")
     try:
-        await personal_account.disconnect()
+        await personal_account.disconnect_all()
     except Exception:
         logging.exception("Не удалось корректно отключить Telegram user-сессию.")
     await stop_image_jobs()
@@ -369,6 +374,7 @@ def build_application() -> Application:
         CommandHandler("break", break_command, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(build_admin_conversation_handler())
+    application.add_handler(build_personal_autoresponder_conversation_handler())
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,
