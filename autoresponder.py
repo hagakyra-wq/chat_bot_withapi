@@ -113,7 +113,20 @@ def _night_done_key(local_date: str, group_id: int, user_id: int = ADMIN_ID) -> 
 
 
 def _is_night_check_time(local_now: datetime) -> bool:
-    return local_now.hour == 23 and local_now.minute == 30
+    return (local_now.hour == 23 and local_now.minute >= 30) or local_now.hour < 3
+
+
+def _night_cycle_date(local_now: datetime) -> str:
+    night_date = local_now.date()
+    if local_now.hour < 3:
+        night_date -= timedelta(days=1)
+    return night_date.isoformat()
+
+
+async def _last_outgoing_message(client: TelegramClient) -> datetime | None:
+    async for message in client.iter_messages(None, limit=1, from_user="me"):
+        return _message_datetime(message)
+    return None
 
 
 async def _evening_user_messages(
@@ -220,12 +233,12 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     group_ids = await database.get_autoresponder_night_groups(user_id)
                     if not group_ids:
                         continue
+                    local_date = _night_cycle_date(local_now)
                     window_start = datetime.combine(
-                        local_now.date(),
+                        datetime.fromisoformat(local_date).date(),
                         datetime_time(21, 0),
                         tzinfo=local_timezone,
                     ).astimezone(timezone.utc)
-                    local_date = local_now.date().isoformat()
                     for group_id in group_ids:
                         try:
                             await _process_night_group(
@@ -278,14 +291,12 @@ async def _on_private_message(
                 return
 
             now_utc = datetime.now(timezone.utc)
-            async for outgoing in client.iter_messages(
-                chat_id,
-                limit=1,
-                from_user="me",
+            last_outgoing = await _last_outgoing_message(client)
+            if (
+                last_outgoing is not None
+                and now_utc - last_outgoing <= _PRIVATE_REPLY_INTERVAL
             ):
-                if now_utc - _message_datetime(outgoing) <= _PRIVATE_REPLY_INTERVAL:
-                    return
-                break
+                return
 
             await client.send_message(
                 chat_id,
