@@ -24,10 +24,6 @@ _DEFAULT_NIGHT_MESSAGE = (
     "Всем сладких снов!!! "
     "(хоть это и автоответчик, я мысленно пожелал вам это <3!)"
 )
-_PRIVATE_REPLY = (
-    "Это автоответчик, ожидайте, это не займет слишком много времени "
-    "(около 5 лет)"
-)
 _application: Application | None = None
 _private_event_builders: dict[int, events.NewMessage] = {}
 _private_event_handlers: dict[int, Any] = {}
@@ -298,11 +294,12 @@ async def _on_private_message(
             ):
                 return
 
+            private_text = await database.get_autoresponder_private_text(user_id)
             await client.send_message(
                 chat_id,
-                _PRIVATE_REPLY,
+                private_text,
                 parse_mode=None,
-                formatting_entities=_spoiler_entities(_PRIVATE_REPLY),
+                formatting_entities=_spoiler_entities(private_text),
             )
             logging.info("Автоответ user-аккаунта отправлен в личный чат %s.", chat_id)
         except Exception:

@@ -50,6 +50,8 @@ WAIT_USERBOT_QR = 11
 AUTO_MENU, WAIT_AUTO_PHONE, WAIT_AUTO_CODE, WAIT_AUTO_PASSWORD = range(20, 24)
 WAIT_AUTO_QR, WAIT_AUTO_TIMEZONE, WAIT_AUTO_TEXT = range(24, 27)
 WAIT_ADMIN_NIGHT_TEXT = 27
+WAIT_AUTO_PRIVATE_TEXT = 28
+WAIT_ADMIN_PRIVATE_TEXT = 29
 ADMIN_PANEL_USERS: set[int] = set()
 _USERBOT_LOGIN_KEYS = (
     "userbot_phone",
@@ -229,6 +231,12 @@ async def _show_autoresponder_settings(update: Update) -> None:
                     callback_data="admin:night_text_edit",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    "✏️ Текст автоответа в ЛС",
+                    callback_data="admin:private_text_edit",
+                )
+            ],
             [InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")],
         ]
     )
@@ -398,6 +406,7 @@ async def _show_personal_autoresponder_menu(
         await database.get_autoresponder_settings(user.id)
     )
     night_text = await database.get_autoresponder_night_text(user.id)
+    private_text = await database.get_autoresponder_private_text(user.id)
     status = (
         "Аккаунт подключён."
         if connected and authorized
@@ -428,6 +437,7 @@ async def _show_personal_autoresponder_menu(
         ],
         [InlineKeyboardButton("👥 Группы ночной рассылки", callback_data="auto:groups")],
         [InlineKeyboardButton("✏️ Текст спокойной ночи", callback_data="auto:night_text")],
+        [InlineKeyboardButton("✏️ Текст автоответа в ЛС", callback_data="auto:private_text")],
     ]
     if enabled or authorized:
         keyboard.append(
@@ -442,7 +452,8 @@ async def _show_personal_autoresponder_menu(
         "Личный автоответчик (настройки и аккаунт принадлежат только тебе).\n"
         f"{status} Режимы работают, когда аккаунт включён: "
         f"{'да' if enabled else 'нет'}.\n"
-        f"Текст ночного сообщения: {night_text}"
+        f"Текст ночного сообщения: {night_text}\n"
+        f"Текст автоответа в ЛС: {private_text}"
     )
     query = update.callback_query
     if query is not None:
@@ -575,6 +586,25 @@ async def _prompt_night_text(
         await update.effective_message.reply_text(text)
 
 
+async def _prompt_private_text(
+    update: Update,
+    user_id: int,
+) -> None:
+    current_text = await database.get_autoresponder_private_text(user_id)
+    text = (
+        "Пришли новый текст автоответа в личных сообщениях (до 1000 символов).\n\n"
+        "Фрагменты в круглых скобках будут скрыты под спойлером.\n"
+        "Для отмены отправь /cancel.\n\n"
+        "Сейчас сохранено:\n"
+        f"{current_text}"
+    )
+    query = update.callback_query
+    if query is not None:
+        await query.edit_message_text(text)
+    elif update.effective_message is not None:
+        await update.effective_message.reply_text(text)
+
+
 async def _save_night_text_input(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -613,6 +643,47 @@ async def _save_night_text_input(
         logging.exception("Не удалось сохранить текст ночного пожелания user_id=%s.", owner_id)
         await message.reply_text("Не удалось сохранить текст. Попробуй ещё раз.")
         return WAIT_AUTO_TEXT if auto_mode else WAIT_ADMIN_NIGHT_TEXT
+
+
+async def _save_private_text_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    message = update.effective_message
+    auto_mode = context.user_data.get("autoresponder_menu") is True
+    retry_state = WAIT_AUTO_PRIVATE_TEXT if auto_mode else WAIT_ADMIN_PRIVATE_TEXT
+    if user is None or message is None or message.text is None:
+        return retry_state
+    if auto_mode:
+        if not await _has_autoresponder_access(user.id):
+            await message.reply_text("Срок доступа к автоответчику закончился.")
+            return ConversationHandler.END
+        owner_id = user.id
+    else:
+        if not await _is_admin(user.id):
+            return ConversationHandler.END
+        owner_id = ADMIN_ID
+
+    private_text = message.text.strip()
+    if not private_text:
+        await message.reply_text("Текст не должен быть пустым. Отправь его ещё раз.")
+        return retry_state
+    if len(private_text) > 1000:
+        await message.reply_text("Текст длиннее 1000 символов. Сократи его и отправь ещё раз.")
+        return retry_state
+    try:
+        await database.set_autoresponder_private_text(private_text, owner_id)
+        await message.reply_text("Текст автоответа в ЛС сохранён.")
+        if auto_mode:
+            await _show_personal_autoresponder_menu(update, context)
+            return AUTO_MENU
+        await _show_autoresponder_settings(update)
+        return ADMIN_MENU
+    except Exception:
+        logging.exception("Не удалось сохранить текст автоответа user_id=%s.", owner_id)
+        await message.reply_text("Не удалось сохранить текст. Попробуй ещё раз.")
+        return retry_state
 
 
 async def personal_autoresponder_cancel(
@@ -812,6 +883,19 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return ADMIN_MENU
         return WAIT_ADMIN_NIGHT_TEXT
+    if action == "admin:private_text_edit":
+        try:
+            await _prompt_private_text(update, ADMIN_ID)
+        except Exception:
+            logging.exception("Не удалось загрузить текст автоответа в ЛС.")
+            await query.edit_message_text(
+                "Не удалось загрузить текст. Попробуй открыть настройки ещё раз.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К настройкам", callback_data="admin:autoresponder_settings")]]
+                ),
+            )
+            return ADMIN_MENU
+        return WAIT_ADMIN_PRIVATE_TEXT
     if action.startswith("admin:autoresponder_timezone:"):
         raw_offset = action.removeprefix("admin:autoresponder_timezone:")
         try:
@@ -1412,6 +1496,14 @@ async def personal_autoresponder_callback(
             await query.edit_message_text("Не удалось загрузить текст.")
             return AUTO_MENU
         return WAIT_AUTO_TEXT
+    if action == "auto:private_text":
+        try:
+            await _prompt_private_text(update, user.id)
+        except Exception:
+            logging.exception("Не удалось загрузить текст автоответа user_id=%s.", user.id)
+            await query.edit_message_text("Не удалось загрузить текст.")
+            return AUTO_MENU
+        return WAIT_AUTO_PRIVATE_TEXT
     return AUTO_MENU
 
 
@@ -2239,6 +2331,16 @@ def build_admin_conversation_handler() -> ConversationHandler:
                     _save_night_text_input,
                 ),
             ],
+            WAIT_ADMIN_PRIVATE_TEXT: [
+                CallbackQueryHandler(
+                    admin_menu_callback,
+                    pattern=r"^admin:autoresponder_settings$",
+                ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    _save_private_text_input,
+                ),
+            ],
         },
         fallbacks=[CommandHandler("cancel", admin_cancel)],
         allow_reentry=True,
@@ -2281,6 +2383,10 @@ def build_personal_autoresponder_conversation_handler() -> ConversationHandler:
             WAIT_AUTO_TEXT: [
                 auto_callbacks,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, _save_night_text_input),
+            ],
+            WAIT_AUTO_PRIVATE_TEXT: [
+                auto_callbacks,
+                MessageHandler(filters.TEXT & ~filters.COMMAND, _save_private_text_input),
             ],
         },
         fallbacks=[CommandHandler("cancel", personal_autoresponder_cancel)],

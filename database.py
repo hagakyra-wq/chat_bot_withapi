@@ -36,6 +36,10 @@ _AUTORESPONDER_DEFAULT_NIGHT_TEXT = (
     "Всем сладких снов!!! "
     "(хоть это и автоответчик, я мысленно пожелал вам это <3!)"
 )
+_AUTORESPONDER_DEFAULT_PRIVATE_TEXT = (
+    "Это автоответчик, ожидайте, это не займет слишком много времени "
+    "(около 5 лет)"
+)
 
 
 def _autoresponder_meta_key(key: str, user_id: int | None) -> str:
@@ -1630,6 +1634,27 @@ async def set_autoresponder_night_text(
         raise ValueError("Текст ночного пожелания не должен превышать 1000 символов.")
     await set_meta(
         _autoresponder_meta_key("autoresponder_night_text", user_id),
+        text,
+    )
+
+
+async def get_autoresponder_private_text(user_id: int | None = None) -> str:
+    value = await get_meta(
+        _autoresponder_meta_key("autoresponder_private_text", user_id)
+    )
+    return _AUTORESPONDER_DEFAULT_PRIVATE_TEXT if value is None else value
+
+
+async def set_autoresponder_private_text(
+    text: str,
+    user_id: int | None = None,
+) -> None:
+    if not text.strip():
+        raise ValueError("Текст автоответа в личных сообщениях не может быть пустым.")
+    if len(text) > 1000:
+        raise ValueError("Текст автоответа не должен превышать 1000 символов.")
+    await set_meta(
+        _autoresponder_meta_key("autoresponder_private_text", user_id),
         text,
     )
 
