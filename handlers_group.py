@@ -15,6 +15,7 @@ from telegram.ext import ContextTypes
 
 import database
 from config import (
+    ADMIN_ID,
     AVAILABLE_REACTIONS,
     DEFAULT_CONTEXT_SIZE,
     KNOWN_PEOPLE_TRIGGERS,
@@ -63,6 +64,10 @@ _PROFILE_GROUP_ID_RE = re.compile(
     re.IGNORECASE,
 )
 _PROFILE_COMMAND_RE = re.compile(r"^/profile(?:@\w+)?(?:\s+(-?\d+))?\s*$", re.IGNORECASE)
+_GROUP_PROMO_COMMAND_RE = re.compile(
+    r"^/activategroup(?:@\w+)?\s+(?P<code>YUBARA-[A-F0-9]{12})$",
+    re.IGNORECASE,
+)
 
 
 def _user_name(user: object | None) -> str:
@@ -292,6 +297,52 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         allowed = await database.is_group_allowed(group_id)
     except Exception:
         logging.exception("Не удалось проверить белый список группы %s", group_id)
+        return
+
+    promo_match = _GROUP_PROMO_COMMAND_RE.fullmatch(text.strip())
+    if promo_match is not None:
+        try:
+            is_bot_admin = await database.is_admin_user(user.id)
+            if user.id != ADMIN_ID and not is_bot_admin:
+                member = await context.bot.get_chat_member(group_id, user.id)
+                member_status = getattr(member.status, "value", member.status)
+                if member_status not in ("creator", "administrator"):
+                    await message.reply_text(
+                        "Активировать промокод может только администратор этой группы "
+                        "или администратор бота."
+                    )
+                    return
+            result = await database.redeem_group_promo_code(
+                promo_match.group("code"),
+                group_id,
+            )
+            if result == "activated":
+                await message.reply_text(
+                    "Промокод принят. Эта группа подключена, теперь можешь обращаться ко мне."
+                )
+                logging.info(
+                    "Группа %s активирована промокодом администратором user_id=%s.",
+                    group_id,
+                    user.id,
+                )
+            elif result == "already_allowed":
+                await message.reply_text("Эта группа уже подключена.")
+            else:
+                await message.reply_text(
+                    "Промокод недействителен, уже использован или предназначен другой группе."
+                )
+        except TelegramError:
+            logging.exception(
+                "Не удалось проверить права user_id=%s для активации группы %s.",
+                user.id,
+                group_id,
+            )
+            await message.reply_text(
+                "Не удалось проверить права администратора группы. Попробуй позже."
+            )
+        except Exception:
+            logging.exception("Не удалось активировать группу %s промокодом.", group_id)
+            await message.reply_text("Не удалось активировать группу. Попробуй позже.")
         return
 
     if not allowed:

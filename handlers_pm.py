@@ -5,6 +5,7 @@ from io import BytesIO
 import logging
 import random
 import re
+import secrets
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji, Update
@@ -166,6 +167,12 @@ def _admin_groups_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton("➕ Добавить группу", callback_data="admin:add_group"),
                 InlineKeyboardButton("➖ Удалить группу", callback_data="admin:remove_group"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎟 Создать промокод группы",
+                    callback_data="admin:create_group_promo",
+                )
             ],
             [InlineKeyboardButton("↩️ Главное меню", callback_data="admin:menu")],
         ]
@@ -1124,6 +1131,31 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             description="Добавляй группы в список бота или удаляй их из него.",
             keyboard=_admin_groups_keyboard(),
         )
+        return ADMIN_MENU
+    if action == "admin:create_group_promo":
+        try:
+            code = f"YUBARA-{secrets.token_hex(6).upper()}"
+            if not await database.create_group_promo_code(code, user.id):
+                raise RuntimeError("Сгенерированный промокод уже существует.")
+            await query.edit_message_text(
+                "Одноразовый промокод для подключения одной группы:\n"
+                f"`{code}`\n\n"
+                "Опубликуй в нужной группе команду:\n"
+                f"`/activategroup {code}`\n\n"
+                "Активировать может администратор этой группы или администратор бота.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К группам", callback_data="admin:groups")]]
+                ),
+            )
+        except Exception:
+            logging.exception("Не удалось создать промокод для группы.")
+            await query.edit_message_text(
+                "Не удалось создать промокод. Попробуй позже.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К группам", callback_data="admin:groups")]]
+                ),
+            )
         return ADMIN_MENU
     if action == "admin:access":
         await _show_admin_section(

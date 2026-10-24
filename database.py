@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -113,6 +114,11 @@ async def initialize() -> None:
                     ON messages(chat_id, id);
                 CREATE TABLE IF NOT EXISTS allowed_groups (
                     group_id INTEGER PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS group_promo_codes (
+                    code TEXT PRIMARY KEY,
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS access_keys (
                     key TEXT PRIMARY KEY,
@@ -231,6 +237,16 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_allowed_groups_update
                 AFTER UPDATE ON allowed_groups BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_group_promo_codes_insert
+                AFTER INSERT ON group_promo_codes BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_group_promo_codes_delete
+                AFTER DELETE ON group_promo_codes BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -589,6 +605,59 @@ async def remove_allowed_group(group_id: int) -> bool:
         if deleted:
             _record_write()
         return deleted
+
+
+async def create_group_promo_code(code: str, created_by: int) -> bool:
+    normalized = code.strip().upper()
+    if not re.fullmatch(r"YUBARA-[A-F0-9]{12}", normalized):
+        raise ValueError("Промокод группы имеет неверный формат.")
+    async with _write_lock:
+        async with _connect() as db:
+            try:
+                await db.execute(
+                    "INSERT INTO group_promo_codes(code, created_by) VALUES (?, ?)",
+                    (normalized, created_by),
+                )
+            except aiosqlite.IntegrityError:
+                await db.rollback()
+                return False
+            await db.commit()
+        _record_write()
+        return True
+
+
+async def redeem_group_promo_code(code: str, group_id: int) -> str:
+    normalized = code.strip().upper()
+    if not re.fullmatch(r"YUBARA-[A-F0-9]{12}", normalized):
+        return "invalid"
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM allowed_groups WHERE group_id = ?",
+                (group_id,),
+            )
+            if await cursor.fetchone() is not None:
+                return "already_allowed"
+            cursor = await db.execute(
+                "SELECT 1 FROM group_promo_codes WHERE code = ?",
+                (normalized,),
+            )
+            if await cursor.fetchone() is None:
+                return "invalid"
+            cursor = await db.execute(
+                "DELETE FROM group_promo_codes WHERE code = ?",
+                (normalized,),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "invalid"
+            await db.execute(
+                "INSERT INTO allowed_groups(group_id) VALUES (?)",
+                (group_id,),
+            )
+            await db.commit()
+        _record_write()
+        return "activated"
 
 
 async def ensure_user(
