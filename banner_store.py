@@ -297,6 +297,85 @@ async def get_profile_banner(
     return file_id, int(item["level"]) == 6
 
 
+async def get_group_owner_banner(
+    bot: Any,
+    group_id: int,
+    owner_user_id: int,
+) -> tuple[str, bool] | None:
+    item = await database.get_group_owner_banner(group_id, owner_user_id)
+    if item is None:
+        return None
+    profile = await database.get_global_profile(owner_user_id)
+    if profile is None:
+        raise RuntimeError(
+            f"Не найден профиль владельца баннера user_id={owner_user_id}."
+        )
+    name = clean_text(
+        str(
+            profile.get("callsign")
+            or profile.get("display_name")
+            or profile.get("username")
+            or "Без имени"
+        )
+    ) or "Без имени"
+    avatar: bytes | None = None
+    avatar_id: str | None = None
+    try:
+        avatar, avatar_id = await _avatar_for_user(bot, owner_user_id)
+    except Exception:
+        logging.warning(
+            "Не удалось получить аватар для группового баннера group_id=%s user_id=%s.",
+            group_id,
+            owner_user_id,
+            exc_info=True,
+        )
+    digest = content_hash(name, None, avatar_id)
+    file_id = str(item.get("file_id") or "")
+    if file_id and item.get("content_hash") == digest:
+        return file_id, True
+
+    buffer = await _render_queue.render(
+        1,
+        user_id=owner_user_id,
+        name=name,
+        tag=None,
+        level=6,
+        item_seed=str(item["seed"]),
+        preset=item.get("preset"),
+        avatar=avatar,
+        salt=BANNER_SALT,
+    )
+    sent = await bot.send_animation(
+        chat_id=BACKUP_CHANNEL_ID,
+        animation=buffer,
+        caption=f"🖼 Групповой баннер владельца\nГруппа: {group_id}\nВладелец: {owner_user_id}",
+        disable_notification=True,
+    )
+    if sent.animation is None:
+        raise RuntimeError("Telegram принял баннер владельца без данных animation.")
+    old_backup_id = item.get("backup_msg_id")
+    saved = await database.set_group_owner_banner_rendering(
+        group_id,
+        owner_user_id,
+        file_id=sent.animation.file_id,
+        content_hash=digest,
+        backup_msg_id=sent.message_id,
+    )
+    if not saved:
+        raise RuntimeError(
+            f"Баннер владельца group_id={group_id} изменился во время рендера."
+        )
+    if old_backup_id:
+        try:
+            await bot.delete_message(BACKUP_CHANNEL_ID, int(old_backup_id))
+        except (TelegramError, ValueError):
+            logging.exception(
+                "Не удалось удалить предыдущую копию баннера владельца group_id=%s.",
+                group_id,
+            )
+    return sent.animation.file_id, True
+
+
 async def send_banner(
     bot: Any,
     chat_id: int,

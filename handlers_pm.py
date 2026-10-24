@@ -7,7 +7,7 @@ import logging
 import random
 import re
 import secrets
-import time
+from datetime import datetime
 from typing import Any
 
 from telegram import (
@@ -40,7 +40,13 @@ from casino import (
     handle_coin_promo_message,
     handle_game_message,
 )
-from config import ADMIN_ID, AVAILABLE_REACTIONS, BACKUP_CHANNEL_ID, PROFILE_TRIGGERS
+from config import (
+    ADMIN_ID,
+    AVAILABLE_REACTIONS,
+    BACKUP_CHANNEL_ID,
+    MOSCOW_TIMEZONE,
+    PROFILE_TRIGGERS,
+)
 from duel import (
     handle_balance_request,
     handle_coin_leaderboard_request,
@@ -2876,9 +2882,15 @@ def _format_access_record(record: dict[str, object]) -> str:
     if expires_at is None:
         expiry = "навсегда"
     else:
-        expiry = time.strftime("%d.%m.%Y %H:%M UTC", time.gmtime(float(expires_at)))
+        expiry = _format_moscow_expiry(float(expires_at))
     suffix = f"@{username}" if username else "username неизвестен"
     return f"{record['user_id']} — {suffix}; действует до: {expiry}"
+
+
+def _format_moscow_expiry(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, MOSCOW_TIMEZONE).strftime(
+        "%d.%m.%Y %H:%M МСК"
+    )
 
 
 async def _return_to_menu(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3374,7 +3386,7 @@ async def _private_dialog(
                 expiry = (
                     "без ограничения срока"
                     if expires_at is None
-                    else "до " + time.strftime("%d.%m.%Y %H:%M UTC", time.gmtime(expires_at))
+                    else "до " + _format_moscow_expiry(expires_at)
                 )
                 await message.reply_text(
                     f"Доступ администратора открыт {expiry}!"

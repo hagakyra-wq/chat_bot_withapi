@@ -5,7 +5,7 @@
 
 Что уже есть:
 - config.py: предусмотрены TELEGRAM_API_ID, TELEGRAM_API_HASH,
-  TELEGRAM_USER_SESSION_PATH и часовой пояс UTC+5.
+  TELEGRAM_USER_SESSION_PATH и часовой пояс Europe/Moscow (UTC+3).
 - requirements.txt: в рабочем дереве добавлены Telethon и qrcode[pil].
 - llm.py: есть функция has_goodnight_message(messages), отправляющая
   переданные сообщения в Groq и ожидающая ответ YES/NO.
@@ -41,7 +41,7 @@
 
 3. НАСТРОЙКИ МОДУЛЯ В /adm — ВЫПОЛНЕНО
    - Добавлен раздел автоответчика с выбором фиксированного смещения UTC
-     от UTC−12 до UTC+14; значение по умолчанию UTC+5.
+     от UTC−12 до UTC+14; значение по умолчанию обновлено до UTC+3 (Москва).
    - Добавлены независимые переключатели ночной рассылки и автоответа в ЛС.
    - Смещение и режимы сохраняются в SQLite и доступны другим этапам
      через database.get_autoresponder_settings().

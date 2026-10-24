@@ -26,7 +26,7 @@ from config import (
     MAX_TOTAL_MESSAGES_PER_CHAT,
     DATABASE_SHARD_THRESHOLD_BYTES,
     HISTORY_ENCRYPTION_KEY,
-    PERSONAL_ACCOUNT_TIMEZONE,
+    MOSCOW_TIMEZONE,
 )
 
 _write_lock = asyncio.Lock()
@@ -37,7 +37,7 @@ _AUTORESPONDER_TIMEZONE_KEY = "autoresponder_timezone_offset"
 _AUTORESPONDER_NIGHT_ENABLED_KEY = "autoresponder_night_enabled"
 _AUTORESPONDER_PRIVATE_ENABLED_KEY = "autoresponder_private_enabled"
 _AUTORESPONDER_GROUPS_KEY = "autoresponder_night_groups"
-_AUTORESPONDER_DEFAULT_TIMEZONE_OFFSET = 5
+_AUTORESPONDER_DEFAULT_TIMEZONE_OFFSET = 3
 _AUTORESPONDER_DEFAULT_NIGHT_TEXT = (
     "Всем сладких снов!!! "
     "(хоть это и автоответчик, я мысленно пожелал вам это <3!)"
@@ -48,7 +48,21 @@ _AUTORESPONDER_DEFAULT_PRIVATE_TEXT = (
 )
 _TELEGRAM_SESSION_BACKUPS_KEY = "telegram_session_backups"
 _history_cipher = Fernet(HISTORY_ENCRYPTION_KEY.encode("ascii"))
-_MESSAGE_ACTIVITY_BACKFILL_KEY = "message_activity_backfill_v1"
+_MESSAGE_ACTIVITY_BACKFILL_KEY = "message_activity_backfill_v2"
+_MOSCOW_TIMESTAMP_MIGRATION_KEY = "moscow_timestamp_migration_v1"
+_MOSCOW_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
+    "messages": ("created_at",),
+    "group_promo_codes": ("created_at",),
+    "coin_promo_codes": ("created_at", "redeemed_at"),
+    "access_keys": ("created_at",),
+    "authorized_users": ("authorized_at",),
+    "user_features": ("authorized_at",),
+    "banner_items": ("obtained_at",),
+    "group_owner_banners": ("created_at",),
+    "casino_rounds": ("created_at",),
+    "market_lots": ("created_at",),
+    "bonus_claims": ("claimed_at", "penalized_at"),
+}
 
 
 def _message_activity_period_dates(
@@ -56,7 +70,7 @@ def _message_activity_period_dates(
     *,
     today: date | None = None,
 ) -> tuple[str, str]:
-    current_date = today or datetime.now(PERSONAL_ACCOUNT_TIMEZONE).date()
+    current_date = today or datetime.now(MOSCOW_TIMEZONE).date()
     if period == "d":
         start_date = current_date
     elif period == "w":
@@ -127,7 +141,7 @@ async def initialize() -> None:
                     message_id INTEGER NOT NULL,
                     sender_name TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     payload_version INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
@@ -154,26 +168,26 @@ async def initialize() -> None:
                 CREATE TABLE IF NOT EXISTS group_promo_codes (
                     code TEXT PRIMARY KEY,
                     created_by INTEGER NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
                 );
                 CREATE TABLE IF NOT EXISTS coin_promo_codes (
                     code TEXT PRIMARY KEY,
                     amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
                     created_by INTEGER NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     redeemed_by INTEGER,
                     redeemed_at TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS access_keys (
                     key TEXT PRIMARY KEY,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     access_level TEXT NOT NULL DEFAULT 'user',
                     duration_seconds INTEGER,
                     created_by INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS authorized_users (
                     user_id INTEGER PRIMARY KEY,
-                    authorized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    authorized_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     username TEXT,
                     access_level TEXT NOT NULL DEFAULT 'user',
                     expires_at REAL
@@ -181,7 +195,7 @@ async def initialize() -> None:
                 CREATE TABLE IF NOT EXISTS user_features (
                     user_id INTEGER NOT NULL,
                     feature TEXT NOT NULL,
-                    authorized_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    authorized_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     expires_at REAL,
                     PRIMARY KEY (user_id, feature)
                 );
@@ -211,7 +225,7 @@ async def initialize() -> None:
                     seed TEXT NOT NULL,
                     preset TEXT,
                     source TEXT NOT NULL,
-                    obtained_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    obtained_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     file_id TEXT,
                     backup_msg_id INTEGER,
                     content_hash TEXT,
@@ -222,13 +236,38 @@ async def initialize() -> None:
                     ON banner_items(user_id, obtained_at DESC, item_id DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_banner_items_active_user
                     ON banner_items(user_id) WHERE is_active = 1;
+                CREATE TABLE IF NOT EXISTS group_owner_banners (
+                    group_id INTEGER PRIMARY KEY,
+                    owner_user_id INTEGER NOT NULL,
+                    seed TEXT NOT NULL,
+                    preset TEXT NOT NULL,
+                    file_id TEXT,
+                    content_hash TEXT,
+                    backup_msg_id INTEGER,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+                );
+                CREATE TRIGGER IF NOT EXISTS dirty_group_owner_banners_insert
+                AFTER INSERT ON group_owner_banners BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_group_owner_banners_update
+                AFTER UPDATE ON group_owner_banners BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_group_owner_banners_delete
+                AFTER DELETE ON group_owner_banners BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
                 CREATE TABLE IF NOT EXISTS casino_rounds (
                     round_id TEXT PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     cost_cents INTEGER NOT NULL,
                     status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed')),
                     results TEXT,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_casino_rounds_pending_user
                     ON casino_rounds(user_id) WHERE status = 'pending';
@@ -238,7 +277,7 @@ async def initialize() -> None:
                     seller_id INTEGER NOT NULL,
                     price_cents INTEGER NOT NULL CHECK(price_cents > 0),
                     title TEXT,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     status TEXT NOT NULL CHECK(status IN ('open', 'sold', 'withdrawn'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_lots_open
@@ -246,7 +285,7 @@ async def initialize() -> None:
                 CREATE TABLE IF NOT EXISTS bonus_claims (
                     claim_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
-                    claimed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    claimed_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     status TEXT NOT NULL CHECK(status IN ('subscribed', 'unsubscribed')),
                     penalized_at TIMESTAMP
                 );
@@ -454,6 +493,10 @@ async def initialize() -> None:
                 END;
                 """
             )
+            await db.execute(
+                "UPDATE banner_items SET is_active = 0 "
+                "WHERE source = 'owner' AND is_active = 1"
+            )
             await _ensure_columns(
                 db,
                 "access_keys",
@@ -514,7 +557,126 @@ async def initialize() -> None:
     _dirty_generation = 1 if dirty and dirty["value"] == "1" else 0
     _synced_generation = 0
     logging.info("Схема SQLite готова: %s", DATABASE_PATH)
+    await _migrate_timestamps_to_moscow()
     await _backfill_message_activity()
+
+
+def _to_moscow_storage_timestamp(value: str) -> str:
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise sqlite3.DatabaseError(
+            f"Некорректная временная метка в базе: {value!r}."
+        ) from exc
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(MOSCOW_TIMEZONE).replace(tzinfo=None).isoformat(sep=" ")
+
+
+async def _ensure_moscow_timestamp_triggers(
+    db: aiosqlite.Connection,
+) -> None:
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    )
+    tables = {str(row[0]) for row in await cursor.fetchall()}
+    for table, columns in _MOSCOW_TIMESTAMP_COLUMNS.items():
+        if table not in tables:
+            continue
+        cursor = await db.execute(f'PRAGMA table_info("{table}")')
+        existing_columns = {str(row[1]) for row in await cursor.fetchall()}
+        for column in columns:
+            if column not in existing_columns:
+                continue
+            trigger = f"moscow_default_{table}_{column}"
+            await db.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS "{trigger}"
+                AFTER INSERT ON "{table}"
+                WHEN NEW."{column}" = CURRENT_TIMESTAMP
+                BEGIN
+                    UPDATE "{table}"
+                    SET "{column}" = datetime(NEW."{column}", '+3 hours')
+                    WHERE rowid = NEW.rowid;
+                END
+                """
+            )
+
+
+async def _migrate_timestamps_to_moscow() -> None:
+    async with _write_lock:
+        async with _connect() as main_db:
+            cursor = await main_db.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (_MOSCOW_TIMESTAMP_MIGRATION_KEY,),
+            )
+            if await cursor.fetchone() is not None:
+                await _ensure_moscow_timestamp_triggers(main_db)
+                await main_db.commit()
+                return
+
+            invalidated_archives: list[str] = []
+            for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+                if not database_path.is_file():
+                    continue
+                async with aiosqlite.connect(database_path) as target:
+                    for table, columns in _MOSCOW_TIMESTAMP_COLUMNS.items():
+                        cursor = await target.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                            (table,),
+                        )
+                        if await cursor.fetchone() is None:
+                            continue
+                        cursor = await target.execute(f'PRAGMA table_info("{table}")')
+                        existing_columns = {
+                            str(row[1]) for row in await cursor.fetchall()
+                        }
+                        for column in columns:
+                            if column not in existing_columns:
+                                continue
+                            cursor = await target.execute(
+                                f'SELECT rowid, "{column}" FROM "{table}" '
+                                f'WHERE "{column}" IS NOT NULL'
+                            )
+                            rows = await cursor.fetchall()
+                            updates = [
+                                (
+                                    _to_moscow_storage_timestamp(str(row[1])),
+                                    int(row[0]),
+                                )
+                                for row in rows
+                            ]
+                            if updates:
+                                await target.executemany(
+                                    f'UPDATE "{table}" SET "{column}" = ? WHERE rowid = ?',
+                                    updates,
+                                )
+                                if database_path != DATABASE_PATH:
+                                    invalidated_archives.append(database_path.name)
+                    await _ensure_moscow_timestamp_triggers(target)
+                    await target.commit()
+
+            for archive_name in set(invalidated_archives):
+                await main_db.execute(
+                    "DELETE FROM meta WHERE key IN (?, ?)",
+                    (
+                        f"message_archive_file_id:{archive_name}",
+                        f"message_archive_message_id:{archive_name}",
+                    ),
+                )
+            await main_db.execute(
+                """
+                UPDATE meta SET value = '3'
+                WHERE key LIKE 'autoresponder_timezone_offset%'
+                  AND value = '5'
+                """
+            )
+            await main_db.execute(
+                "INSERT INTO meta(key, value) VALUES (?, '1')",
+                (_MOSCOW_TIMESTAMP_MIGRATION_KEY,),
+            )
+            await main_db.commit()
+        _record_write()
 
 
 async def _ensure_columns(
@@ -905,7 +1067,7 @@ async def redeem_coin_promo_code(
     normalized = code.strip().upper()
     if not re.fullmatch(r"YUBARA-COIN-[A-F0-9]{12}", normalized):
         return "invalid", None, None
-    today_text = _utc5_date().isoformat()
+    today_text = _moscow_date().isoformat()
     async with _write_lock:
         async with _connect() as db:
             await db.execute("BEGIN")
@@ -921,7 +1083,8 @@ async def redeem_coin_promo_code(
                 await db.rollback()
                 return "used", None, None
             cursor = await db.execute(
-                "UPDATE coin_promo_codes SET redeemed_by = ?, redeemed_at = CURRENT_TIMESTAMP "
+                "UPDATE coin_promo_codes SET redeemed_by = ?, "
+                "redeemed_at = datetime('now', '+3 hours') "
                 "WHERE code = ? AND redeemed_by IS NULL",
                 (user_id, normalized),
             )
@@ -1267,7 +1430,7 @@ async def save_message(
 async def record_group_message_activity(chat_id: int, user_id: int) -> None:
     if chat_id >= 0:
         return
-    activity_date = datetime.now(PERSONAL_ACCOUNT_TIMEZONE).date().isoformat()
+    activity_date = datetime.now(MOSCOW_TIMEZONE).date().isoformat()
     async with _write_lock:
         async with _connect() as db:
             await db.execute(
@@ -1284,7 +1447,7 @@ async def record_group_message_activity(chat_id: int, user_id: int) -> None:
 
 
 async def get_user_message_activity(user_id: int) -> dict[str, int]:
-    today = datetime.now(PERSONAL_ACCOUNT_TIMEZONE).date()
+    today = datetime.now(MOSCOW_TIMEZONE).date()
     day_start, _ = _message_activity_period_dates("d", today=today)
     week_start, _ = _message_activity_period_dates("w", today=today)
     month_start, _ = _message_activity_period_dates("m", today=today)
@@ -1660,10 +1823,10 @@ async def _get_message_rows(
     )
     params: tuple[object, ...] = (chat_id,)
     if minutes is not None:
-        query += "AND created_at >= datetime('now', ?) "
+        query += "AND created_at >= datetime('now', '+3 hours', ?) "
         params += (f"-{max(1, minutes)} minutes",)
     elif hours is not None:
-        query += "AND created_at >= datetime('now', ?) "
+        query += "AND created_at >= datetime('now', '+3 hours', ?) "
         params += (f"-{max(1, hours)} hours",)
     query += "ORDER BY created_at DESC, message_id DESC, id DESC"
     if per_database_limit is not None:
@@ -1839,8 +2002,8 @@ async def update_message_reaction(
     return False
 
 
-def _utc5_date() -> date:
-    return datetime.now(timezone(timedelta(hours=5))).date()
+def _moscow_date() -> date:
+    return datetime.now(MOSCOW_TIMEZONE).date()
 
 
 async def get_duel_balance(
@@ -1849,7 +2012,7 @@ async def get_duel_balance(
     *,
     is_bot: bool = False,
 ) -> int:
-    today = _utc5_date()
+    today = _moscow_date()
     today_text = today.isoformat()
     async with _write_lock:
         async with _connect() as db:
@@ -1988,7 +2151,7 @@ async def settle_player_duel(
 
 
 async def mine_duel_coins_daily() -> int:
-    today = _utc5_date()
+    today = _moscow_date()
     today_text = today.isoformat()
     mined_players = 0
     async with _write_lock:
@@ -2074,12 +2237,12 @@ async def _backfill_message_activity() -> None:
                     SELECT
                         chat_id,
                         user_id,
-                        date(created_at, '+5 hours') AS activity_date,
+                        date(created_at) AS activity_date,
                         COUNT(*) AS message_count
                     FROM messages
                     WHERE chat_id < 0
-                      AND created_at >= datetime('now', '-32 days')
-                      AND date(created_at, '+5 hours') IS NOT NULL
+                      AND created_at >= datetime('now', '+3 hours', '-32 days')
+                      AND date(created_at) IS NOT NULL
                     GROUP BY chat_id, user_id, activity_date
                     """
                 )
@@ -2161,7 +2324,7 @@ async def _archive_messages_if_needed() -> bool:
                     message_id INTEGER NOT NULL,
                     sender_name TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
                 )
                 """
             )
@@ -2343,7 +2506,7 @@ async def consume_access_key(
                     VALUES (?, 'autoresponder', ?)
                     ON CONFLICT(user_id, feature) DO UPDATE SET
                         expires_at = excluded.expires_at,
-                        authorized_at = CURRENT_TIMESTAMP
+                        authorized_at = datetime('now', '+3 hours')
                     """,
                     (user_id, expires_at),
                 )
@@ -2366,7 +2529,7 @@ async def consume_access_key(
                     username = excluded.username,
                     access_level = excluded.access_level,
                     expires_at = excluded.expires_at,
-                    authorized_at = CURRENT_TIMESTAMP
+                    authorized_at = datetime('now', '+3 hours')
                 """,
                 (user_id, username, granted_level, expires_at),
             )
@@ -2508,7 +2671,14 @@ async def get_known_backup_message_ids() -> set[int]:
     async with _connect() as db:
         cursor = await db.execute("SELECT key, value FROM meta")
         records = await cursor.fetchall()
-    message_ids: set[int] = set()
+        cursor = await db.execute(
+            "SELECT backup_msg_id FROM group_owner_banners "
+            "WHERE backup_msg_id IS NOT NULL"
+        )
+        owner_banner_backup_ids = {
+            int(row["backup_msg_id"]) for row in await cursor.fetchall()
+        }
+    message_ids: set[int] = owner_banner_backup_ids
     for row in records:
         key = str(row["key"])
         value = str(row["value"])
@@ -3033,6 +3203,7 @@ async def get_user_banner_items(
                    ) AS is_listed
             FROM banner_items item
             WHERE item.user_id = ?
+              AND item.source != 'owner'
               AND (? IS NULL OR item.level = ?)
               AND NOT EXISTS(
                   SELECT 1 FROM market_lots lot
@@ -3052,6 +3223,7 @@ async def count_user_banner_items(user_id: int, *, level: int | None = None) -> 
             """
             SELECT COUNT(*) AS total FROM banner_items item
             WHERE item.user_id = ?
+              AND item.source != 'owner'
               AND (? IS NULL OR item.level = ?)
               AND NOT EXISTS(
                   SELECT 1 FROM market_lots lot
@@ -3130,42 +3302,94 @@ async def activate_banner_item(user_id: int, item_id: int) -> bool:
     return True
 
 
-async def create_owner_banner_item(
-    user_id: int,
+async def get_or_create_group_owner_banner(
+    group_id: int,
+    owner_user_id: int,
     *,
     seed: str,
     preset: str,
 ) -> dict[str, Any]:
     async with _write_lock:
         async with _connect() as db:
-            await db.execute("BEGIN")
+            await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
-                "SELECT * FROM banner_items WHERE user_id = ? AND source = 'owner' LIMIT 1",
-                (user_id,),
+                "SELECT * FROM group_owner_banners WHERE group_id = ?",
+                (group_id,),
             )
-            row = await cursor.fetchone()
-            if row is not None:
-                await db.commit()
-                return dict(row)
-            cursor = await db.execute(
-                "SELECT 1 FROM banner_items WHERE user_id = ? AND is_active = 1",
-                (user_id,),
-            )
-            is_active = int(await cursor.fetchone() is None)
-            cursor = await db.execute(
-                """
-                INSERT INTO banner_items(user_id, level, seed, preset, source, is_active)
-                VALUES (?, 6, ?, ?, 'owner', ?)
-                """,
-                (user_id, seed, preset, is_active),
-            )
-            item_id = int(cursor.lastrowid)
+            current = await cursor.fetchone()
+            if current is None:
+                await db.execute(
+                    """
+                    INSERT INTO group_owner_banners(
+                        group_id, owner_user_id, seed, preset
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (group_id, owner_user_id, seed, preset),
+                )
+            elif int(current["owner_user_id"]) != owner_user_id:
+                await db.execute(
+                    """
+                    UPDATE group_owner_banners
+                    SET owner_user_id = ?, seed = ?, preset = ?,
+                        file_id = NULL, content_hash = NULL,
+                        created_at = datetime('now', '+3 hours')
+                    WHERE group_id = ?
+                    """,
+                    (owner_user_id, seed, preset, group_id),
+                )
             await db.commit()
         _record_write()
-    item = await get_banner_item(item_id)
-    if item is None:
-        raise sqlite3.DatabaseError(f"Не удалось прочитать баннер владельца item_id={item_id}.")
-    return item
+    banner = await get_group_owner_banner(group_id, owner_user_id)
+    if banner is None:
+        raise sqlite3.DatabaseError(
+            f"Не удалось сохранить баннер владельца группы group_id={group_id}."
+        )
+    return banner
+
+
+async def get_group_owner_banner(
+    group_id: int,
+    owner_user_id: int,
+) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT * FROM group_owner_banners
+            WHERE group_id = ? AND owner_user_id = ?
+            """,
+            (group_id, owner_user_id),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def set_group_owner_banner_rendering(
+    group_id: int,
+    owner_user_id: int,
+    *,
+    file_id: str,
+    content_hash: str,
+    backup_msg_id: int,
+) -> bool:
+    if not file_id or not content_hash or backup_msg_id <= 0:
+        raise ValueError(
+            "Для баннера владельца нужны Telegram file_id, хэш содержимого и message_id."
+        )
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE group_owner_banners
+                SET file_id = ?, content_hash = ?, backup_msg_id = ?
+                WHERE group_id = ? AND owner_user_id = ?
+                """,
+                (file_id, content_hash, backup_msg_id, group_id, owner_user_id),
+            )
+            await db.commit()
+        if cursor.rowcount:
+            _record_write()
+    return cursor.rowcount == 1
 
 
 async def begin_casino_round(
@@ -3174,7 +3398,7 @@ async def begin_casino_round(
     username: str | None,
     cost_cents: int,
 ) -> None:
-    today_text = _utc5_date().isoformat()
+    today_text = _moscow_date().isoformat()
     async with _write_lock:
         async with _connect() as db:
             await db.execute("BEGIN")
@@ -3649,7 +3873,10 @@ async def search_market_lots(
         matched, score = _market_search_score(normalized_query, lot, names)
         if not matched:
             continue
-        created_at = datetime.fromisoformat(str(lot["created_at"])).timestamp()
+        created_at_value = datetime.fromisoformat(str(lot["created_at"]))
+        if created_at_value.tzinfo is None:
+            created_at_value = created_at_value.replace(tzinfo=MOSCOW_TIMEZONE)
+        created_at = created_at_value.timestamp()
         lot_id = int(lot["lot_id"])
         if sort_by == "price":
             sort_key: tuple[float | int, ...] = (
@@ -3734,7 +3961,7 @@ async def buy_market_lot(
     buyer_username: str | None,
     lot_id: int,
 ) -> tuple[str, dict[str, Any] | None]:
-    today_text = _utc5_date().isoformat()
+    today_text = _moscow_date().isoformat()
     async with _write_lock:
         async with _connect() as db:
             await db.execute("BEGIN")
@@ -3887,7 +4114,8 @@ async def penalize_subscription_bonus(
                 await db.rollback()
                 return None
             await db.execute(
-                "UPDATE bonus_claims SET status = 'unsubscribed', penalized_at = CURRENT_TIMESTAMP "
+                "UPDATE bonus_claims SET status = 'unsubscribed', "
+                "penalized_at = datetime('now', '+3 hours') "
                 "WHERE claim_id = ? AND status = 'subscribed' AND penalized_at IS NULL",
                 (int(claim["claim_id"]),),
             )

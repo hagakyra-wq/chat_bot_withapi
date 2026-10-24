@@ -47,7 +47,7 @@ from config import (
     DATABASE_BACKUP_PATH,
     DATABASE_PATH,
     HISTORY_ENCRYPTION_KEY,
-    PERSONAL_ACCOUNT_TIMEZONE,
+    MOSCOW_TIMEZONE,
     PORT,
     TELEGRAM_TOKEN,
 )
@@ -334,7 +334,7 @@ async def _post_init(application: Application) -> None:
     )
     application.job_queue.run_daily(
         _daily_duel_mining_job,
-        time=datetime_time(0, 5, tzinfo=PERSONAL_ACCOUNT_TIMEZONE),
+        time=datetime_time(0, 5, tzinfo=MOSCOW_TIMEZONE),
         name="daily-duel-mining",
     )
     application.job_queue.run_repeating(
@@ -353,7 +353,7 @@ async def _post_init(application: Application) -> None:
 async def _perform_backup(bot: object) -> None:
     try:
         caption = "📅 Дата и время: " + datetime.now(
-            PERSONAL_ACCOUNT_TIMEZONE
+            MOSCOW_TIMEZONE
         ).strftime("%d.%m.%Y в %H:%M:%S")
         for archive_path in database.list_message_archives():
             if await database.get_message_archive_file_id(archive_path.name):

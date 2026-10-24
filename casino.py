@@ -24,6 +24,7 @@ import database
 from banner_store import (
     ensure_banner_file,
     ensure_market_banner_file,
+    get_group_owner_banner,
     get_profile_banner,
     send_banner,
 )
@@ -127,7 +128,7 @@ def _menu_button() -> InlineKeyboardButton:
 def _user_bottom_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🎰 Казино"), KeyboardButton("🎒 Инвентарь")],
+            [KeyboardButton("🎡 Колесо удачи"), KeyboardButton("🎒 Инвентарь")],
             [KeyboardButton("🏪 Площадка"), KeyboardButton("👤 Мой профиль")],
             [KeyboardButton("🎁 Бонус"), KeyboardButton("🏠 Главное меню")],
         ],
@@ -156,7 +157,7 @@ async def ensure_user_bottom_menu(
 def _casino_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
     username = getattr(context.bot, "username", None)
     url = f"https://t.me/{username}?start=casino" if username else "https://t.me/"
-    return InlineKeyboardButton("🎰 Открыть казино в ЛС", url=url)
+    return InlineKeyboardButton("🎡 Открыть колесо удачи в ЛС", url=url)
 
 
 def _casino_keyboard(
@@ -212,7 +213,7 @@ def _main_menu_keyboard(
         else _casino_button(context)
     )
     rows = [
-        [InlineKeyboardButton("🎰 Казино", callback_data="casino:menu")],
+        [InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu")],
         [inventory, market],
     ]
     if private:
@@ -242,7 +243,7 @@ async def open_casino(
         return
     skip = await _skip_animation(user.id)
     text = (
-        "🎰 Королевское казино\n"
+        "🎡 Колесо удачи Юбары\n"
         f"Одна крутка стоит {_coins(CASINO_SPIN_COST_CENTS)} монеты; ×10 — "
         f"{_coins(CASINO_SPIN_COST_CENTS * 10)}.\n"
         "Результат случайный, монеты за крутку не возвращаются.\n"
@@ -315,6 +316,31 @@ def _result_level(values: tuple[int, int, int]) -> int:
     if len(set(values)) == 2:
         return 4 if secrets.randbelow(10) < 3 else 3
     return 2 if secrets.randbelow(10) < 3 else 1
+
+
+async def _delete_dice_messages(
+    bot: Any,
+    chat_id: int,
+    messages: list[Any],
+    user_id: int,
+) -> None:
+    for dice_message in messages:
+        for attempt in range(2):
+            try:
+                await bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=dice_message.message_id,
+                )
+                break
+            except TelegramError:
+                if attempt == 0:
+                    await asyncio.sleep(0.25)
+                else:
+                    logging.exception(
+                        "Не удалось удалить кубик user_id=%s message_id=%s.",
+                        user_id,
+                        dice_message.message_id,
+                    )
 
 
 def _status_keyboard(round_id: str) -> InlineKeyboardMarkup:
@@ -444,19 +470,41 @@ async def _spin(
     try:
         for spin_index in range(spins):
             dice_chat_id = user.id if skip_animation else message.chat_id
-            dice_messages = await asyncio.gather(
-                *(
+            dice_tasks = [
+                asyncio.create_task(
                     context.bot.send_dice(
                         chat_id=dice_chat_id,
                         emoji="🎲",
                         disable_notification=skip_animation,
                     )
-                    for _ in range(3)
                 )
-            )
-            values = tuple(int(dice_message.dice.value) for dice_message in dice_messages)
-            all_values.append((values[0], values[1], values[2]))
+                for _ in range(3)
+            ]
+            dice_messages: list[Any] = []
             try:
+                send_results = await asyncio.gather(
+                    *dice_tasks,
+                    return_exceptions=True,
+                )
+                dice_messages = [
+                    result
+                    for result in send_results
+                    if not isinstance(result, BaseException)
+                ]
+                failure = next(
+                    (
+                        result
+                        for result in send_results
+                        if isinstance(result, BaseException)
+                    ),
+                    None,
+                )
+                if failure is not None:
+                    raise failure
+                values = tuple(
+                    int(dice_message.dice.value) for dice_message in dice_messages
+                )
+                all_values.append((values[0], values[1], values[2]))
                 await asyncio.wait_for(
                     skip_event.wait(),
                     timeout=1.05 if skip_animation else DICE_ANIMATION_DELAY_SECONDS,
@@ -464,18 +512,24 @@ async def _spin(
             except TimeoutError:
                 pass
             finally:
-                for dice_message in dice_messages:
-                    try:
-                        await context.bot.delete_message(
-                            chat_id=dice_chat_id,
-                            message_id=dice_message.message_id,
-                        )
-                    except TelegramError:
-                        logging.exception(
-                            "Не удалось удалить кубик user_id=%s message_id=%s.",
-                            user.id,
-                            dice_message.message_id,
-                        )
+                for task in dice_tasks:
+                    if not task.done():
+                        task.cancel()
+                send_results = await asyncio.gather(
+                    *dice_tasks,
+                    return_exceptions=True,
+                )
+                dice_messages = [
+                    result
+                    for result in send_results
+                    if not isinstance(result, BaseException)
+                ]
+                await _delete_dice_messages(
+                    context.bot,
+                    dice_chat_id,
+                    dice_messages,
+                    user.id,
+                )
             if not skip_animation and spin_index + 1 < spins:
                 await status.edit_text(
                     f"🎲 Крутка: {spin_index + 1}/{spins}",
@@ -644,12 +698,12 @@ async def _show_inventory(
         empty_text = (
             f"В инвентаре нет баннеров уровня {level}."
             if level is not None
-            else "Пока пусто. Попытай удачу в казино."
+            else "Пока пусто. Попытай удачу в Колесе удачи."
         )
         empty_markup = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+                    InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
                     InlineKeyboardButton("🏪 Магазин", callback_data="mkt:p:0:all:date"),
                 ],
                 [_menu_button()],
@@ -726,7 +780,7 @@ async def _show_inventory(
     )
     rows.append(
         [
-            InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+            InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
             InlineKeyboardButton("🏪 Магазин", callback_data="mkt:p:0:all:date"),
         ]
     )
@@ -881,7 +935,7 @@ async def _show_market(
                 ],
                 [
                     InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
-                    InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+                    InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
                 ],
                 [_menu_button()],
             ]
@@ -983,7 +1037,7 @@ async def _show_market(
     rows.append(
         [
             InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
-            InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+            InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
         ]
     )
     rows.append([_menu_button()])
@@ -1043,7 +1097,7 @@ async def _show_my_lots(
             reply_markup=InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("🏪 Площадка", callback_data="mkt:p:0:all:date")],
-                    [InlineKeyboardButton("🎰 Казино", callback_data="casino:menu")],
+                    [InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu")],
                     [_menu_button()],
                 ]
             ),
@@ -1779,9 +1833,11 @@ async def handle_game_message(
         return True
     if re.fullmatch(r"/(?:casino|slots)(?:@\w+)?", text) or text in {
         "казино",
+        "колесо удачи",
         "казик",
         "крутка",
         "🎰 казино",
+        "🎡 колесо удачи",
     }:
         await open_casino(update, context)
         return True
@@ -1798,9 +1854,9 @@ async def handle_game_message(
             media = await get_profile_banner(context.bot, user.id)
             if media is None:
                 await message.reply_text(
-                    "У тебя пока нет активного баннера. Попытай удачу в казино.",
+                    "У тебя пока нет активного баннера. Попытай удачу в Колесе удачи.",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🎰 Казино", callback_data="casino:menu")]]
+                        [[InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu")]]
                     ),
                 )
             else:
@@ -1915,12 +1971,13 @@ async def maybe_award_group_owner(
         if status != "creator":
             return
         seed = secrets.token_hex(16)
-        item = await database.create_owner_banner_item(
+        await database.get_or_create_group_owner_banner(
+            message.chat_id,
             user.id,
             seed=seed,
             preset=pick_preset(make_digest(user.id, item_seed=seed)),
         )
-        await ensure_banner_file(context.bot, item, priority=2)
+        await get_group_owner_banner(context.bot, message.chat_id, user.id)
     except Exception:
         checked.discard(key)
         logging.exception(

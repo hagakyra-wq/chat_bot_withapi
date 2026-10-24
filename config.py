@@ -2,8 +2,8 @@
 
 import logging
 import os
-from datetime import timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -55,7 +55,7 @@ TELEGRAM_USER_SESSION_PATH = Path(
 )
 DATABASE_SHARD_THRESHOLD_BYTES = 19 * 1024 * 1024
 MODEL_NAME = "openai/gpt-oss-120b"
-PERSONAL_ACCOUNT_TIMEZONE = timezone(timedelta(hours=5))
+MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 
 DEFAULT_CONTEXT_SIZE = 5
 CONTEXT_CHAR_LIMIT = 80_000

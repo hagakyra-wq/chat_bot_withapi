@@ -21,7 +21,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
-from banner_store import get_profile_banner
+from banner_store import get_group_owner_banner, get_profile_banner
 from casino import (
     handle_coin_promo_message,
     handle_game_message,
@@ -194,7 +194,7 @@ async def _send_message_leaderboard(
             lines.append(f"{rank}. {name[:80]} — {int(member['message_count'])}")
     else:
         lines.append("За этот период пока нет сообщений.")
-    lines.append("\nПериод: текущий день, неделя или месяц по UTC+5.")
+    lines.append("\nПериод: текущий день, неделя или месяц по Москве.")
     await message.reply_text("\n".join(lines))
 
 
@@ -638,11 +638,19 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             profile_photo: BytesIO | str | None = None
             profile_animated = False
             if not group_profile_request:
-                media = await get_profile_banner(
-                    context.bot,
-                    user.id,
-                    profile=await database.get_global_profile(user.id),
-                )
+                media = None
+                if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+                    media = await get_group_owner_banner(
+                        context.bot,
+                        message.chat_id,
+                        user.id,
+                    )
+                if media is None:
+                    media = await get_profile_banner(
+                        context.bot,
+                        user.id,
+                        profile=await database.get_global_profile(user.id),
+                    )
                 if media is not None:
                     profile_photo, profile_animated = media
                 else:

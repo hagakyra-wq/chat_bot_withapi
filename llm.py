@@ -16,7 +16,7 @@ from config import (
     GROQ_API_KEY,
     MODEL_NAME,
     CONTEXT_CHAR_LIMIT,
-    PERSONAL_ACCOUNT_TIMEZONE,
+    MOSCOW_TIMEZONE,
     SUMMARY_CONTEXT_CHAR_LIMIT,
     SUMMARY_TRIGGERS,
     TRIGGER_THRESHOLD,
@@ -76,8 +76,8 @@ _client = AsyncOpenAI(
 _gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
-def current_date_utc5() -> str:
-    return datetime.now(PERSONAL_ACCOUNT_TIMEZONE).strftime("%d.%m.%Y")
+def current_date_moscow() -> str:
+    return datetime.now(MOSCOW_TIMEZONE).strftime("%d.%m.%Y")
 
 
 def is_called(text: str) -> bool:
@@ -267,7 +267,7 @@ def build_prompt(
 
 
 async def generate_reply(prompt: str, summary: bool) -> str:
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(current_date_str=current_date_utc5())
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(current_date_str=current_date_moscow())
     try:
         response = await _client.chat.completions.create(
             model=MODEL_NAME,
