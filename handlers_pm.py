@@ -26,7 +26,7 @@ import database
 import autoresponder
 import personal_account
 from banner_store import get_profile_banner, send_banner
-from casino import handle_game_message
+from casino import handle_coin_promo_message, handle_game_message
 from config import ADMIN_ID, AVAILABLE_REACTIONS, BACKUP_CHANNEL_ID, PROFILE_TRIGGERS
 from duel import (
     handle_balance_request,
@@ -60,6 +60,9 @@ WAIT_AUTO_PRIVATE_TEXT = 28
 WAIT_ADMIN_PRIVATE_TEXT = 29
 WAIT_HISTORY_GROUP = 30
 WAIT_DELETE_ALL_CONFIRMATION = 31
+WAIT_CREATE_COIN_PROMO = 32
+COIN_PROMO_MAX_CENTS = 10_000_000
+_COIN_PROMO_AMOUNT_RE = re.compile(r"^\s*(\d{1,6})(?:[,.](\d{1,2}))?\s*$")
 ADMIN_PANEL_USERS: set[int] = set()
 _USERBOT_LOGIN_KEYS = (
     "userbot_phone",
@@ -383,6 +386,7 @@ def _admin_access_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🚫 Отозвать ключ", callback_data="admin:revoke_key"),
             ],
             [InlineKeyboardButton("👥 Список людей", callback_data="admin:people")],
+            [InlineKeyboardButton("💰 Промокод на монеты", callback_data="admin:create_coin_promo")],
             [
                 InlineKeyboardButton("🚫 Отозвать доступ", callback_data="admin:revoke_user"),
                 InlineKeyboardButton("🚫 Отозвать админа", callback_data="admin:revoke_admin"),
@@ -1422,6 +1426,16 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ),
             )
         return ADMIN_MENU
+    if action == "admin:create_coin_promo":
+        await query.edit_message_text(
+            "Введи сумму промокода в монетах (от 0.01 до 100000; "
+            "можно указать копейки, например 25 или 12.50).\n"
+            "Для отмены отправь /cancel.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Отмена", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_CREATE_COIN_PROMO
     if action == "admin:access":
         await _show_admin_section(
             update,
@@ -2788,6 +2802,60 @@ async def create_key_input(update: Update, _context: ContextTypes.DEFAULT_TYPE) 
         return WAIT_CREATE_KEY
 
 
+async def create_coin_promo_input(
+    update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    message = update.effective_message
+    if user is None or not await _is_admin(user.id):
+        if user is not None:
+            ADMIN_PANEL_USERS.discard(user.id)
+        return ConversationHandler.END
+    if message is None or message.text is None:
+        return WAIT_CREATE_COIN_PROMO
+    match = _COIN_PROMO_AMOUNT_RE.fullmatch(message.text)
+    if match is None:
+        await message.reply_text(
+            "Неверная сумма. Введи число от 0.01 до 100000, например 25 или 12.50."
+        )
+        return WAIT_CREATE_COIN_PROMO
+    amount_cents = int(match.group(1)) * 100 + int((match.group(2) or "0").ljust(2, "0"))
+    if not 1 <= amount_cents <= COIN_PROMO_MAX_CENTS:
+        await message.reply_text("Сумма должна быть от 0.01 до 100000 монет.")
+        return WAIT_CREATE_COIN_PROMO
+    try:
+        code = ""
+        for _ in range(3):
+            candidate = f"YUBARA-COIN-{secrets.token_hex(6).upper()}"
+            if await database.create_coin_promo_code(
+                candidate,
+                amount_cents,
+                user.id,
+            ):
+                code = candidate
+                break
+        if not code:
+            raise RuntimeError("Не удалось сгенерировать уникальный промокод монет.")
+        await message.reply_text(
+            f"Создан промокод на {_format_coin_amount(amount_cents)} монет:\n"
+            f"`{code}`\n\n"
+            "Передай его пользователю лично. Он одноразовый — активировать может "
+            "только один человек командой `/coinpromo CODE` в ЛС бота.",
+            parse_mode="Markdown",
+        )
+        await _show_admin_menu(update)
+        return ADMIN_MENU
+    except Exception:
+        logging.exception("Не удалось создать промокод монет для user_id=%s.", user.id)
+        await message.reply_text("Не удалось создать промокод. Попробуй ещё раз.")
+        return WAIT_CREATE_COIN_PROMO
+
+
+def _format_coin_amount(amount_cents: int) -> str:
+    return f"{amount_cents // 100}.{amount_cents % 100:02d}"
+
+
 async def revoke_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     user = update.effective_user
@@ -2925,6 +2993,14 @@ def build_admin_conversation_handler() -> ConversationHandler:
             WAIT_CREATE_KEY: [
                 back,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_key_input),
+            ],
+            WAIT_CREATE_COIN_PROMO: [
+                back,
+                CallbackQueryHandler(admin_menu_callback, pattern=r"^admin:"),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    create_coin_promo_input,
+                ),
             ],
             WAIT_KEY_DURATION: [
                 back,
@@ -3323,6 +3399,8 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logging.exception("Не удалось проверить право администратора в личном чате")
             return
         ADMIN_PANEL_USERS.discard(user.id)
+    if await handle_coin_promo_message(update):
+        return
     try:
         has_access = await has_private_bot_access(user.id, context.bot)
     except Exception:

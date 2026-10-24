@@ -15,7 +15,11 @@ from telegram.ext import ContextTypes
 
 import database
 from banner_store import get_profile_banner
-from casino import handle_game_message, maybe_award_group_owner
+from casino import (
+    handle_coin_promo_message,
+    handle_game_message,
+    maybe_award_group_owner,
+)
 from config import (
     ADMIN_ID,
     AVAILABLE_REACTIONS,
@@ -338,6 +342,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             group_id,
         )
         await message.reply_text("Не удалось проверить доступ к боту. Попробуй позже.")
+        return
+
+    if await handle_coin_promo_message(update):
         return
 
     if await image_manager.consume_setting_input(update, context):

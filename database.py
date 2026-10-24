@@ -125,6 +125,14 @@ async def initialize() -> None:
                     created_by INTEGER NOT NULL,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS coin_promo_codes (
+                    code TEXT PRIMARY KEY,
+                    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    redeemed_by INTEGER,
+                    redeemed_at TIMESTAMP
+                );
                 CREATE TABLE IF NOT EXISTS access_keys (
                     key TEXT PRIMARY KEY,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -354,6 +362,16 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_group_promo_codes_delete
                 AFTER DELETE ON group_promo_codes BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_coin_promo_codes_insert
+                AFTER INSERT ON coin_promo_codes BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_coin_promo_codes_update
+                AFTER UPDATE ON coin_promo_codes BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -800,6 +818,90 @@ async def redeem_group_promo_code(code: str, group_id: int) -> str:
             await db.commit()
         _record_write()
         return "activated"
+
+
+async def create_coin_promo_code(
+    code: str,
+    amount_cents: int,
+    created_by: int,
+) -> bool:
+    normalized = code.strip().upper()
+    if not re.fullmatch(r"YUBARA-COIN-[A-F0-9]{12}", normalized):
+        raise ValueError("Промокод монет имеет неверный формат.")
+    if not 1 <= amount_cents <= 10_000_000:
+        raise ValueError("Сумма промокода должна быть от 1 копейки до 100 000 монет.")
+    async with _write_lock:
+        async with _connect() as db:
+            try:
+                await db.execute(
+                    "INSERT INTO coin_promo_codes(code, amount_cents, created_by) "
+                    "VALUES (?, ?, ?)",
+                    (normalized, amount_cents, created_by),
+                )
+            except aiosqlite.IntegrityError:
+                await db.rollback()
+                return False
+            await db.commit()
+        _record_write()
+    return True
+
+
+async def redeem_coin_promo_code(
+    code: str,
+    user_id: int,
+    username: str | None,
+) -> tuple[str, int | None, int | None]:
+    normalized = code.strip().upper()
+    if not re.fullmatch(r"YUBARA-COIN-[A-F0-9]{12}", normalized):
+        return "invalid", None, None
+    today_text = _utc5_date().isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT amount_cents, redeemed_by FROM coin_promo_codes WHERE code = ?",
+                (normalized,),
+            )
+            promo = await cursor.fetchone()
+            if promo is None:
+                await db.rollback()
+                return "invalid", None, None
+            if promo["redeemed_by"] is not None:
+                await db.rollback()
+                return "used", None, None
+            cursor = await db.execute(
+                "UPDATE coin_promo_codes SET redeemed_by = ?, redeemed_at = CURRENT_TIMESTAMP "
+                "WHERE code = ? AND redeemed_by IS NULL",
+                (user_id, normalized),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "used", None, None
+            await db.execute(
+                "INSERT OR IGNORE INTO duel_players("
+                "user_id, username, balance_cents, last_mined_on, is_bot"
+                ") VALUES (?, ?, 500, ?, 0)",
+                (user_id, username, today_text),
+            )
+            await db.execute(
+                "UPDATE duel_players SET username = COALESCE(?, username), "
+                "balance_cents = balance_cents + ? WHERE user_id = ?",
+                (username, int(promo["amount_cents"]), user_id),
+            )
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            balance_row = await cursor.fetchone()
+            if balance_row is None:
+                await db.rollback()
+                raise sqlite3.DatabaseError(
+                    f"Не удалось начислить монеты user_id={user_id}."
+                )
+            balance = int(balance_row["balance_cents"])
+            await db.commit()
+        _record_write()
+    return "redeemed", int(promo["amount_cents"]), balance
 
 
 async def ensure_user(

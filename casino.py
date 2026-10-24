@@ -27,6 +27,10 @@ from config import (
 from yubari_banner import make_digest, pick_preset
 
 _PRICE_RE = re.compile(r"^\s*(\d{1,8})(?:[,.](\d{1,2}))?\s*$")
+_COIN_PROMO_RE = re.compile(
+    r"^/coinpromo(?:@\w+)?\s+(YUBARA-COIN-[A-F0-9]{12})$",
+    re.IGNORECASE,
+)
 _PAGE_SIZE = 8
 _RARITY = {
     1: "Обычный",
@@ -224,7 +228,8 @@ async def _show_admin_help(
     await message.reply_text(
         "🛠 Команды для администраторов\n\n"
         "Администраторы бота:\n"
-        "• /adm — панель управления группами, доступом и настройками.\n"
+        "• /adm — панель управления группами, доступом и настройками; "
+        "в разделе «Доступ и ключи» создаются промокоды на монеты.\n"
         "• /addacc — подключение личного аккаунта и настройка автоответчика.\n"
         "• /gethistori — выбрать группу и получить файл истории "
         "(доступны только группы, где ты состоишь и имеешь права администратора).\n"
@@ -1204,6 +1209,39 @@ async def handle_game_message(
         await _bonus_prompt(update, context)
         return True
     return False
+
+
+async def handle_coin_promo_message(update: Update) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None or message.text is None:
+        return False
+    match = _COIN_PROMO_RE.fullmatch(message.text.strip())
+    if match is None:
+        return False
+    if message.chat.type != ChatType.PRIVATE:
+        await message.reply_text("Активируй промокод в личном чате с Юбарой.")
+        return True
+    try:
+        result, credited, balance = await database.redeem_coin_promo_code(
+            match.group(1),
+            user.id,
+            user.username,
+        )
+    except Exception:
+        logging.exception("Не удалось активировать промокод монет user_id=%s.", user.id)
+        await message.reply_text("Не удалось активировать промокод. Попробуй позже.")
+        return True
+    if result == "redeemed" and credited is not None and balance is not None:
+        await message.reply_text(
+            f"Промокод активирован! Начислено {_coins(credited)} "
+            f"монет. Баланс: {_coins(balance)}."
+        )
+    elif result == "used":
+        await message.reply_text("Этот промокод уже использован.")
+    else:
+        await message.reply_text("Промокод не найден или указан неверно.")
+    return True
 
 
 async def maybe_award_group_owner(
