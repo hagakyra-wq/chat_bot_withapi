@@ -1,6 +1,7 @@
 """Асинхронный доступ к SQLite и создание согласованных копий БД."""
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -25,6 +26,7 @@ from config import (
     MAX_TOTAL_MESSAGES_PER_CHAT,
     DATABASE_SHARD_THRESHOLD_BYTES,
     HISTORY_ENCRYPTION_KEY,
+    PERSONAL_ACCOUNT_TIMEZONE,
 )
 
 _write_lock = asyncio.Lock()
@@ -46,6 +48,24 @@ _AUTORESPONDER_DEFAULT_PRIVATE_TEXT = (
 )
 _TELEGRAM_SESSION_BACKUPS_KEY = "telegram_session_backups"
 _history_cipher = Fernet(HISTORY_ENCRYPTION_KEY.encode("ascii"))
+_MESSAGE_ACTIVITY_BACKFILL_KEY = "message_activity_backfill_v1"
+
+
+def _message_activity_period_dates(
+    period: str,
+    *,
+    today: date | None = None,
+) -> tuple[str, str]:
+    current_date = today or datetime.now(PERSONAL_ACCOUNT_TIMEZONE).date()
+    if period == "d":
+        start_date = current_date
+    elif period == "w":
+        start_date = current_date - timedelta(days=current_date.weekday())
+    elif period == "m":
+        start_date = current_date.replace(day=1)
+    else:
+        raise ValueError(f"Неизвестный период статистики сообщений: {period!r}.")
+    return start_date.isoformat(), current_date.isoformat()
 
 
 class HistoryDecryptionError(ValueError):
@@ -112,6 +132,17 @@ async def initialize() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
                     ON messages(chat_id, id);
+                CREATE TABLE IF NOT EXISTS message_activity (
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    activity_date TEXT NOT NULL,
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (chat_id, user_id, activity_date)
+                );
+                CREATE INDEX IF NOT EXISTS idx_message_activity_user_date
+                    ON message_activity(user_id, activity_date);
+                CREATE INDEX IF NOT EXISTS idx_message_activity_chat_date
+                    ON message_activity(chat_id, activity_date);
                 CREATE TABLE IF NOT EXISTS allowed_groups (
                     group_id INTEGER PRIMARY KEY
                 );
@@ -206,6 +237,7 @@ async def initialize() -> None:
                     item_id INTEGER NOT NULL UNIQUE,
                     seller_id INTEGER NOT NULL,
                     price_cents INTEGER NOT NULL CHECK(price_cents > 0),
+                    title TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     status TEXT NOT NULL CHECK(status IN ('open', 'sold', 'withdrawn'))
                 );
@@ -464,6 +496,16 @@ async def initialize() -> None:
                     "market_backup_msg_id": "INTEGER",
                 },
             )
+            cursor = await db.execute("PRAGMA table_info(market_lots)")
+            had_market_lot_title = any(
+                str(row["name"]) == "title" for row in await cursor.fetchall()
+            )
+            await _ensure_columns(db, "market_lots", {"title": "TEXT"})
+            if not had_market_lot_title:
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES ('dirty', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
             await _migrate_global_profiles(db)
             await _migrate_message_payloads(db)
             await db.commit()
@@ -472,6 +514,7 @@ async def initialize() -> None:
     _dirty_generation = 1 if dirty and dirty["value"] == "1" else 0
     _synced_generation = 0
     logging.info("Схема SQLite готова: %s", DATABASE_PATH)
+    await _backfill_message_activity()
 
 
 async def _ensure_columns(
@@ -1152,8 +1195,16 @@ async def forget_user(user_id: int, group_id: int) -> bool:
                 "DELETE FROM users WHERE user_id = ?",
                 (user_id,),
             )
+            activity_cursor = await db.execute(
+                "DELETE FROM message_activity WHERE user_id = ?",
+                (user_id,),
+            )
             await db.commit()
-            deleted = profile_cursor.rowcount > 0 or membership_cursor.rowcount > 0
+            deleted = (
+                profile_cursor.rowcount > 0
+                or membership_cursor.rowcount > 0
+                or activity_cursor.rowcount > 0
+            )
         if deleted:
             _record_write()
         return deleted
@@ -1211,6 +1262,107 @@ async def save_message(
             await db.commit()
         _record_write()
         await _archive_messages_if_needed()
+
+
+async def record_group_message_activity(chat_id: int, user_id: int) -> None:
+    if chat_id >= 0:
+        return
+    activity_date = datetime.now(PERSONAL_ACCOUNT_TIMEZONE).date().isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute(
+                """
+                INSERT INTO message_activity(chat_id, user_id, activity_date, message_count)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(chat_id, user_id, activity_date)
+                DO UPDATE SET message_count = message_count + 1
+                """,
+                (chat_id, user_id, activity_date),
+            )
+            await db.commit()
+        _record_write()
+
+
+async def get_user_message_activity(user_id: int) -> dict[str, int]:
+    today = datetime.now(PERSONAL_ACCOUNT_TIMEZONE).date()
+    day_start, _ = _message_activity_period_dates("d", today=today)
+    week_start, _ = _message_activity_period_dates("w", today=today)
+    month_start, _ = _message_activity_period_dates("m", today=today)
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE
+                    WHEN activity_date BETWEEN ? AND ? THEN message_count
+                    ELSE 0
+                END), 0) AS day_count,
+                COALESCE(SUM(CASE
+                    WHEN activity_date BETWEEN ? AND ? THEN message_count
+                    ELSE 0
+                END), 0) AS week_count,
+                COALESCE(SUM(CASE
+                    WHEN activity_date BETWEEN ? AND ? THEN message_count
+                    ELSE 0
+                END), 0) AS month_count
+            FROM message_activity
+            WHERE user_id = ?
+            """,
+            (
+                day_start,
+                today,
+                week_start,
+                today,
+                month_start,
+                today,
+                user_id,
+            ),
+        )
+        row = await cursor.fetchone()
+    return {
+        "d": int(row["day_count"]),
+        "w": int(row["week_count"]),
+        "m": int(row["month_count"]),
+    }
+
+
+async def get_group_message_leaderboard(
+    chat_id: int,
+    period: str,
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    start_date, end_date = _message_activity_period_dates(period)
+    safe_limit = min(max(1, limit), 50)
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            WITH counts AS (
+                SELECT user_id, SUM(message_count) AS message_count
+                FROM message_activity
+                WHERE chat_id = ? AND activity_date BETWEEN ? AND ?
+                GROUP BY user_id
+            )
+            SELECT
+                counts.user_id,
+                counts.message_count,
+                COALESCE(
+                    NULLIF(global_profiles.callsign, ''),
+                    NULLIF(global_profiles.display_name, ''),
+                    NULLIF(group_users.username, ''),
+                    'Участник'
+                ) AS display_name,
+                COALESCE(global_profiles.username, group_users.username) AS username
+            FROM counts
+            LEFT JOIN users AS group_users
+              ON group_users.user_id = counts.user_id
+             AND group_users.group_id = ?
+            LEFT JOIN global_profiles ON global_profiles.user_id = counts.user_id
+            ORDER BY counts.message_count DESC, display_name COLLATE NOCASE
+            LIMIT ?
+            """,
+            (chat_id, start_date, end_date, chat_id, safe_limit),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
 
 async def has_chat_message(chat_id: int, message_id: int) -> bool:
@@ -1901,6 +2053,72 @@ async def get_duel_leaderboard(limit: int = 10) -> list[dict[str, Any]]:
 
 def _message_archive_paths() -> list[Path]:
     return sorted(DATABASE_ARCHIVE_DIR.glob("messages_*.db")) if DATABASE_ARCHIVE_DIR.exists() else []
+
+
+async def _backfill_message_activity() -> None:
+    activity: dict[tuple[int, int, str], int] = {}
+    database_paths = [DATABASE_PATH, *_message_archive_paths()]
+    try:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "SELECT group_id, user_id FROM users WHERE is_bot = 0"
+            )
+            known_memberships = {
+                (int(row["group_id"]), int(row["user_id"]))
+                for row in await cursor.fetchall()
+            }
+        for database_path in database_paths:
+            async with aiosqlite.connect(database_path) as source:
+                cursor = await source.execute(
+                    """
+                    SELECT
+                        chat_id,
+                        user_id,
+                        date(created_at, '+5 hours') AS activity_date,
+                        COUNT(*) AS message_count
+                    FROM messages
+                    WHERE chat_id < 0
+                      AND created_at >= datetime('now', '-32 days')
+                      AND date(created_at, '+5 hours') IS NOT NULL
+                    GROUP BY chat_id, user_id, activity_date
+                    """
+                )
+                for row in await cursor.fetchall():
+                    chat_id, user_id = int(row[0]), int(row[1])
+                    if (chat_id, user_id) not in known_memberships:
+                        continue
+                    key = (chat_id, user_id, str(row[2]))
+                    activity[key] = activity.get(key, 0) + int(row[3])
+    except (OSError, sqlite3.Error):
+        logging.exception("Не удалось перенести доступную историю в статистику сообщений.")
+        return
+
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM meta WHERE key = ?",
+                (_MESSAGE_ACTIVITY_BACKFILL_KEY,),
+            )
+            if await cursor.fetchone() is not None:
+                return
+            await db.executemany(
+                """
+                INSERT OR IGNORE INTO message_activity(
+                    chat_id, user_id, activity_date, message_count
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    (chat_id, user_id, activity_date, count)
+                    for (chat_id, user_id, activity_date), count in activity.items()
+                ),
+            )
+            await db.execute(
+                "INSERT INTO meta(key, value) VALUES (?, '1')",
+                (_MESSAGE_ACTIVITY_BACKFILL_KEY,),
+            )
+            await db.commit()
+        _record_write()
 
 
 async def rotate_messages_if_needed() -> bool:
@@ -3212,7 +3430,19 @@ async def recycle_banner_items_by_level(
     return "recycled", items, balance
 
 
-async def create_market_lot(user_id: int, item_id: int, price_cents: int) -> str:
+async def create_market_lot(
+    user_id: int,
+    item_id: int,
+    price_cents: int,
+    *,
+    title: str | None = None,
+) -> str:
+    if title is not None:
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title or len(title) > 48:
+            raise ValueError("Название лота должно содержать от 1 до 48 символов.")
+    if price_cents <= 0:
+        raise ValueError("Цена лота должна быть больше нуля.")
     async with _write_lock:
         async with _connect() as db:
             await db.execute("BEGIN")
@@ -3243,9 +3473,9 @@ async def create_market_lot(user_id: int, item_id: int, price_cents: int) -> str
                 await db.rollback()
                 return "listed"
             await db.execute(
-                "INSERT INTO market_lots(item_id, seller_id, price_cents, status) "
-                "VALUES (?, ?, ?, 'open')",
-                (item_id, user_id, price_cents),
+                "INSERT INTO market_lots(item_id, seller_id, price_cents, title, status) "
+                "VALUES (?, ?, ?, ?, 'open')",
+                (item_id, user_id, price_cents, title),
             )
             await db.commit()
         _record_write()
@@ -3292,8 +3522,9 @@ async def get_market_lots(
         else "lot.created_at DESC, lot.lot_id DESC"
     )
     query = f"""
-        SELECT lot.lot_id, lot.item_id, lot.seller_id, lot.price_cents, lot.created_at,
-               item.level, item.file_id, item.market_file_id
+        SELECT lot.lot_id, lot.item_id, lot.seller_id, lot.price_cents, lot.title,
+               lot.created_at, item.level, item.seed, item.preset, item.file_id,
+               item.market_file_id
         FROM market_lots lot
         JOIN banner_items item ON item.item_id = lot.item_id
         WHERE lot.status = 'open' AND (? IS NULL OR item.level = ?)
@@ -3317,11 +3548,163 @@ async def count_market_lots(*, level: int | None = None) -> int:
         return int(row[0]) if row else 0
 
 
+_MARKET_SEARCH_RARITIES: dict[int, tuple[str, ...]] = {
+    1: ("обычный", "обычная", "common"),
+    2: ("необычный", "необычная", "uncommon"),
+    3: ("редкий", "редкая", "rare"),
+    4: ("эпический", "эпическая", "epic"),
+    5: ("элитный", "элитная", "elite"),
+    6: ("легендарный", "легендарная", "legendary"),
+}
+_MARKET_SEARCH_WORD_RE = re.compile(r"[a-zа-яё0-9]+(?:[.,][0-9]+)?", re.IGNORECASE)
+
+
+def _normalize_market_search_text(value: object) -> str:
+    return str(value or "").casefold().replace("ё", "е")
+
+
+def _market_search_score(
+    query: str,
+    lot: dict[str, Any],
+    preset_names: dict[str, str],
+) -> tuple[int, float]:
+    query_tokens = _MARKET_SEARCH_WORD_RE.findall(
+        _normalize_market_search_text(query)
+    )
+    if not query_tokens:
+        return 0, 0.0
+
+    level = int(lot["level"])
+    preset = str(lot.get("preset") or "")
+    price_cents = int(lot["price_cents"])
+    price_coins = f"{price_cents / 100:.2f}".rstrip("0").rstrip(".")
+    fields = [
+        str(lot.get("title") or ""),
+        str(lot.get("seed") or ""),
+        preset,
+        preset_names.get(preset, ""),
+        str(lot.get("lot_id") or ""),
+        str(level),
+        _MARKET_SEARCH_RARITIES.get(level, ())[0],
+        " ".join(_MARKET_SEARCH_RARITIES.get(level, ())),
+        price_coins,
+        f"{price_cents / 100:.2f}",
+        str(price_cents),
+        "seed сиид сид название лот цена редкость",
+    ]
+    normalized_fields = [_normalize_market_search_text(field) for field in fields]
+    corpus = " ".join(normalized_fields)
+    corpus_words = _MARKET_SEARCH_WORD_RE.findall(corpus)
+    matched = 0
+    total_score = 0.0
+    for token in query_tokens:
+        best = 0.0
+        for word in corpus_words:
+            if token == word:
+                best = 1.0
+                break
+            if len(token) >= 3 and (token in word or word in token):
+                best = max(best, 0.92)
+            else:
+                best = max(best, difflib.SequenceMatcher(None, token, word).ratio())
+        if best >= 0.68:
+            matched += 1
+            total_score += best
+    return matched, total_score
+
+
+async def search_market_lots(
+    query: str,
+    *,
+    preset_names: dict[str, str] | None = None,
+    level: int | None = None,
+    sort_by: str = "relevance",
+    limit: int = 8,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    normalized_query = query.strip()
+    if not normalized_query:
+        return await get_market_lots(
+            level=level,
+            sort_by="date" if sort_by == "relevance" else sort_by,
+            limit=limit,
+            offset=offset,
+        )
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT lot.lot_id, lot.item_id, lot.seller_id, lot.price_cents,
+                   lot.title, lot.created_at, item.level, item.seed, item.preset,
+                   item.file_id, item.market_file_id
+            FROM market_lots lot
+            JOIN banner_items item ON item.item_id = lot.item_id
+            WHERE lot.status = 'open' AND (? IS NULL OR item.level = ?)
+            """,
+            (level, level),
+        )
+        candidates = [dict(row) for row in await cursor.fetchall()]
+    names = preset_names or {}
+    ranked: list[tuple[tuple[float | int, ...], dict[str, Any]]] = []
+    for lot in candidates:
+        matched, score = _market_search_score(normalized_query, lot, names)
+        if not matched:
+            continue
+        created_at = datetime.fromisoformat(str(lot["created_at"])).timestamp()
+        lot_id = int(lot["lot_id"])
+        if sort_by == "price":
+            sort_key: tuple[float | int, ...] = (
+                -matched,
+                int(lot["price_cents"]),
+                -score,
+                -lot_id,
+            )
+        elif sort_by == "date":
+            sort_key = (-matched, -created_at, -score, -lot_id)
+        else:
+            sort_key = (-matched, -score, -created_at, -lot_id)
+        ranked.append((sort_key, lot))
+    ranked.sort(key=lambda row: row[0])
+    safe_offset = max(0, offset)
+    safe_limit = max(1, min(limit, 50))
+    return [
+        row[1]
+        for row in ranked[safe_offset:safe_offset + safe_limit]
+    ]
+
+
+async def count_market_search_results(
+    query: str,
+    *,
+    preset_names: dict[str, str] | None = None,
+    level: int | None = None,
+) -> int:
+    if not query.strip():
+        return await count_market_lots(level=level)
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT lot.lot_id, lot.price_cents, lot.title, lot.created_at,
+                   item.level, item.seed, item.preset
+            FROM market_lots lot
+            JOIN banner_items item ON item.item_id = lot.item_id
+            WHERE lot.status = 'open' AND (? IS NULL OR item.level = ?)
+            """,
+            (level, level),
+        )
+        candidates = [dict(row) for row in await cursor.fetchall()]
+    names = preset_names or {}
+    return sum(
+        _market_search_score(query, lot, names)[0] > 0
+        for lot in candidates
+    )
+
+
 async def get_user_market_lots(user_id: int) -> list[dict[str, Any]]:
     async with _connect() as db:
         cursor = await db.execute(
             """
-            SELECT lot.lot_id, lot.item_id, lot.price_cents, lot.created_at, item.level
+            SELECT lot.lot_id, lot.item_id, lot.price_cents, lot.title,
+                   lot.created_at, item.level
             FROM market_lots lot
             JOIN banner_items item ON item.item_id = lot.item_id
             WHERE lot.seller_id = ? AND lot.status = 'open'

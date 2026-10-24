@@ -305,6 +305,7 @@ async def send_banner(
     animated: bool,
     caption: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str | None = None,
 ) -> Any:
     if animated:
         return await bot.send_animation(
@@ -312,12 +313,14 @@ async def send_banner(
             animation=media,
             caption=caption,
             reply_markup=reply_markup,
+            parse_mode=parse_mode,
         )
     return await bot.send_photo(
         chat_id=chat_id,
         photo=media,
         caption=caption,
         reply_markup=reply_markup,
+        parse_mode=parse_mode,
     )
 
 

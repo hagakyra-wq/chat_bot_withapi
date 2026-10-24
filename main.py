@@ -8,15 +8,18 @@ import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Awaitable
 from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 from cryptography.fernet import Fernet
 from telegram import MessageReactionUpdated, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
+    BaseUpdateProcessor,
     CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
@@ -55,6 +58,7 @@ from casino import (
     on_game_callback,
 )
 from handlers_group import (
+    on_group_activity,
     on_group_message,
     on_message_reaction,
     on_new_members,
@@ -83,6 +87,45 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
     def log_message(self, _format: str, *_args: object) -> None:
         del _format, _args
+
+
+class PerUserUpdateProcessor(BaseUpdateProcessor):
+    def __init__(self, max_concurrent_updates: int) -> None:
+        super().__init__(max_concurrent_updates)
+        self._user_locks: dict[int, tuple[asyncio.Lock, int]] = {}
+        self._locks_guard = asyncio.Lock()
+
+    async def do_process_update(
+        self,
+        update: object,
+        coroutine: Awaitable[Any],
+    ) -> None:
+        user = update.effective_user if isinstance(update, Update) else None
+        if user is None:
+            await coroutine
+            return
+
+        async with self._locks_guard:
+            state = self._user_locks.get(user.id)
+            lock, references = state if state is not None else (asyncio.Lock(), 0)
+            self._user_locks[user.id] = (lock, references + 1)
+        try:
+            async with lock:
+                await coroutine
+        finally:
+            async with self._locks_guard:
+                lock, references = self._user_locks[user.id]
+                if references == 1:
+                    del self._user_locks[user.id]
+                else:
+                    self._user_locks[user.id] = (lock, references - 1)
+
+    async def initialize(self) -> None:
+        return
+
+    async def shutdown(self) -> None:
+        async with self._locks_guard:
+            self._user_locks.clear()
 
 
 async def _restore_from_telegram(bot: object) -> tuple[str, int] | None:
@@ -647,6 +690,7 @@ def build_application() -> Application:
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
+        .concurrent_updates(PerUserUpdateProcessor(max_concurrent_updates=16))
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
@@ -689,6 +733,10 @@ def build_application() -> Application:
             filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,
             on_new_members,
         )
+    )
+    application.add_handler(
+        MessageHandler(filters.ChatType.GROUPS, on_group_activity),
+        group=-2,
     )
     application.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.TEXT, on_group_message)

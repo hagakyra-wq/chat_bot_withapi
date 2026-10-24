@@ -1,6 +1,7 @@
 """Обработчики личных сообщений, ключей доступа и админ-панели."""
 
 import asyncio
+import html
 from io import BytesIO
 import logging
 import random
@@ -9,7 +10,15 @@ import secrets
 import time
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaAnimation,
+    InputMediaPhoto,
+    Message,
+    ReactionTypeEmoji,
+    Update,
+)
 from telegram.constants import ChatAction, ChatType
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -90,33 +99,73 @@ _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
 
 def _format_private_profile(
     profile: dict[str, object],
+    *,
+    message_count: int = 0,
+    stats_period: str = "d",
 ) -> str:
-    notes = [
-        fact
-        for fact in str(profile.get("notes") or "").splitlines()
-        if fact.strip()
-    ]
-    facts = "\n".join(f"• {fact}" for fact in notes) or "• пока фактов нет"
-    lines = [
-        "Мой глобальный архив о тебе:\n"
-        f"Имя: {profile.get('display_name') or 'не указано'}",
-        f"Username: @{profile['username']}" if profile.get("username") else "Username: не указан",
-        f"Кличка: {profile.get('callsign') or 'не задана'}",
-        f"Возраст: {profile.get('age') or 'не указан'}",
-        f"Пол: {profile.get('gender') if profile.get('gender') != 'неизвестен' else 'не указан'}",
-        "Факты:",
-        facts,
-        "Будешь делиться фактами — я сохраню их в своих записях.",
-    ]
-    return "\n".join(lines)
+    identity = str(profile.get("display_name") or "").strip()
+    callsign = str(profile.get("callsign") or "").strip()
+    if callsign and identity.casefold() == callsign.casefold():
+        identity = ""
+    username = str(profile.get("username") or "").strip()
+    age = profile.get("age")
+    gender = profile.get("gender")
+    public_details: list[str] = []
+    if username:
+        public_details.append(f"@{username.lstrip('@')}")
+    private_details: list[str] = []
+    if isinstance(age, int) and age > 0:
+        private_details.append(str(age))
+    if isinstance(gender, str) and gender != "неизвестен":
+        private_details.append(gender)
+    if private_details:
+        public_details.append(", ".join(private_details))
+    if public_details:
+        identity = " · ".join(part for part in (identity, *public_details) if part)
+    caption = html.escape(identity or "Профиль")
+    notes = [line.strip() for line in str(profile.get("notes") or "").splitlines() if line.strip()]
+    if notes:
+        facts = "\n".join(f"• {line}" for line in notes)
+        if len(facts) > 650:
+            facts = facts[:647].rsplit("\n", 1)[0] + "\n…"
+        caption += f"\n<blockquote expandable>{html.escape(facts)}</blockquote>"
+    period_labels = {"d": "D · сегодня", "w": "W · неделя", "m": "M · месяц"}
+    if stats_period not in period_labels:
+        raise ValueError(f"Неизвестный период статистики профиля: {stats_period!r}.")
+    caption += (
+        f"\n\n<b>Сообщения в группах · {period_labels[stats_period]}:</b> "
+        f"{message_count}"
+    )
+    return caption
 
 
-def _profile_keyboard() -> InlineKeyboardMarkup:
+def _profile_keyboard(
+    profile: dict[str, object],
+    stats_period: str = "d",
+) -> InlineKeyboardMarkup:
+    has_facts = bool(str(profile.get("notes") or "").strip())
+    period_buttons = [
+        InlineKeyboardButton(
+            f"{'● ' if period == stats_period else ''}{label}",
+            callback_data=f"profile:stats:{period}",
+        )
+        for period, label in (("d", "D"), ("w", "W"), ("m", "M"))
+    ]
     return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("📝 Заполнить профиль", callback_data="profile:fill"),
-            InlineKeyboardButton("🎨 Переделать баннер", callback_data="profile:banner"),
-        ]]
+        [
+            period_buttons,
+            [
+                InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
+                InlineKeyboardButton("✏️ Изменить кличку", callback_data="profile:callsign"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📝 Факты" if has_facts else "➕ Добавить факт",
+                    callback_data="profile:fact",
+                )
+            ],
+            [InlineKeyboardButton("🎨 Переделать баннер", callback_data="profile:banner")],
+        ]
     )
 
 
@@ -124,7 +173,10 @@ async def _send_profile_card(
     message: Message,
     user_id: int,
     profile: dict[str, Any],
-) -> None:
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    edit_message: Message | None = None,
+) -> int:
     nickname = str(
         profile.get("callsign")
         or profile.get("display_name")
@@ -132,37 +184,110 @@ async def _send_profile_card(
         or "Без имени"
     )
     decoration = await database.get_or_create_profile_decoration(user_id)
-    profile_text = _format_private_profile(profile)
-    chunks: list[str] = []
-    current = ""
-    for line in profile_text.splitlines():
-        if len(current) + len(line) + 1 > 950 and current:
-            chunks.append(current)
-            current = ""
-        current += ("\n" if current else "") + line
-    if current:
-        chunks.append(current)
-    if not chunks:
-        chunks = [profile_text]
     media = await get_profile_banner(message.get_bot(), user_id, profile=profile)
+    animated = False
     if media is None:
-        await message.reply_photo(
-            photo=create_profile_card(nickname, decoration),
-            caption=chunks[0],
-            reply_markup=_profile_keyboard(),
-        )
+        payload: str | BytesIO = create_profile_card(nickname, decoration)
     else:
         payload, animated = media
-        await send_banner(
+    stats_period = str(context.user_data.get("profile_stats_period", "d"))
+    stats_period = stats_period if stats_period in ("d", "w", "m") else "d"
+    activity = await database.get_user_message_activity(user_id)
+    caption = _format_private_profile(
+        profile,
+        message_count=activity[stats_period],
+        stats_period=stats_period,
+    )
+    keyboard = _profile_keyboard(profile, stats_period)
+    if edit_message is not None and (edit_message.photo or edit_message.animation):
+        media_input = (
+            InputMediaAnimation(media=payload, caption=caption, parse_mode="HTML")
+            if animated
+            else InputMediaPhoto(media=payload, caption=caption, parse_mode="HTML")
+        )
+        await edit_message.edit_media(media=media_input, reply_markup=keyboard)
+        message_id = edit_message.message_id
+    else:
+        sent = await send_banner(
             message.get_bot(),
             message.chat_id,
             payload,
             animated=animated,
-            caption=chunks[0],
-            reply_markup=_profile_keyboard(),
+            caption=caption,
+            reply_markup=keyboard,
+            parse_mode="HTML",
         )
-    for chunk in chunks[1:]:
-        await message.reply_text(chunk)
+        message_id = sent.message_id
+    context.user_data["profile_message_id"] = message_id
+    return message_id
+
+
+async def _refresh_profile_card(
+    message: Message,
+    user_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    profile = await database.get_global_profile(user_id)
+    if profile is None:
+        raise RuntimeError(f"Профиль пользователя {user_id} отсутствует.")
+    message_id = context.user_data.get("profile_message_id")
+    if isinstance(message_id, int):
+        stats_period = str(context.user_data.get("profile_stats_period", "d"))
+        stats_period = stats_period if stats_period in ("d", "w", "m") else "d"
+        activity = await database.get_user_message_activity(user_id)
+        nickname = str(
+            profile.get("callsign")
+            or profile.get("display_name")
+            or profile.get("username")
+            or "Без имени"
+        )
+        decoration = await database.get_or_create_profile_decoration(user_id)
+        current_media = await get_profile_banner(
+            message.get_bot(),
+            user_id,
+            profile=profile,
+        )
+        animated = False
+        if current_media is None:
+            payload: str | BytesIO = create_profile_card(nickname, decoration)
+        else:
+            payload, animated = current_media
+        media_input = (
+            InputMediaAnimation(
+                media=payload,
+                caption=_format_private_profile(
+                    profile,
+                    message_count=activity[stats_period],
+                    stats_period=stats_period,
+                ),
+                parse_mode="HTML",
+            )
+            if animated
+            else InputMediaPhoto(
+                media=payload,
+                caption=_format_private_profile(
+                    profile,
+                    message_count=activity[stats_period],
+                    stats_period=stats_period,
+                ),
+                parse_mode="HTML",
+            )
+        )
+        try:
+            await context.bot.edit_message_media(
+                chat_id=message.chat_id,
+                message_id=message_id,
+                media=media_input,
+                reply_markup=_profile_keyboard(profile, stats_period),
+            )
+            return
+        except TelegramError:
+            logging.warning(
+                "Не удалось обновить старое сообщение профиля user_id=%s; отправляю новую карточку.",
+                user_id,
+                exc_info=True,
+            )
+    await _send_profile_card(message, user_id, profile, context)
 
 
 async def on_profile_callback(
@@ -184,6 +309,34 @@ async def on_profile_callback(
     await ensure_user_bottom_menu(query.message, context)
 
     action = query.data or ""
+    if action.startswith("profile:stats:"):
+        stats_period = action.removeprefix("profile:stats:")
+        if stats_period not in ("d", "w", "m"):
+            await query.message.reply_text("Неизвестный период статистики.")
+            return
+        try:
+            profile = await database.get_global_profile(user.id)
+            if profile is None:
+                raise RuntimeError(f"Профиль пользователя {user.id} не создан.")
+            activity = await database.get_user_message_activity(user.id)
+            await query.message.edit_caption(
+                caption=_format_private_profile(
+                    profile,
+                    message_count=activity[stats_period],
+                    stats_period=stats_period,
+                ),
+                parse_mode="HTML",
+                reply_markup=_profile_keyboard(profile, stats_period),
+            )
+            context.user_data["profile_stats_period"] = stats_period
+        except Exception:
+            logging.exception(
+                "Не удалось показать статистику профиля user_id=%s period=%s.",
+                user.id,
+                stats_period,
+            )
+            await query.message.reply_text("Не удалось загрузить статистику. Попробуй позже.")
+        return
     if action == "profile:show":
         try:
             await database.ensure_user(
@@ -195,10 +348,24 @@ async def on_profile_callback(
             profile = await database.get_global_profile(user.id)
             if profile is None:
                 raise RuntimeError(f"Профиль пользователя {user.id} не создан.")
-            await _send_profile_card(query.message, user.id, profile)
+            await _send_profile_card(
+                query.message,
+                user.id,
+                profile,
+                context,
+                edit_message=query.message,
+            )
         except Exception:
             logging.exception("Не удалось открыть профиль пользователя %s.", user.id)
             await query.message.reply_text("Не удалось открыть профиль. Попробуй позже.")
+        return
+    if action == "profile:callsign":
+        context.user_data["profile_edit_stage"] = "callsign"
+        await query.message.reply_text("Отправь новую кличку одним сообщением.")
+        return
+    if action == "profile:fact":
+        context.user_data["profile_edit_stage"] = "fact"
+        await query.message.reply_text("Отправь один факт, который нужно сохранить в профиле.")
         return
     if action == "profile:fill":
         try:
@@ -239,7 +406,13 @@ async def on_profile_callback(
                 f"profile_decoration:{user.id}",
                 secrets.token_hex(32),
             )
-            await _send_profile_card(query.message, user.id, profile)
+            await _send_profile_card(
+                query.message,
+                user.id,
+                profile,
+                context,
+                edit_message=query.message,
+            )
         except Exception:
             logging.exception("Не удалось переделать баннер профиля пользователя %s.", user.id)
             await query.message.reply_text("Не удалось обновить баннер. Попробуй позже.")
@@ -296,6 +469,10 @@ async def on_profile_callback(
             return
         context.user_data.pop("profile_fill_stage", None)
         await query.message.reply_text("Профиль заполнен. Сведения можно изменить, пройдя опрос снова.")
+        try:
+            await _refresh_profile_card(query.message, user.id, context)
+        except Exception:
+            logging.exception("Не удалось обновить карточку профиля user_id=%s.", user.id)
 
 
 async def _apply_private_profile_meta(
@@ -3268,7 +3445,7 @@ async def _private_dialog(
             profile = await database.get_global_profile(user_id)
             if profile is None:
                 raise RuntimeError(f"Глобальный профиль пользователя {user_id} отсутствует.")
-            await _send_profile_card(message, user_id, profile)
+            await _send_profile_card(message, user_id, profile, context)
         except Exception:
             logging.exception("Не удалось показать глобальный профиль пользователя %s.", user_id)
             await message.reply_text("Не удалось открыть профиль. Попробуй позже.")
@@ -3420,6 +3597,56 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if re.fullmatch(r"/start(?:@\w+)?", message.text.strip(), re.IGNORECASE) is None:
         await ensure_user_bottom_menu(message, context)
+    edit_stage = context.user_data.get("profile_edit_stage")
+    if edit_stage is not None:
+        context.user_data.pop("profile_edit_stage", None)
+        if message.text.strip().casefold() == "/cancel":
+            await message.reply_text("Изменение профиля отменено.")
+            return
+        if edit_stage == "callsign":
+            callsign = re.sub(r"\s+", " ", message.text.strip())
+            if not callsign or callsign.startswith("/") or len(callsign) > 80:
+                context.user_data["profile_edit_stage"] = "callsign"
+                await message.reply_text("Кличка должна содержать от 1 до 80 символов.")
+                return
+            try:
+                updated = await database.update_user_profile(
+                    user.id,
+                    message.chat_id,
+                    callsign=callsign,
+                )
+                if not updated:
+                    raise RuntimeError(f"Профиль user_id={user.id} не найден для обновления.")
+                await _refresh_profile_card(message, user.id, context)
+            except Exception:
+                logging.exception("Не удалось обновить кличку пользователя %s.", user.id)
+                await message.reply_text("Не удалось обновить кличку. Попробуй ещё раз.")
+                context.user_data["profile_edit_stage"] = "callsign"
+                return
+            await message.reply_text("Кличка обновлена.")
+            return
+        if edit_stage == "fact":
+            fact = re.sub(r"\s+", " ", message.text.strip())
+            if not fact or fact.startswith("/") or len(fact) > 500:
+                context.user_data["profile_edit_stage"] = "fact"
+                await message.reply_text("Факт должен содержать от 1 до 500 символов.")
+                return
+            try:
+                updated = await database.update_user_profile(
+                    user.id,
+                    message.chat_id,
+                    note=fact,
+                )
+                if not updated:
+                    raise RuntimeError(f"Профиль user_id={user.id} не найден для обновления.")
+                await _refresh_profile_card(message, user.id, context)
+            except Exception:
+                logging.exception("Не удалось сохранить факт пользователя %s.", user.id)
+                await message.reply_text("Не удалось сохранить факт. Попробуй ещё раз.")
+                context.user_data["profile_edit_stage"] = "fact"
+                return
+            await message.reply_text("Факт добавлен в профиль.")
+            return
     fill_stage = context.user_data.get("profile_fill_stage")
     if fill_stage == "name":
         nickname = extract_reported_nickname(message.text) or re.sub(
@@ -3473,6 +3700,10 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         context.user_data.pop("profile_fill_stage", None)
         await message.reply_text("Профиль заполнен. Спасибо, теперь я буду обращаться правильно.")
+        try:
+            await _refresh_profile_card(message, user.id, context)
+        except Exception:
+            logging.exception("Не удалось обновить карточку профиля user_id=%s.", user.id)
         return
     if await handle_game_message(update, context):
         return

@@ -1,6 +1,7 @@
 """Casino, banner inventory, marketplace, and subscription bonus handlers."""
 
 import asyncio
+import html
 import logging
 import re
 import secrets
@@ -37,9 +38,14 @@ from config import (
     CASINO_UNSUBSCRIBE_PENALTY_CENTS,
     DICE_ANIMATION_DELAY_SECONDS,
 )
-from yubari_banner import make_digest, pick_preset
+from yubari_banner import PRESET_NAMES, make_digest, pick_preset
 
 _PRICE_RE = re.compile(r"^\s*(\d{1,8})(?:[,.](\d{1,2}))?\s*$")
+_MARKET_COMMAND_RE = re.compile(r"^/market(?:@\w+)?(?:\s+(.+))?$", re.IGNORECASE)
+_MARKET_TEXT_RE = re.compile(
+    r"^(?:площадка|маркет|маркетплейс)\s+(.+)$",
+    re.IGNORECASE,
+)
 _COIN_PROMO_RE = re.compile(
     r"^/coinpromo(?:@\w+)?\s+(YUBARA-COIN-[A-F0-9]{12})$",
     re.IGNORECASE,
@@ -814,6 +820,8 @@ async def _show_market(
     page: int,
     level_filter: str,
     sort_by: str,
+    *,
+    search_query: str | None = None,
 ) -> None:
     user = update.effective_user
     message = update.effective_message
@@ -822,23 +830,55 @@ async def _show_market(
     if message.chat.type != ChatType.PRIVATE:
         await message.reply_text("Торговая площадка открывается в ЛС бота.")
         return
+    if search_query is None:
+        search_query = str(context.user_data.get("market_search_query") or "")
+    else:
+        context.user_data["market_search_query"] = search_query.strip()
+        search_query = str(context.user_data["market_search_query"])
     level = int(level_filter) if level_filter.isdigit() and 1 <= int(level_filter) <= 6 else None
-    total = await database.count_market_lots(level=level)
+    total = (
+        await database.count_market_search_results(
+            search_query,
+            preset_names=PRESET_NAMES,
+            level=level,
+        )
+        if search_query
+        else await database.count_market_lots(level=level)
+    )
     page = min(max(page, 0), total - 1) if total else 0
-    lots = await database.get_market_lots(
-        level=level,
-        sort_by=sort_by,
-        limit=1,
-        offset=page,
+    lots = (
+        await database.search_market_lots(
+            search_query,
+            preset_names=PRESET_NAMES,
+            level=level,
+            sort_by=sort_by,
+            limit=1,
+            offset=page,
+        )
+        if search_query
+        else await database.get_market_lots(
+            level=level,
+            sort_by=sort_by,
+            limit=1,
+            offset=page,
+        )
     )
     query = update.callback_query
     if total == 0:
         context.user_data["market_page"] = 0
         context.user_data["market_filter"] = level_filter
         context.user_data["market_sort"] = sort_by
-        text = "🏪 Здесь пока нет баннеров на продаже."
+        text = (
+            f"🔎 По запросу «{search_query[:80]}» ничего не нашлось."
+            if search_query
+            else "🏪 Здесь пока нет баннеров на продаже."
+        )
         markup = InlineKeyboardMarkup(
             [
+                [
+                    InlineKeyboardButton("🔎 Поиск", callback_data="mkt:search"),
+                    InlineKeyboardButton("Сбросить поиск", callback_data="mkt:clear"),
+                ],
                 [
                     InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
                     InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
@@ -888,6 +928,15 @@ async def _show_market(
     rows.append(navigation)
     rows.append(
         [
+            InlineKeyboardButton("🔎 Поиск", callback_data="mkt:search"),
+            InlineKeyboardButton(
+                "✖️ Сбросить поиск" if search_query else "Все лоты",
+                callback_data="mkt:clear",
+            ),
+        ]
+    )
+    rows.append(
+        [
             InlineKeyboardButton(
                 f"🛒 Купить за {_coins(int(lot['price_cents']))}💰",
                 callback_data=f"mkt:b:{lot['lot_id']}",
@@ -909,11 +958,24 @@ async def _show_market(
     )
     rows.append(filters_row[:4])
     rows.append(filters_row[4:])
+    if search_query:
+        next_sort = {
+            "relevance": "price",
+            "price": "date",
+            "date": "relevance",
+        }.get(sort_by, "relevance")
+    else:
+        next_sort = "price" if sort_by == "date" else "date"
+    sort_label = {
+        "date": "дата",
+        "price": "цена",
+        "relevance": "релевантность",
+    }.get(sort_by, "дата")
     rows.append(
         [
             InlineKeyboardButton(
-                f"Сортировка: {'цена' if sort_by == 'price' else 'дата'}",
-                callback_data=f"mkt:p:{page}:{level_filter}:{'date' if sort_by == 'price' else 'price'}",
+                f"Сортировка: {sort_label}",
+                callback_data=f"mkt:p:{page}:{level_filter}:{next_sort}",
             ),
             InlineKeyboardButton("Мои лоты", callback_data="mkt:mine"),
         ]
@@ -925,8 +987,15 @@ async def _show_market(
         ]
     )
     rows.append([_menu_button()])
+    preset_name = PRESET_NAMES.get(str(item.get("preset") or ""), "")
+    title = html.escape(str(lot.get("title") or "").strip())
+    preset_name = html.escape(preset_name)
     text = (
-        f"🏪 Лот #{lot['lot_id']} · {_RARITY[level]}\n"
+        f"🏪 Лот #{lot['lot_id']}"
+        f"{f' · {title}' if title else ''}\n"
+        f"{_RARITY[level]}"
+        f"{f' · {preset_name}' if preset_name else ''}\n"
+        f"Seed: <code>{html.escape(str(item['seed']))}</code>\n"
         f"Цена: {_coins(int(lot['price_cents']))} монет\n"
         "Цена включает комиссию площадки 20%."
     )
@@ -938,9 +1007,9 @@ async def _show_market(
         query.message.photo or query.message.animation
     ):
         media = (
-            InputMediaAnimation(media=file_id, caption=text)
+            InputMediaAnimation(media=file_id, caption=text, parse_mode="HTML")
             if level == 6
-            else InputMediaPhoto(media=file_id, caption=text)
+            else InputMediaPhoto(media=file_id, caption=text, parse_mode="HTML")
         )
         await query.message.edit_media(media=media, reply_markup=markup)
     else:
@@ -956,6 +1025,7 @@ async def _show_market(
             animated=level == 6,
             caption=text,
             reply_markup=markup,
+            parse_mode="HTML",
         )
 
 
@@ -982,7 +1052,8 @@ async def _show_my_lots(
     rows = [
         [
             InlineKeyboardButton(
-                f"Снять #{lot['lot_id']} · {_RARITY[int(lot['level'])]}",
+                f"Снять #{lot['lot_id']} · "
+                f"{str(lot.get('title') or _RARITY[int(lot['level'])])[:24]}",
                 callback_data=f"mkt:c:{lot['lot_id']}",
             )
         ]
@@ -1369,9 +1440,33 @@ async def on_game_callback(
                 "missing": "Откройте инвентарь заново.",
             }
             await query.message.reply_text(explanations.get(result, "Переработка не выполнена."))
+    elif action == "mkt:search":
+        context.user_data["market_search_waiting"] = True
+        await query.message.reply_text(
+            "Напиши, что искать: название, редкость, цену или seed. "
+            "Слова можно вводить в любом порядке; поиск приблизительный. "
+            "Для отмены отправь /cancel."
+        )
+    elif action == "mkt:clear":
+        context.user_data.pop("market_search_query", None)
+        context.user_data.pop("market_search_waiting", None)
+        await _show_market(
+            update,
+            context,
+            page=0,
+            level_filter="all",
+            sort_by="date",
+            search_query="",
+        )
     elif action.startswith("mkt:p:"):
         _, _, page_value, level_filter, sort_by = action.split(":")
-        await _show_market(update, context, int(page_value), level_filter, sort_by)
+        await _show_market(
+            update,
+            context,
+            int(page_value),
+            level_filter,
+            sort_by,
+        )
     elif action == "mkt:mine":
         await _show_my_lots(update)
     elif action.startswith("mkt:l:"):
@@ -1460,6 +1555,51 @@ async def _handle_listing_price(
         return True
     item_id = int(context.user_data["market_listing_item"])
     context.user_data.pop("market_listing_item", None)
+    context.user_data["market_listing_title_item"] = item_id
+    context.user_data["market_listing_price_cents"] = cents
+    await message.reply_text(
+        "Придумай название лота (до 48 символов), например «Розовый элитный». "
+        "Отправь «-», если хочешь оставить лот без названия."
+    )
+    return True
+
+
+async def _handle_listing_title(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    item_id = context.user_data.get("market_listing_title_item")
+    if (
+        message is None
+        or user is None
+        or message.chat.type != ChatType.PRIVATE
+        or not isinstance(item_id, int)
+    ):
+        return False
+    raw_title = re.sub(r"\s+", " ", (message.text or "").strip())
+    if raw_title.casefold() == "/cancel":
+        context.user_data.pop("market_listing_title_item", None)
+        context.user_data.pop("market_listing_price_cents", None)
+        await message.reply_text("Выставление лота отменено.")
+        return True
+    title = None if raw_title == "-" else raw_title
+    if title is not None and (
+        not title or len(title) > 48 or title.startswith("/")
+    ):
+        await message.reply_text(
+            "Название должно быть от 1 до 48 символов. "
+            "Или отправь «-», чтобы оставить лот без названия."
+        )
+        return True
+    price_cents = context.user_data.get("market_listing_price_cents")
+    if not isinstance(price_cents, int):
+        context.user_data.pop("market_listing_title_item", None)
+        await message.reply_text("Не нашла цену лота. Начни выставление заново.")
+        return True
+    context.user_data.pop("market_listing_title_item", None)
+    context.user_data.pop("market_listing_price_cents", None)
     inventory_message_id = context.user_data.pop("inventory_message_id", None)
     inventory_page = max(
         0,
@@ -1467,7 +1607,12 @@ async def _handle_listing_price(
     )
     inventory_filter = str(context.user_data.get("inventory_filter", "all"))
     inventory_sort = str(context.user_data.get("inventory_sort", "date"))
-    result = await database.create_market_lot(user.id, item_id, cents)
+    result = await database.create_market_lot(
+        user.id,
+        item_id,
+        price_cents,
+        title=title,
+    )
     responses = {
         "listed": "Баннер выставлен на площадку.",
         "debt": "Пока баланс отрицательный, продавать баннеры нельзя.",
@@ -1494,6 +1639,34 @@ async def _handle_listing_price(
             level_filter=inventory_filter,
             sort_by=inventory_sort,
         )
+    return True
+
+
+async def _handle_market_search_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    message = update.effective_message
+    if not context.user_data.get("market_search_waiting"):
+        return False
+    if message is None or message.chat.type != ChatType.PRIVATE or not message.text:
+        return False
+    query = message.text.strip()
+    context.user_data.pop("market_search_waiting", None)
+    if query.casefold() == "/cancel":
+        await message.reply_text("Поиск отменён.")
+        return True
+    if not query or len(query) > 100:
+        await message.reply_text("Запрос должен содержать от 1 до 100 символов.")
+        return True
+    await _show_market(
+        update,
+        context,
+        page=0,
+        level_filter="all",
+        sort_by="relevance",
+        search_query=query,
+    )
     return True
 
 
@@ -1582,7 +1755,11 @@ async def handle_game_message(
     user = update.effective_user
     if message is None or user is None or message.text is None:
         return False
+    if await _handle_listing_title(update, context):
+        return True
     if await _handle_listing_price(update, context):
+        return True
+    if await _handle_market_search_input(update, context):
         return True
     if await _handle_recycle_command(update, context):
         return True
@@ -1639,10 +1816,27 @@ async def handle_game_message(
             logging.exception("Не удалось показать баннер user_id=%s.", user.id)
             await message.reply_text("Не удалось открыть баннер. Попробуй позже.")
         return True
-    if text in {"площадка", "маркет", "маркетплейс", "🏪 площадка"} or re.fullmatch(
-        r"/market(?:@\w+)?", text
-    ):
-        await _show_market(update, context, 0, "all", "date")
+    market_command = _MARKET_COMMAND_RE.fullmatch(message.text.strip())
+    market_text = _MARKET_TEXT_RE.fullmatch(message.text.strip())
+    if market_command is not None or market_text is not None or text in {
+        "площадка",
+        "маркет",
+        "маркетплейс",
+        "🏪 площадка",
+    }:
+        query = (
+            market_command.group(1)
+            if market_command is not None
+            else market_text.group(1) if market_text is not None else ""
+        )
+        await _show_market(
+            update,
+            context,
+            0,
+            "all",
+            "relevance" if query else "date",
+            search_query=query,
+        )
         return True
     if re.fullmatch(r"/fees(?:@\w+)?", text):
         if user.id != ADMIN_ID and not await database.is_admin_user(user.id):

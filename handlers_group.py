@@ -8,7 +8,14 @@ import time
 from io import BytesIO
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageReactionUpdated, ReactionTypeEmoji, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    MessageReactionUpdated,
+    ReactionTypeEmoji,
+    Update,
+)
 from telegram.constants import ChatAction, ChatType, MessageEntityType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -69,6 +76,27 @@ _GROUP_PROMO_COMMAND_RE = re.compile(
     r"^/activategroup(?:@\w+)?\s+(?P<code>YUBARA-[A-F0-9]{12})$",
     re.IGNORECASE,
 )
+_TOP_COMMAND_RE = re.compile(r"^/top(?:@\w+)?(?:\s+(\S+))?\s*$", re.IGNORECASE)
+_TOP_TEXT_RE = re.compile(
+    r"^топ(?:\s+сообщений)?(?:\s+(?:за\s+)?(\S+))?$",
+    re.IGNORECASE,
+)
+_TOP_PERIODS = {
+    "d": "d",
+    "day": "d",
+    "today": "d",
+    "день": "d",
+    "сегодня": "d",
+    "w": "w",
+    "week": "w",
+    "неделя": "w",
+    "неделю": "w",
+    "m": "m",
+    "month": "m",
+    "месяц": "m",
+    "месяце": "m",
+}
+_TOP_PERIOD_LABELS = {"d": "за день", "w": "за неделю", "m": "за месяц"}
 
 
 def _user_name(user: object | None) -> str:
@@ -100,22 +128,80 @@ def _command_name(text: str) -> str | None:
     return match.group(1).casefold() if match else None
 
 
+def _parse_message_top_request(text: str) -> tuple[bool, str | None]:
+    match = _TOP_COMMAND_RE.fullmatch(text.strip())
+    if match is None:
+        match = _TOP_TEXT_RE.fullmatch(text.strip())
+    if match is None:
+        return False, None
+    raw_period = (match.group(1) or "d").casefold()
+    return True, _TOP_PERIODS.get(raw_period)
+
+
+async def on_group_activity(
+    update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    del _context
+    message = update.effective_message
+    user = update.effective_user
+    if (
+        message is None
+        or user is None
+        or user.is_bot
+        or message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP)
+        or not (message.text or message.caption or message.effective_attachment)
+    ):
+        return
+    if message.text and _parse_message_top_request(message.text)[0]:
+        return
+    try:
+        if await database.is_group_allowed(message.chat_id):
+            await database.record_group_message_activity(message.chat_id, user.id)
+    except Exception:
+        logging.exception(
+            "Не удалось учесть сообщение user_id=%s в статистике группы %s.",
+            user.id,
+            message.chat_id,
+        )
+
+
+async def _send_message_leaderboard(
+    message: Message,
+    period: str,
+) -> None:
+    try:
+        leaderboard = await database.get_group_message_leaderboard(
+            message.chat_id,
+            period,
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось загрузить топ сообщений группы %s period=%s.",
+            message.chat_id,
+            period,
+        )
+        await message.reply_text("Не удалось загрузить топ сообщений. Попробуй позже.")
+        return
+    title = _TOP_PERIOD_LABELS[period]
+    lines = [f"🏆 Топ сообщений {title}"]
+    if leaderboard:
+        for rank, member in enumerate(leaderboard, start=1):
+            name = re.sub(r"\s+", " ", str(member.get("display_name") or "Участник")).strip()
+            username = str(member.get("username") or "").strip().lstrip("@")
+            if username and username.casefold() not in name.casefold():
+                name = f"{name} (@{username})"
+            lines.append(f"{rank}. {name[:80]} — {int(member['message_count'])}")
+    else:
+        lines.append("За этот период пока нет сообщений.")
+    lines.append("\nПериод: текущий день, неделя или месяц по UTC+5.")
+    await message.reply_text("\n".join(lines))
+
+
 def _format_person_profile(person: dict[str, object]) -> str:
-    lines = [
-        f"Имя: {person.get('display_name') or person.get('username') or 'не указано'}",
-        f"Username: @{person['username']}" if person.get("username") else "Username: не указан",
-    ]
-    callsign = person.get("callsign")
-    lines.append(f"Кличка: {callsign or 'не задана'}")
-    lines.append(f"Возраст: {person.get('age') or 'не указан'}")
-    gender = person.get("gender")
-    lines.append(f"Пол: {gender if gender and gender != 'неизвестен' else 'не указан'}")
-    notes = str(person.get("notes") or "").strip()
-    lines.append("Факты:")
-    lines.extend(f"• {note}" for note in notes.splitlines() if note.strip())
-    if not notes:
-        lines.append("• пока не записаны")
-    return "\n".join(lines)
+    name = str(person.get("callsign") or person.get("display_name") or "Участник")
+    username = str(person.get("username") or "").strip()
+    return f"{name} · @{username.lstrip('@')}" if username else name
 
 
 def _format_profile_response(
@@ -125,11 +211,8 @@ def _format_profile_response(
     group_title: str | None = None,
 ) -> str:
     if participants is None:
-        return (
-            "Мой королевский архив о тебе:\n"
-            f"{_format_person_profile(person)}\n"
-            "Будешь делиться фактами — я внесу их в свои записи."
-        )
+        username = str(person.get("username") or "").strip()
+        return f"@{username.lstrip('@')}" if username else "Профиль участника"
 
     total = len(participants)
     title = f"«{group_title}»" if group_title else "эта группа"
@@ -282,6 +365,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ) or bool(profile_command and profile_command.group(1))
     requested_group_id = _parse_profile_group_id(text, group_id)
     command = _command_name(text)
+    is_top_request, top_period = _parse_message_top_request(text)
     replied_to_bot = _is_reply_to_bot(message, context.bot.id)
     called = is_called(text)
     mentioned = _is_bot_mentioned(message, context.bot.username, context.bot.id)
@@ -345,6 +429,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if await handle_coin_promo_message(update):
+        return
+
+    if is_top_request:
+        if top_period is None:
+            await message.reply_text("Период не распознан. Используй /top d, /top w или /top m.")
+            return
+        await _send_message_leaderboard(message, top_period)
         return
 
     if await image_manager.consume_setting_input(update, context):
