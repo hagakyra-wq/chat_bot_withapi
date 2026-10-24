@@ -24,7 +24,6 @@ import database
 from banner_store import (
     ensure_banner_file,
     ensure_market_banner_file,
-    get_group_owner_banner,
     get_profile_banner,
     send_banner,
 )
@@ -38,6 +37,7 @@ from config import (
     CASINO_SPIN_COST_CENTS,
     CASINO_UNSUBSCRIBE_PENALTY_CENTS,
     DICE_ANIMATION_DELAY_SECONDS,
+    TEMPORARY_OWNER_BANNER_USERNAME,
 )
 from yubari_banner import PRESET_NAMES, make_digest, pick_preset
 
@@ -1946,41 +1946,55 @@ async def handle_coin_promo_message(update: Update) -> bool:
     return True
 
 
-async def maybe_award_group_owner(
+async def maybe_award_temporary_owner_banner(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     message = update.effective_message
     user = update.effective_user
     if message is None or user is None or message.chat.type not in (
+        ChatType.PRIVATE,
         ChatType.GROUP,
         ChatType.SUPERGROUP,
     ):
         return
-    checked: set[tuple[int, int]] = context.application.bot_data.setdefault(
+    if (
+        user.username is None
+        or user.username.casefold() != TEMPORARY_OWNER_BANNER_USERNAME.casefold()
+    ):
+        return
+    checked: set[int] = context.application.bot_data.setdefault(
         "banner_owner_checks",
         set(),
     )
-    key = (message.chat_id, user.id)
-    if key in checked:
+    if user.id in checked:
         return
-    checked.add(key)
+    checked.add(user.id)
     try:
-        member = await context.bot.get_chat_member(message.chat_id, user.id)
-        status = getattr(member.status, "value", member.status)
-        if status != "creator":
-            return
+        active_item = await database.get_active_banner_item(user.id)
+        if message.chat.type == ChatType.PRIVATE:
+            await database.ensure_user(
+                user.id,
+                message.chat_id,
+                user.username,
+                user.first_name or user.username,
+            )
         seed = secrets.token_hex(16)
-        await database.get_or_create_group_owner_banner(
-            message.chat_id,
+        item = await database.ensure_temporary_owner_banner_item(
             user.id,
+            user.username,
             seed=seed,
             preset=pick_preset(make_digest(user.id, item_seed=seed)),
         )
-        await get_group_owner_banner(context.bot, message.chat_id, user.id)
+        if item is not None:
+            await ensure_banner_file(context.bot, item, priority=0)
+            if active_item is None or active_item.get("source") != "owner":
+                await message.reply_text(
+                    "✨ Легендарный баннер добавлен в инвентарь и экипирован."
+                )
     except Exception:
-        checked.discard(key)
+        checked.discard(user.id)
         logging.exception(
-            "Не удалось выдать легендарный баннер владельцу группы %s.",
-            message.chat_id,
+            "Не удалось выдать и экипировать временный баннер user_id=%s.",
+            user.id,
         )

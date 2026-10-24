@@ -39,6 +39,7 @@ from casino import (
     ensure_user_bottom_menu,
     handle_coin_promo_message,
     handle_game_message,
+    maybe_award_temporary_owner_banner,
 )
 from config import (
     ADMIN_ID,
@@ -3607,6 +3608,7 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not has_access:
         await _private_dialog(update, context, message.text)
         return
+    await maybe_award_temporary_owner_banner(update, context)
     if re.fullmatch(r"/start(?:@\w+)?", message.text.strip(), re.IGNORECASE) is None:
         await ensure_user_bottom_menu(message, context)
     edit_stage = context.user_data.get("profile_edit_stage")

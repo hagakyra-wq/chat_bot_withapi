@@ -2,7 +2,7 @@
 banner_anim.py - легендарный (уровень 6): анимированный GIF-баннер, 28 пресетов-сцен.
 
 Схема экономии CPU: карточка, рамка, текст и эмблема рендерятся ОДИН раз (banner.build_parts),
-сцена-пресет считается на уменьшенной картинке (800 px) из готовых спрайтов.
+сцена-пресет считается на уменьшенной картинке (900 px) из готовых спрайтов.
 Все движения периодические (целое число циклов за GIF), поэтому петля бесшовная.
 
     from banner_anim import make_animated_banner, PRESET_IDS
@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from . import banner
 from .bn_common import H, W, font, lerp, make_digest
 
-OUT_W = 800
+OUT_W = 900
 TAU = 2 * math.pi
 
 
@@ -977,7 +977,7 @@ def pick_preset(digest):
 
 # =============================================================== главная функция
 def scene_for(user_id, preset, salt="yubari", item_seed=None):
-    """Только фоновая сцена пресета: render(t) -> PIL RGB 800x420. Для превью и тестов петли."""
+    """Только фоновая сцена пресета: render(t) -> PIL RGB 900x472."""
     digest = make_digest(user_id, salt, False, item_seed)
     _, _, hue, builder = PRESET_BY_ID[preset]
     P = banner.build_parts(digest, "x", None, 6, None, hue=hue)

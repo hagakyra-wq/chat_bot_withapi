@@ -1,5 +1,6 @@
 """Обработчики групповых сообщений Юбары."""
 
+import html
 import logging
 import hashlib
 import random
@@ -21,11 +22,11 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
-from banner_store import get_group_owner_banner, get_profile_banner
+from banner_store import get_profile_banner
 from casino import (
     handle_coin_promo_message,
     handle_game_message,
-    maybe_award_group_owner,
+    maybe_award_temporary_owner_banner,
 )
 from config import (
     ADMIN_ID,
@@ -198,10 +199,48 @@ async def _send_message_leaderboard(
     await message.reply_text("\n".join(lines))
 
 
-def _format_person_profile(person: dict[str, object]) -> str:
-    name = str(person.get("callsign") or person.get("display_name") or "Участник")
-    username = str(person.get("username") or "").strip()
-    return f"{name} · @{username.lstrip('@')}" if username else name
+def _format_person_profile(
+    person: dict[str, object],
+    activity: dict[str, int] | None = None,
+) -> str:
+    display_name = str(person.get("display_name") or "").strip()
+    callsign = str(person.get("callsign") or "").strip()
+    name = display_name or callsign or "Участник"
+    if callsign and callsign.casefold() != name.casefold():
+        name = f"{name} · кличка: {callsign}"
+    details = [html.escape(name)]
+    username = str(person.get("username") or "").strip().lstrip("@")
+    if username:
+        details.append(f"@{html.escape(username)}")
+    age = person.get("age")
+    gender = str(person.get("gender") or "").strip()
+    personal_details = []
+    if isinstance(age, int) and not isinstance(age, bool) and age > 0:
+        personal_details.append(str(age))
+    if gender and gender != "неизвестен":
+        personal_details.append(gender)
+    if personal_details:
+        details.append(", ".join(html.escape(part) for part in personal_details))
+    lines = [f"<b>{' · '.join(details)}</b>"]
+    facts = [
+        line.strip()
+        for line in str(person.get("notes") or "").splitlines()
+        if line.strip()
+    ]
+    if facts:
+        fact_text = " · ".join(facts)
+        if len(fact_text) > 600:
+            fact_text = fact_text[:597].rsplit(" ", 1)[0] + "…"
+        lines.append(
+            f"<blockquote expandable>{html.escape(fact_text)}</blockquote>"
+        )
+    if activity is not None:
+        lines.append(
+            "<i>Сообщения · D/W/M: "
+            f"{activity.get('d', 0)} / {activity.get('w', 0)} / "
+            f"{activity.get('m', 0)}</i>"
+        )
+    return "\n".join(lines)
 
 
 def _format_profile_response(
@@ -209,10 +248,16 @@ def _format_profile_response(
     participants: list[dict[str, object]] | None,
     *,
     group_title: str | None = None,
+    activity_by_user: dict[int, dict[str, int]] | None = None,
 ) -> str:
     if participants is None:
-        username = str(person.get("username") or "").strip()
-        return f"@{username.lstrip('@')}" if username else "Профиль участника"
+        user_id = person.get("user_id")
+        activity = (
+            activity_by_user.get(int(user_id))
+            if activity_by_user is not None and user_id is not None
+            else None
+        )
+        return "Профиль участника:\n" + _format_person_profile(person, activity)
 
     total = len(participants)
     title = f"«{group_title}»" if group_title else "эта группа"
@@ -223,8 +268,13 @@ def _format_profile_response(
         lines.append("Участников пока нет в моём реестре.")
         return "\n".join(lines)
     for index, member in enumerate(participants, start=1):
-        lines.append(f"\n{index}.")
-        lines.append(_format_person_profile(member))
+        user_id = member.get("user_id")
+        activity = (
+            activity_by_user.get(int(user_id))
+            if activity_by_user is not None and user_id is not None
+            else None
+        )
+        lines.append(f"\n{index}. {_format_person_profile(member, activity)}")
     lines.append(f"\nВсего участников в реестре: {total}.")
     return "\n".join(lines)
 
@@ -259,9 +309,17 @@ async def _send_profile_messages(
     if profile_photo is not None and chunks:
         caption = chunks.pop(0)
         if profile_animated:
-            sent = await message.reply_animation(animation=profile_photo, caption=caption)
+            sent = await message.reply_animation(
+                animation=profile_photo,
+                caption=caption,
+                parse_mode="HTML",
+            )
         else:
-            sent = await message.reply_photo(photo=profile_photo, caption=caption)
+            sent = await message.reply_photo(
+                photo=profile_photo,
+                caption=caption,
+                parse_mode="HTML",
+            )
         await database.save_message(
             message.chat_id,
             context.bot.id,
@@ -270,13 +328,13 @@ async def _send_profile_messages(
             sent.caption or "Профиль пользователя",
         )
     for chunk in chunks:
-        sent = await message.reply_text(chunk)
+        sent = await message.reply_text(chunk, parse_mode="HTML")
         await database.save_message(
             message.chat_id,
             context.bot.id,
             sent.message_id,
             "Юбара",
-            chunk,
+            sent.text or chunk,
         )
 
 
@@ -545,7 +603,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logging.exception("Ошибка сохранения группового сообщения в SQLite")
         return
 
-    await maybe_award_group_owner(update, context)
+    await maybe_award_temporary_owner_banner(update, context)
     if await handle_game_message(update, context):
         return
 
@@ -626,6 +684,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 if group_profile_request
                 else None
             )
+            activity_by_user = (
+                await database.get_group_message_activity(requested_group_id)
+                if group_profile_request
+                else {user.id: await database.get_user_message_activity(user.id)}
+            )
             answer = _format_profile_response(
                 person,
                 participants,
@@ -634,23 +697,16 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     if group_profile_request and requested_group_id == group_id
                     else None
                 ),
+                activity_by_user=activity_by_user,
             )
             profile_photo: BytesIO | str | None = None
             profile_animated = False
             if not group_profile_request:
-                media = None
-                if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-                    media = await get_group_owner_banner(
-                        context.bot,
-                        message.chat_id,
-                        user.id,
-                    )
-                if media is None:
-                    media = await get_profile_banner(
-                        context.bot,
-                        user.id,
-                        profile=await database.get_global_profile(user.id),
-                    )
+                media = await get_profile_banner(
+                    context.bot,
+                    user.id,
+                    profile=await database.get_global_profile(user.id),
+                )
                 if media is not None:
                     profile_photo, profile_animated = media
                 else:

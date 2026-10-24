@@ -27,6 +27,7 @@ from config import (
     DATABASE_SHARD_THRESHOLD_BYTES,
     HISTORY_ENCRYPTION_KEY,
     MOSCOW_TIMEZONE,
+    TEMPORARY_OWNER_BANNER_USERNAME,
 )
 
 _write_lock = asyncio.Lock()
@@ -50,6 +51,7 @@ _TELEGRAM_SESSION_BACKUPS_KEY = "telegram_session_backups"
 _history_cipher = Fernet(HISTORY_ENCRYPTION_KEY.encode("ascii"))
 _MESSAGE_ACTIVITY_BACKFILL_KEY = "message_activity_backfill_v2"
 _MOSCOW_TIMESTAMP_MIGRATION_KEY = "moscow_timestamp_migration_v1"
+_OWNER_BANNER_USER_ID_META_KEY = "temporary_owner_banner_user_id"
 _MOSCOW_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "messages": ("created_at",),
     "group_promo_codes": ("created_at",),
@@ -495,7 +497,11 @@ async def initialize() -> None:
             )
             await db.execute(
                 "UPDATE banner_items SET is_active = 0 "
-                "WHERE source = 'owner' AND is_active = 1"
+                "WHERE source = 'owner' AND is_active = 1 "
+                "AND user_id != COALESCE("
+                "(SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?), -1"
+                ")",
+                (_OWNER_BANNER_USER_ID_META_KEY,),
             )
             await _ensure_columns(
                 db,
@@ -1485,6 +1491,54 @@ async def get_user_message_activity(user_id: int) -> dict[str, int]:
         "d": int(row["day_count"]),
         "w": int(row["week_count"]),
         "m": int(row["month_count"]),
+    }
+
+
+async def get_group_message_activity(
+    group_id: int,
+) -> dict[int, dict[str, int]]:
+    today = datetime.now(MOSCOW_TIMEZONE).date()
+    day_start, _ = _message_activity_period_dates("d", today=today)
+    week_start, _ = _message_activity_period_dates("w", today=today)
+    month_start, _ = _message_activity_period_dates("m", today=today)
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT
+                user_id,
+                COALESCE(SUM(CASE
+                    WHEN activity_date BETWEEN ? AND ? THEN message_count ELSE 0
+                END), 0) AS day_count,
+                COALESCE(SUM(CASE
+                    WHEN activity_date BETWEEN ? AND ? THEN message_count ELSE 0
+                END), 0) AS week_count,
+                COALESCE(SUM(CASE
+                    WHEN activity_date BETWEEN ? AND ? THEN message_count ELSE 0
+                END), 0) AS month_count
+            FROM message_activity
+            WHERE chat_id = ? AND activity_date BETWEEN ? AND ?
+            GROUP BY user_id
+            """,
+            (
+                day_start,
+                today,
+                week_start,
+                today,
+                month_start,
+                today,
+                group_id,
+                month_start,
+                today,
+            ),
+        )
+        rows = await cursor.fetchall()
+    return {
+        int(row["user_id"]): {
+            "d": int(row["day_count"]),
+            "w": int(row["week_count"]),
+            "m": int(row["month_count"]),
+        }
+        for row in rows
     }
 
 
@@ -3173,11 +3227,91 @@ async def get_banner_item(item_id: int) -> dict[str, Any] | None:
 async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:
     async with _connect() as db:
         cursor = await db.execute(
-            "SELECT * FROM banner_items WHERE user_id = ? AND is_active = 1",
-            (user_id,),
+            """
+            SELECT * FROM banner_items
+            WHERE user_id = ? AND is_active = 1
+              AND (
+                  source != 'owner'
+                  OR user_id = CAST(
+                      (SELECT value FROM meta WHERE key = ?) AS INTEGER
+                  )
+              )
+            """,
+            (user_id, _OWNER_BANNER_USER_ID_META_KEY),
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def ensure_temporary_owner_banner_item(
+    user_id: int,
+    username: str | None,
+    *,
+    seed: str,
+    preset: str,
+) -> dict[str, Any] | None:
+    if (
+        username is None
+        or username.lstrip("@").casefold()
+        != TEMPORARY_OWNER_BANNER_USERNAME.casefold()
+    ):
+        return None
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (_OWNER_BANNER_USER_ID_META_KEY,),
+            )
+            authorized = await cursor.fetchone()
+            if authorized is not None and int(authorized["value"]) != user_id:
+                await db.rollback()
+                return None
+            if authorized is None:
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (_OWNER_BANNER_USER_ID_META_KEY, str(user_id)),
+                )
+            cursor = await db.execute(
+                """
+                SELECT item_id FROM banner_items
+                WHERE user_id = ? AND source = 'owner'
+                ORDER BY item_id LIMIT 1
+                """,
+                (user_id,),
+            )
+            existing = await cursor.fetchone()
+            if existing is None:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO banner_items(
+                        user_id, level, seed, preset, source, is_active
+                    )
+                    VALUES (?, 6, ?, ?, 'owner', 0)
+                    """,
+                    (user_id, seed, preset),
+                )
+                item_id = int(cursor.lastrowid)
+            else:
+                item_id = int(existing["item_id"])
+            await db.execute(
+                "UPDATE banner_items SET is_active = 0 "
+                "WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            )
+            await db.execute(
+                "UPDATE banner_items SET is_active = 1 "
+                "WHERE item_id = ? AND user_id = ?",
+                (item_id, user_id),
+            )
+            await db.commit()
+        _record_write()
+    item = await get_banner_item(item_id)
+    if item is None:
+        raise sqlite3.DatabaseError(
+            f"Не удалось подготовить временный баннер user_id={user_id}."
+        )
+    return item
 
 
 async def get_user_banner_items(
@@ -3203,7 +3337,12 @@ async def get_user_banner_items(
                    ) AS is_listed
             FROM banner_items item
             WHERE item.user_id = ?
-              AND item.source != 'owner'
+              AND (
+                  item.source != 'owner'
+                  OR item.user_id = CAST(
+                      (SELECT value FROM meta WHERE key = ?) AS INTEGER
+                  )
+              )
               AND (? IS NULL OR item.level = ?)
               AND NOT EXISTS(
                   SELECT 1 FROM market_lots lot
@@ -3212,7 +3351,7 @@ async def get_user_banner_items(
             ORDER BY {order_by}
             LIMIT ? OFFSET ?
             """,
-            (user_id, level, level, limit, offset),
+            (user_id, _OWNER_BANNER_USER_ID_META_KEY, level, level, limit, offset),
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -3223,14 +3362,19 @@ async def count_user_banner_items(user_id: int, *, level: int | None = None) -> 
             """
             SELECT COUNT(*) AS total FROM banner_items item
             WHERE item.user_id = ?
-              AND item.source != 'owner'
+              AND (
+                  item.source != 'owner'
+                  OR item.user_id = CAST(
+                      (SELECT value FROM meta WHERE key = ?) AS INTEGER
+                  )
+              )
               AND (? IS NULL OR item.level = ?)
               AND NOT EXISTS(
                   SELECT 1 FROM market_lots lot
                   WHERE lot.item_id = item.item_id AND lot.status = 'open'
               )
             """,
-            (user_id, level, level),
+            (user_id, _OWNER_BANNER_USER_ID_META_KEY, level, level),
         )
         row = await cursor.fetchone()
         return int(row["total"]) if row else 0
@@ -3283,8 +3427,17 @@ async def activate_banner_item(user_id: int, item_id: int) -> bool:
         async with _connect() as db:
             await db.execute("BEGIN")
             cursor = await db.execute(
-                "SELECT 1 FROM banner_items WHERE item_id = ? AND user_id = ?",
-                (item_id, user_id),
+                """
+                SELECT 1 FROM banner_items
+                WHERE item_id = ? AND user_id = ?
+                  AND (
+                      source != 'owner'
+                      OR user_id = CAST(
+                          (SELECT value FROM meta WHERE key = ?) AS INTEGER
+                      )
+                  )
+                """,
+                (item_id, user_id, _OWNER_BANNER_USER_ID_META_KEY),
             )
             if await cursor.fetchone() is None:
                 await db.rollback()
