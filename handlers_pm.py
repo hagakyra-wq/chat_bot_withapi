@@ -22,7 +22,7 @@ from telegram.ext import (
 import database
 import autoresponder
 import personal_account
-from config import ADMIN_ID, AVAILABLE_REACTIONS, PROFILE_TRIGGERS
+from config import ADMIN_ID, AVAILABLE_REACTIONS, BACKUP_CHANNEL_ID, PROFILE_TRIGGERS
 from duel import (
     handle_balance_request,
     handle_coin_leaderboard_request,
@@ -52,6 +52,8 @@ WAIT_AUTO_QR, WAIT_AUTO_TIMEZONE, WAIT_AUTO_TEXT = range(24, 27)
 WAIT_ADMIN_NIGHT_TEXT = 27
 WAIT_AUTO_PRIVATE_TEXT = 28
 WAIT_ADMIN_PRIVATE_TEXT = 29
+WAIT_HISTORY_GROUP = 30
+WAIT_DELETE_ALL_CONFIRMATION = 31
 ADMIN_PANEL_USERS: set[int] = set()
 _USERBOT_LOGIN_KEYS = (
     "userbot_phone",
@@ -786,6 +788,305 @@ async def break_command(
 
 async def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID or await database.is_admin_user(user_id)
+
+
+async def _history_group_access(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    group_id: int,
+    *,
+    bot_admin: bool,
+) -> tuple[bool, bool]:
+    member = await context.bot.get_chat_member(group_id, user_id)
+    status = getattr(member.status, "value", member.status)
+    is_member = status not in ("left", "kicked") and (
+        status != "restricted" or bool(getattr(member, "is_member", False))
+    )
+    is_group_admin = status in ("creator", "administrator")
+    return is_member and (bot_admin or is_group_admin), is_member
+
+
+async def get_history_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    message = update.effective_message
+    if user is None or message is None or update.effective_chat is None:
+        return ConversationHandler.END
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return ConversationHandler.END
+    try:
+        bot_admin = await _is_admin(user.id)
+        buttons: list[list[InlineKeyboardButton]] = []
+        for group_id in await database.list_allowed_groups():
+            try:
+                allowed, _ = await _history_group_access(
+                    context,
+                    user.id,
+                    group_id,
+                    bot_admin=bot_admin,
+                )
+            except TelegramError:
+                logging.info(
+                    "Пользователь %s не состоит в группе %s или бот не может проверить членство.",
+                    user.id,
+                    group_id,
+                    exc_info=True,
+                )
+                continue
+            if not allowed:
+                continue
+            try:
+                title = (await context.bot.get_chat(group_id)).title or str(group_id)
+            except TelegramError:
+                logging.exception("Не удалось получить название группы %s.", group_id)
+                title = str(group_id)
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        title[:60],
+                        callback_data=f"gethist:{group_id}",
+                    )
+                ]
+            )
+        if not buttons:
+            await message.reply_text(
+                "Нет доступных групп. Администратору бота нужно состоять в группе; "
+                "для остальных пользователей требуются права администратора группы."
+            )
+            return ConversationHandler.END
+        context.user_data["history_groups"] = [
+            int(button[0].callback_data.split(":")[1]) for button in buttons
+        ]
+        await message.reply_text(
+            "Выбери группу. Перед отправкой файла я повторно проверю членство и права.",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return WAIT_HISTORY_GROUP
+    except Exception:
+        logging.exception("Не удалось подготовить выбор группы для /gethistori.")
+        await message.reply_text("Не удалось загрузить список групп. Попробуй позже.")
+        return ConversationHandler.END
+
+
+async def get_history_group_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return ConversationHandler.END
+    await query.answer()
+    try:
+        group_id = int((query.data or "").split(":", 1)[1])
+        if group_id not in context.user_data.get("history_groups", []):
+            await query.edit_message_text("Выбор группы устарел. Запусти /gethistori ещё раз.")
+            return ConversationHandler.END
+        bot_admin = await _is_admin(user.id)
+        allowed, is_member = await _history_group_access(
+            context,
+            user.id,
+            group_id,
+            bot_admin=bot_admin,
+        )
+        if not is_member or not allowed:
+            await query.edit_message_text(
+                "Доступ запрещён: ты должен состоять в выбранной группе "
+                "и быть её администратором либо администратором бота."
+            )
+            return ConversationHandler.END
+        rows = await database.get_group_history_export_rows(group_id)
+        content = database.format_group_history_export(rows)
+        document = BytesIO(content)
+        document.name = f"history_{group_id}.txt"
+        await context.bot.send_document(
+            chat_id=user.id,
+            document=document,
+            filename=document.name,
+            caption=f"История группы {group_id}; записей: {len(rows)}.",
+            disable_notification=True,
+        )
+        await query.edit_message_text("Готово, файл истории отправлен в этот чат.")
+    except (ValueError, IndexError):
+        await query.edit_message_text("Не удалось распознать выбранную группу.")
+    except TelegramError:
+        logging.exception("Telegram не смог отправить историю пользователю %s.", user.id)
+        await query.edit_message_text(
+            "Не удалось отправить файл. Открой личный чат с ботом и попробуй снова."
+        )
+    except Exception:
+        logging.exception("Не удалось подготовить историю для пользователя %s.", user.id)
+        await query.edit_message_text("Не удалось подготовить историю. Попробуй позже.")
+    finally:
+        context.user_data.pop("history_groups", None)
+    return ConversationHandler.END
+
+
+def build_history_conversation_handler() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            CommandHandler(
+                "gethistori",
+                get_history_start,
+                filters=filters.ChatType.PRIVATE,
+            )
+        ],
+        states={
+            WAIT_HISTORY_GROUP: [
+                CallbackQueryHandler(
+                    get_history_group_callback,
+                    pattern=r"^gethist:-?\d+$",
+                )
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        allow_reentry=True,
+        per_message=False,
+    )
+
+
+async def delete_all_data_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    message = update.effective_message
+    if (
+        user is None
+        or message is None
+        or update.effective_chat is None
+        or update.effective_chat.type != ChatType.PRIVATE
+        or user.id != ADMIN_ID
+    ):
+        return ConversationHandler.END
+    confirmation_id = f"deleteall:{user.id}"
+    await message.reply_text(
+        "⚠️ Подтверди полное удаление данных. Будут очищены все данные бота и "
+        "архивы, удалены локальные Telegram-сессии и известные документы бэкапов "
+        "и баннеры из канала резервных копий. Это нельзя отменить.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Удалить всё",
+                        callback_data=f"{confirmation_id}:yes",
+                    ),
+                    InlineKeyboardButton(
+                        "Отмена",
+                        callback_data=f"{confirmation_id}:no",
+                    ),
+                ]
+            ]
+        ),
+    )
+    return WAIT_DELETE_ALL_CONFIRMATION
+
+
+async def delete_all_data_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return ConversationHandler.END
+    await query.answer()
+    parts = (query.data or "").split(":")
+    if (
+        len(parts) != 3
+        or parts[0] != "deleteall"
+        or not parts[1].isdigit()
+        or int(parts[1]) != user.id
+        or user.id != ADMIN_ID
+    ):
+        await query.edit_message_text("Эта операция доступна только владельцу бота.")
+        return ConversationHandler.END
+    if parts[2] == "no":
+        await query.edit_message_text("Полное удаление отменено.")
+        return ConversationHandler.END
+    if parts[2] != "yes":
+        await query.edit_message_text("Подтверждение недействительно.")
+        return ConversationHandler.END
+    if update.effective_chat is None or update.effective_chat.type != ChatType.PRIVATE:
+        await query.edit_message_text("Команду можно выполнять только в личном чате.")
+        return ConversationHandler.END
+
+    try:
+        backup_message_ids = await database.get_known_backup_message_ids()
+        session_manifest = await database.get_telegram_session_backup_manifest()
+        session_user_ids = set(personal_account.session_user_ids())
+        session_user_ids.update(session_manifest)
+        failed_deletions: list[int] = []
+        for message_id in sorted(backup_message_ids):
+            try:
+                await context.bot.delete_message(
+                    chat_id=BACKUP_CHANNEL_ID,
+                    message_id=message_id,
+                )
+            except TelegramError as exc:
+                error_text = str(exc).casefold()
+                if "message to delete not found" in error_text or "message_id_invalid" in error_text:
+                    continue
+                logging.exception(
+                    "Не удалось удалить документ бэкапа message_id=%s.",
+                    message_id,
+                )
+                failed_deletions.append(message_id)
+        if failed_deletions:
+            await query.edit_message_text(
+                "Не удалось удалить часть документов в канале бэкапов. Данные и сессии "
+                "не сброшены. Проверь права бота в канале и повтори /deletealldata."
+            )
+            return ConversationHandler.END
+
+        await personal_account.disconnect_all()
+        for session_user_id in sorted(session_user_ids):
+            await personal_account.reset_session(session_user_id)
+        deleted_rows = await database.reset_all_application_data()
+        await query.edit_message_text(
+            "Полный сброс завершён: данные бота очищены, "
+            f"удалено строк SQLite: {deleted_rows}; локальные сессии и известные "
+            "бэкапы удалены."
+        )
+        logging.warning(
+            "Владелец бота user_id=%s выполнил полное удаление данных: "
+            "строк SQLite=%s, документов бэкапа=%s, сессий=%s.",
+            user.id,
+            deleted_rows,
+            len(backup_message_ids),
+            len(session_user_ids),
+        )
+    except Exception:
+        logging.exception("Не удалось выполнить полный сброс данных по запросу владельца.")
+        await query.edit_message_text(
+            "Полный сброс не завершён из-за ошибки. Проверь журнал и повтори команду."
+        )
+    return ConversationHandler.END
+
+
+def build_delete_all_data_handler() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            CommandHandler(
+                ("deletealldata", "resetall"),
+                delete_all_data_start,
+                filters=filters.ChatType.PRIVATE,
+            )
+        ],
+        states={
+            WAIT_DELETE_ALL_CONFIRMATION: [
+                CallbackQueryHandler(
+                    delete_all_data_callback,
+                    pattern=r"^deleteall:\d+:(?:yes|no)$",
+                )
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        allow_reentry=True,
+        per_message=False,
+    )
 
 
 async def _has_autoresponder_access(user_id: int) -> bool:
@@ -2623,7 +2924,7 @@ async def _private_dialog(
     if await handle_delete_bot_messages(update, context):
         return
 
-    if await handle_delete_replied_message(update):
+    if await handle_delete_replied_message(update, context):
         return
 
     command = message_text.strip().casefold()

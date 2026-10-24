@@ -118,8 +118,6 @@ def is_image_command(text: str) -> bool:
 def create_profile_card(
     nickname: str,
     decoration: str,
-    *,
-    animated: bool = False,
 ) -> io.BytesIO:
     """Builds a stable, user-specific profile image without an external image service."""
     digest = bytes.fromhex(decoration[:64])
@@ -173,59 +171,24 @@ def create_profile_card(
     ):
         name_size -= 2
         name_font = ImageFont.truetype(str(font_path), name_size)
-    def draw_card(frame: Image.Image, phase: int) -> None:
-        frame_draw = ImageDraw.Draw(frame)
-        if animated:
-            pulse = (phase % 4) * 18
-            frame_accent = tuple(min(255, channel + pulse) for channel in accent)
-        else:
-            frame_accent = accent
-        frame_draw.rounded_rectangle(
-            (48, 48, width - 48, height - 48),
-            radius=28,
-            outline=frame_accent,
-            width=3 + (phase % 3 if animated else 0),
-        )
-        frame_draw.text((86, 102), "ПРОФИЛЬ ЮБАРЫ", font=title_font, fill=(225, 218, 242))
-        frame_draw.text((86, 190), displayed_name, font=name_font, fill=(255, 255, 255))
-        frame_draw.line((86, 290, width - 86, 290), fill=frame_accent, width=4)
-        frame_draw.text(
-            (86, 325),
-            "Особая королевская декорация",
-            font=title_font,
-            fill=(214, 203, 229),
-        )
-        if animated:
-            sparkle_x = 690 + (phase * 37) % 100
-            sparkle_y = 115 + (phase * 23) % 115
-            frame_draw.ellipse(
-                (sparkle_x - 7, sparkle_y - 7, sparkle_x + 7, sparkle_y + 7),
-                fill=(255, 245, 180),
-            )
-
-    if animated:
-        frames: list[Image.Image] = []
-        for phase in range(8):
-            frame = image.copy()
-            draw_card(frame, phase)
-            frames.append(frame.convert("P", palette=Image.Palette.ADAPTIVE))
-        output = io.BytesIO()
-        frames[0].save(
-            output,
-            format="GIF",
-            save_all=True,
-            append_images=frames[1:],
-            duration=140,
-            loop=0,
-            disposal=2,
-            optimize=True,
-        )
-        output.name = "profile.gif"
-    else:
-        draw_card(image, 0)
-        output = io.BytesIO()
-        image.save(output, format="PNG")
-        output.name = "profile.png"
+    draw.rounded_rectangle(
+        (48, 48, width - 48, height - 48),
+        radius=28,
+        outline=accent,
+        width=3,
+    )
+    draw.text((86, 102), "ПРОФИЛЬ ЮБАРЫ", font=title_font, fill=(225, 218, 242))
+    draw.text((86, 190), displayed_name, font=name_font, fill=(255, 255, 255))
+    draw.line((86, 290, width - 86, 290), fill=accent, width=4)
+    draw.text(
+        (86, 325),
+        "Особая королевская декорация",
+        font=title_font,
+        fill=(214, 203, 229),
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.name = "profile.png"
 
     output.seek(0)
     return output

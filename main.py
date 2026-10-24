@@ -1,6 +1,9 @@
 """Точка входа: восстановление данных, Render healthcheck и polling."""
 
 import asyncio
+import hashlib
+import io
+import json
 import logging
 import os
 import sqlite3
@@ -9,7 +12,8 @@ from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from telegram import Update
+from cryptography.fernet import Fernet
+from telegram import MessageReactionUpdated, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -17,6 +21,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -36,19 +41,27 @@ from config import (
     DATABASE_ARCHIVE_DIR,
     DATABASE_BACKUP_PATH,
     DATABASE_PATH,
+    HISTORY_ENCRYPTION_KEY,
     PERSONAL_ACCOUNT_TIMEZONE,
     PORT,
     TELEGRAM_TOKEN,
 )
 from duel import handle_player_duel_callback
-from handlers_group import on_group_message, on_new_members
+from handlers_group import (
+    on_group_message,
+    on_message_reaction,
+    on_new_members,
+    on_welcome_callback,
+)
 from handlers_pm import (
     break_command,
     build_admin_conversation_handler,
+    build_delete_all_data_handler,
+    build_history_conversation_handler,
     build_personal_autoresponder_conversation_handler,
     on_private_message,
 )
-from images import on_image_callback, stop_image_jobs
+from images import create_profile_card, on_image_callback, stop_image_jobs
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -280,6 +293,9 @@ async def _perform_backup(bot: object) -> None:
         for archive_path in database.list_message_archives():
             if await database.get_message_archive_file_id(archive_path.name):
                 continue
+            previous_message_id = await database.get_message_archive_message_id(
+                archive_path.name
+            )
             archive_size = archive_path.stat().st_size
             if archive_size >= BACKUP_MAX_DOWNLOAD_SIZE - 1024 * 1024:
                 logging.warning(
@@ -304,11 +320,22 @@ async def _perform_backup(bot: object) -> None:
                 archived_message.document.file_id,
                 archived_message.message_id,
             )
+            if previous_message_id is not None and previous_message_id != archived_message.message_id:
+                try:
+                    await bot.delete_message(BACKUP_CHANNEL_ID, previous_message_id)
+                except TelegramError:
+                    logging.exception(
+                        "Не удалось удалить старый зашифрованный архив %s.",
+                        archive_path.name,
+                    )
             logging.info(
                 "Архив сообщений загружен в канал (file=%s, message_id=%s).",
                 archive_path.name,
                 archived_message.message_id,
             )
+
+        await _backup_encrypted_histories(bot, caption)
+        await _backup_profile_banners(bot, caption)
 
         session_manifest = await database.get_telegram_session_backup_manifest()
         for user_id in personal_account.session_user_ids():
@@ -435,6 +462,123 @@ async def _perform_backup(bot: object) -> None:
         logging.exception("Ошибка публикации базы данных в канал бэкапов.")
 
 
+async def _backup_profile_banners(bot: object, caption: str) -> None:
+    try:
+        profiles = await database.get_profile_banner_records()
+    except Exception:
+        logging.exception("Не удалось получить список баннеров профилей для бэкапа.")
+        return
+    for profile in profiles:
+        user_id = int(profile["user_id"])
+        nickname = str(profile["nickname"])[:48]
+        decoration = str(profile["decoration"])
+        signature = hashlib.sha256(
+            f"profile-banner-v1:{user_id}:{nickname}:{decoration}".encode("utf-8")
+        ).hexdigest()
+        meta_key = f"profile_banner_backup:{user_id}"
+        previous_text = await database.get_meta(meta_key)
+        try:
+            previous = json.loads(previous_text) if previous_text else {}
+            if previous.get("signature") == signature:
+                continue
+            banner = create_profile_card(nickname, decoration)
+            sent_message = await bot.send_photo(
+                chat_id=BACKUP_CHANNEL_ID,
+                photo=banner,
+                caption=(
+                    f"{caption}\n🖼 Баннер профиля\n"
+                    f"ID пользователя: {user_id}\nКличка: {nickname}"
+                ),
+                disable_notification=True,
+            )
+            if sent_message.photo is None:
+                raise RuntimeError(
+                    f"Telegram не вернул изображение баннера user_id={user_id}."
+                )
+            await database.set_meta(
+                meta_key,
+                json.dumps(
+                    {
+                        "signature": signature,
+                        "file_id": sent_message.photo[-1].file_id,
+                        "message_id": sent_message.message_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            old_message_id = previous.get("message_id")
+            if isinstance(old_message_id, int):
+                try:
+                    await bot.delete_message(BACKUP_CHANNEL_ID, old_message_id)
+                except TelegramError:
+                    logging.exception(
+                        "Не удалось удалить старый баннер профиля user_id=%s.",
+                        user_id,
+                    )
+            logging.info("Баннер профиля user_id=%s сохранён в Telegram-бэкап.", user_id)
+        except Exception:
+            logging.exception(
+                "Не удалось отправить баннер профиля user_id=%s в Telegram-бэкап.",
+                user_id,
+            )
+
+
+async def _backup_encrypted_histories(bot: object, caption: str) -> None:
+    cipher = Fernet(HISTORY_ENCRYPTION_KEY.encode("ascii"))
+    for group_id in await database.list_allowed_groups():
+        try:
+            rows = await database.get_group_history_export_rows(group_id)
+            content = database.format_group_history_export(rows)
+            digest = hashlib.sha256(content).hexdigest()
+            meta_key = f"history_backup:{group_id}"
+            previous_text = await database.get_meta(meta_key)
+            previous = json.loads(previous_text) if previous_text else {}
+            if previous.get("digest") == digest:
+                continue
+            encrypted = io.BytesIO(cipher.encrypt(content))
+            encrypted.name = f"history_{group_id}.txt.enc"
+            sent_message = await bot.send_document(
+                chat_id=BACKUP_CHANNEL_ID,
+                document=encrypted,
+                filename=encrypted.name,
+                caption=f"{caption}\n🔐 Зашифрованная история группы {group_id}.",
+                disable_notification=True,
+            )
+            if sent_message.document is None:
+                raise RuntimeError(
+                    f"Telegram не вернул document для истории группы {group_id}."
+                )
+            await database.set_meta(
+                meta_key,
+                json.dumps(
+                    {
+                        "digest": digest,
+                        "file_id": sent_message.document.file_id,
+                        "message_id": sent_message.message_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            previous_message_id = previous.get("message_id")
+            if isinstance(previous_message_id, int):
+                try:
+                    await bot.delete_message(BACKUP_CHANNEL_ID, previous_message_id)
+                except TelegramError:
+                    logging.exception(
+                        "Не удалось удалить старый зашифрованный архив истории группы %s.",
+                        group_id,
+                    )
+            logging.info(
+                "Зашифрованная история группы %s сохранена в Telegram-бэкап.",
+                group_id,
+            )
+        except Exception:
+            logging.exception(
+                "Не удалось сохранить зашифрованную историю группы %s.",
+                group_id,
+            )
+
+
 async def _backup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await _perform_backup(context.bot)
 
@@ -484,12 +628,20 @@ def build_application() -> Application:
     )
     application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
     application.add_handler(
+        CallbackQueryHandler(on_welcome_callback, pattern=r"^(?:wg|wa):")
+    )
+    application.add_handler(
+        TypeHandler(MessageReactionUpdated, on_message_reaction)
+    )
+    application.add_handler(
         CallbackQueryHandler(handle_player_duel_callback, pattern=r"^pvp:")
     )
     application.add_handler(
         CommandHandler("break", break_command, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(build_admin_conversation_handler())
+    application.add_handler(build_delete_all_data_handler())
+    application.add_handler(build_history_conversation_handler())
     application.add_handler(build_personal_autoresponder_conversation_handler())
     application.add_handler(
         MessageHandler(

@@ -1,12 +1,14 @@
 """Обработчики групповых сообщений Юбары."""
 
 import logging
+import hashlib
 import random
 import re
 import time
 from io import BytesIO
+from typing import Any
 
-from telegram import ReactionTypeEmoji, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageReactionUpdated, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction, ChatType, MessageEntityType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -30,6 +32,7 @@ from llm import (
     extract_reported_age,
     extract_summary_period_minutes,
     generate_reply,
+    generate_summary,
     is_called,
     is_summary_request,
     parse_meta,
@@ -46,6 +49,13 @@ UNKNOWN_GROUP_NOTICE = (
     "к моему создателю @BIGBACA"
 )
 _last_unknown_group_notice: dict[int, float] = {}
+_pending_welcome_ages: dict[tuple[int, int], float] = {}
+_WELCOME_MESSAGES = (
+    "Надеюсь, здесь тебе будет уютно — располагайся.",
+    "Добро пожаловать! Пусть разговоры здесь будут приятными.",
+    "Рада новому лицу. Осваивайся, а я присмотрю за порядком.",
+    "Теперь нас больше — добро пожаловать в нашу компанию!",
+)
 _COMMAND_RE = re.compile(r"^/([a-z_]+)(?:@\w+)?", re.IGNORECASE)
 _PROFILE_GROUP_ID_RE = re.compile(
     r"(?:профиль\s+(?:группы|чата)|(?:группа|чат)\s+профиль)"
@@ -155,8 +165,6 @@ async def _send_profile_messages(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     profile_photo: BytesIO | None = None,
-    *,
-    animated_profile: bool = False,
 ) -> None:
     chunks: list[str] = []
     current = ""
@@ -172,13 +180,7 @@ async def _send_profile_messages(
         chunks = [text]
     if profile_photo is not None and chunks:
         caption = chunks.pop(0)
-        if animated_profile:
-            sent = await message.reply_animation(
-                animation=profile_photo,
-                caption=caption,
-            )
-        else:
-            sent = await message.reply_photo(photo=profile_photo, caption=caption)
+        sent = await message.reply_photo(photo=profile_photo, caption=caption)
         await database.save_message(
             message.chat_id,
             context.bot.id,
@@ -307,6 +309,30 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if await image_manager.consume_setting_input(update, context):
         return
 
+    pending_age_key = (group_id, user.id)
+    pending_age_deadline = _pending_welcome_ages.get(pending_age_key)
+    if pending_age_deadline is not None:
+        if time.monotonic() > pending_age_deadline:
+            _pending_welcome_ages.pop(pending_age_key, None)
+        else:
+            age_match = re.fullmatch(
+                r"\s*(\d{1,3})(?:\s*(?:лет|года?|год))?\s*",
+                text,
+                re.IGNORECASE,
+            )
+            if age_match:
+                age = int(age_match.group(1))
+                if 1 <= age <= 120:
+                    try:
+                        await database.update_user_profile(user.id, group_id, age=age)
+                        _pending_welcome_ages.pop(pending_age_key, None)
+                    except Exception:
+                        logging.exception(
+                            "Не удалось сохранить возраст участника %s в группе %s.",
+                            user.id,
+                            group_id,
+                        )
+
     await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
 
     if command == "forget_me":
@@ -345,7 +371,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if await handle_balance_request(update, context):
         return
 
-    if await handle_delete_replied_message(update):
+    if await handle_delete_replied_message(update, context):
         return
 
     try:
@@ -367,6 +393,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             message.message_id,
             display_name,
             text,
+            gender=str(person.get("gender") or "неизвестен"),
+            age=person.get("age") if isinstance(person.get("age"), int) else None,
+            reply_to=(
+                f"{_user_name(message.reply_to_message.from_user)}: "
+                f"{message.reply_to_message.text or message.reply_to_message.caption or ''}"
+                if message.reply_to_message
+                else None
+            ),
         )
     except Exception:
         logging.exception("Ошибка сохранения группового сообщения в SQLite")
@@ -406,13 +440,28 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         summary_period_minutes = 12 * 60
     participants = None
     participant_genders: dict[int, str] = {}
+    summary_records: list[dict[str, Any]] = []
     try:
-        history = await database.load_chat_history(
-            group_id,
-            summary=summary,
-            limit=DEFAULT_CONTEXT_SIZE,
-            summary_minutes=summary_period_minutes,
-        )
+        if summary:
+            summary_records = await database.get_summary_history_rows(
+                group_id,
+                summary_period_minutes,
+            )
+            history = [
+                (
+                    int(row["message_id"]),
+                    str(row["sender_name"]),
+                    int(row["user_id"]),
+                    str(row["text"]),
+                )
+                for row in summary_records
+            ]
+        else:
+            history = await database.load_chat_history(
+                group_id,
+                summary=False,
+                limit=DEFAULT_CONTEXT_SIZE,
+            )
         participant_genders = await database.get_group_user_genders(group_id)
         replied = message.reply_to_message
         replied_data = None
@@ -444,7 +493,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 ),
             )
             profile_photo = None
-            animated_profile = False
             if not group_profile_request:
                 decoration = await database.get_or_create_profile_decoration(user.id)
                 nickname = str(
@@ -452,50 +500,45 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     or person.get("display_name")
                     or _user_name(user)
                 )
-                try:
-                    member = await context.bot.get_chat_member(group_id, user.id)
-                    member_status = getattr(member.status, "value", member.status)
-                    animated_profile = member_status in ("creator", "administrator")
-                except TelegramError:
-                    logging.warning(
-                        "Не удалось определить статус пользователя %s в группе %s; "
-                        "отправляю обычный баннер профиля.",
-                        user.id,
-                        group_id,
-                        exc_info=True,
-                    )
-                profile_photo = create_profile_card(
-                    nickname,
-                    decoration,
-                    animated=animated_profile,
-                )
+                profile_photo = create_profile_card(nickname, decoration)
             await _send_profile_messages(
                 message,
                 context,
                 answer,
                 profile_photo,
-                animated_profile=animated_profile,
             )
             await maybe_react(message)
             return
-        prompt = build_prompt(
-            history=history,
-            user_id=user.id,
-            user_name=_user_name(user),
-            display_name=display_name,
-            gender=person["gender"],
-            callsign=person["callsign"],
-            current_message=text,
-            summary=summary,
-            summary_period_minutes=summary_period_minutes,
-            profile_request=profile_request,
-            current_message_id=message.message_id,
-            replied_message=replied_data,
-            participants=participants,
-            participant_genders=participant_genders,
+        prompt = ""
+        if not summary:
+            prompt = build_prompt(
+                history=history,
+                user_id=user.id,
+                user_name=_user_name(user),
+                display_name=display_name,
+                gender=person["gender"],
+                callsign=person["callsign"],
+                current_message=text,
+                summary=False,
+                profile_request=profile_request,
+                current_message_id=message.message_id,
+                replied_message=replied_data,
+                participants=participants,
+                participant_genders=participant_genders,
+            )
+    except database.HistoryDecryptionError:
+        logging.exception("Ключ шифрования не подошёл к истории группы %s.", group_id)
+        await message.reply_text(
+            "Не удалось прочитать защищённую историю. Проверь HISTORY_ENCRYPTION_KEY."
         )
+        return
     except Exception:
         logging.exception("Не удалось собрать контекст группы %s", group_id)
+        if summary:
+            await message.reply_text(
+                "Не удалось прочитать историю для саммари. Проверь ключ шифрования и попробуй позже."
+            )
+            return
         if profile_request or group_profile_request:
             await message.reply_text("Не удалось собрать профиль. Попробуй позже.")
             return
@@ -523,8 +566,23 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except TelegramError:
         logging.warning("Не удалось показать typing action в группе %s", group_id, exc_info=True)
 
-    raw_answer = await generate_reply(prompt, summary)
-    answer, metadata = parse_meta(raw_answer)
+    if summary:
+        try:
+            answer = await generate_summary(
+                summary_records,
+                period_minutes=summary_period_minutes,
+                participant_genders=participant_genders,
+            )
+            metadata = None
+        except Exception:
+            logging.exception("Gemini не смог подготовить саммари для группы %s.", group_id)
+            await message.reply_text(
+                "Не удалось подготовить саммари. Проверь настройки Gemini и попробуй позже."
+            )
+            return
+    else:
+        raw_answer = await generate_reply(prompt, False)
+        answer, metadata = parse_meta(raw_answer)
     reported_age = extract_reported_age(text)
     if reported_age is not None:
         metadata = {**(metadata or {}), "target_user_id": user.id, "age": reported_age}
@@ -554,6 +612,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 bot_message.message_id,
                 "Юбара",
                 answer,
+                reply_to=f"{display_name}: {text}",
             )
         except Exception:
             logging.exception("Не удалось сохранить ответ бота в истории группы %s", group_id)
@@ -576,27 +635,148 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logging.exception("Не удалось проверить доступ группы %s для приветствия.", message.chat_id)
         return
 
-    names = [
-        member.first_name or member.username or "новый участник"
-        for member in message.new_chat_members
-        if not member.is_bot
-    ]
-    if not names:
+    for member in message.new_chat_members:
+        if member.is_bot:
+            continue
+        name = member.first_name or member.username or "новый участник"
+        try:
+            await database.ensure_user(
+                member.id,
+                message.chat_id,
+                member.username,
+                name,
+                is_bot=False,
+            )
+            choice = hashlib.sha256(
+                f"{message.chat_id}:{member.id}".encode("utf-8")
+            ).digest()[0] % len(_WELCOME_MESSAGES)
+            welcome_text = (
+                f"{name}, добро пожаловать! {_WELCOME_MESSAGES[choice]} "
+                "Если хочешь, можно указать пол и возраст — я сохраню их для ответов; "
+                "оба вопроса необязательны."
+            )
+            sent = await message.reply_text(
+                welcome_text,
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton("Парень", callback_data=f"wg:{member.id}:m"),
+                            InlineKeyboardButton("Девушка", callback_data=f"wg:{member.id}:f"),
+                            InlineKeyboardButton("Пропустить", callback_data=f"wg:{member.id}:s"),
+                        ]
+                    ]
+                ),
+            )
+            await database.save_message(
+                message.chat_id,
+                context.bot.id,
+                sent.message_id,
+                "Юбара",
+                welcome_text,
+            )
+        except TelegramError:
+            logging.exception(
+                "Не удалось поприветствовать пользователя %s в группе %s.",
+                member.id,
+                message.chat_id,
+            )
+        except Exception:
+            logging.exception(
+                "Не удалось подготовить приветствие пользователя %s в группе %s.",
+                member.id,
+                message.chat_id,
+            )
+
+
+async def on_welcome_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    del context
+    query = update.callback_query
+    user = update.effective_user
+    chat = update.effective_chat
+    if query is None or user is None or chat is None:
         return
-    welcome = ", ".join(names)
+    parts = (query.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit():
+        await query.answer("Кнопка устарела.", show_alert=True)
+        return
+    if int(parts[1]) != user.id:
+        await query.answer("Эта кнопка предназначена другому участнику.", show_alert=True)
+        return
+    if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await query.answer("Эта кнопка доступна только в группе.", show_alert=True)
+        return
     try:
-        sent = await message.reply_text(
-            f"Добро пожаловать, {welcome}! Устраивайтесь поудобнее — "
-            "Юбара милостиво разрешает вам здесь освоиться."
-        )
-        await database.save_message(
-            message.chat_id,
-            context.bot.id,
-            sent.message_id,
-            "Юбара",
-            sent.text or "Приветствие новых участников",
-        )
-    except TelegramError:
-        logging.exception("Не удалось поприветствовать новых участников группы %s.", message.chat_id)
+        if not await database.is_group_allowed(chat.id):
+            await query.answer("Группа не подключена.", show_alert=True)
+            return
+        if parts[0] == "wg":
+            gender = {"m": "парень", "f": "девушка"}.get(parts[2])
+            if parts[2] not in ("m", "f", "s"):
+                await query.answer("Выбор не распознан.", show_alert=True)
+                return
+            if gender is not None:
+                await database.update_user_profile(user.id, chat.id, gender=gender)
+            _pending_welcome_ages[(chat.id, user.id)] = time.monotonic() + 900
+            await query.answer("Спасибо, выбор сохранён." if gender else "Хорошо.")
+            if query.message is not None:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except TelegramError:
+                    logging.info("Не удалось убрать кнопки приветствия в группе %s.", chat.id)
+                await query.message.reply_text(
+                    f"{_user_name(user)}, если хочешь, напиши возраст числом "
+                    "(1–120 лет) или нажми «Пропустить».",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Пропустить", callback_data=f"wa:{user.id}:s")]]
+                    ),
+                )
+        elif parts[0] == "wa" and parts[2] == "s":
+            _pending_welcome_ages.pop((chat.id, user.id), None)
+            await query.answer("Возраст не сохраняю.")
+            if query.message is not None:
+                await query.message.delete()
+        else:
+            await query.answer("Кнопка устарела.", show_alert=True)
     except Exception:
-        logging.exception("Не удалось сохранить приветствие в истории группы %s.", message.chat_id)
+        logging.exception(
+            "Не удалось обработать приветственный выбор пользователя %s в группе %s.",
+            user.id,
+            chat.id,
+        )
+        await query.answer("Не удалось сохранить выбор. Попробуй позже.", show_alert=True)
+
+
+async def on_message_reaction(
+    reaction_update: MessageReactionUpdated,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    del context
+    if reaction_update.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    if reaction_update.user is None:
+        return
+    try:
+        if not await database.is_group_allowed(reaction_update.chat.id):
+            return
+        reaction = ", ".join(
+            getattr(item, "emoji", None)
+            or getattr(item, "custom_emoji_id", None)
+            or "реакция"
+            for item in reaction_update.new_reaction
+        )
+        await database.update_message_reaction(
+            reaction_update.chat.id,
+            reaction_update.message_id,
+            reaction_update.user.id,
+            _user_name(reaction_update.user),
+            reaction or None,
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось сохранить реакцию на сообщение %s в группе %s.",
+            reaction_update.message_id,
+            reaction_update.chat.id,
+        )

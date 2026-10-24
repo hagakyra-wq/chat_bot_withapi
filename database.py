@@ -7,13 +7,14 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import date, datetime, timedelta, timezone
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from cryptography.fernet import Fernet, InvalidToken
 
 from config import (
     ADMIN_ID,
@@ -22,6 +23,7 @@ from config import (
     DATABASE_PATH,
     MAX_TOTAL_MESSAGES_PER_CHAT,
     DATABASE_SHARD_THRESHOLD_BYTES,
+    HISTORY_ENCRYPTION_KEY,
 )
 
 _write_lock = asyncio.Lock()
@@ -42,6 +44,11 @@ _AUTORESPONDER_DEFAULT_PRIVATE_TEXT = (
     "(около 5 лет)"
 )
 _TELEGRAM_SESSION_BACKUPS_KEY = "telegram_session_backups"
+_history_cipher = Fernet(HISTORY_ENCRYPTION_KEY.encode("ascii"))
+
+
+class HistoryDecryptionError(ValueError):
+    """Raised when saved history cannot be opened with the configured key."""
 
 
 def _autoresponder_meta_key(key: str, user_id: int | None) -> str:
@@ -99,7 +106,8 @@ async def initialize() -> None:
                     message_id INTEGER NOT NULL,
                     sender_name TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    payload_version INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
                     ON messages(chat_id, id);
@@ -302,7 +310,13 @@ async def initialize() -> None:
                 "duel_players",
                 {"is_bot": "INTEGER NOT NULL DEFAULT 0"},
             )
+            await _ensure_columns(
+                db,
+                "messages",
+                {"payload_version": "INTEGER NOT NULL DEFAULT 0"},
+            )
             await _migrate_global_profiles(db)
+            await _migrate_message_payloads(db)
             await db.commit()
             cursor = await db.execute("SELECT value FROM meta WHERE key = 'dirty'")
             dirty = await cursor.fetchone()
@@ -321,6 +335,99 @@ async def _ensure_columns(
     for column, declaration in columns.items():
         if column not in existing:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _encrypt_message_payload(
+    sender_name: str,
+    text: str,
+    *,
+    gender: str = "неизвестен",
+    age: int | None = None,
+    reactions: list[dict[str, object]] | None = None,
+    reply_to: str | None = None,
+) -> str:
+    payload = {
+        "sender_name": sender_name,
+        "text": text,
+        "gender": gender,
+        "age": age,
+        "reactions": reactions or [],
+        "reply_to": reply_to,
+    }
+    return _history_cipher.encrypt(
+        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+
+
+def _decrypt_message_payload(token: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(_history_cipher.decrypt(token.encode("ascii")))
+    except (InvalidToken, UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError) as exc:
+        raise HistoryDecryptionError(
+            "Не удалось расшифровать историю. Проверьте HISTORY_ENCRYPTION_KEY."
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+        raise HistoryDecryptionError("Зашифрованная запись истории имеет неверный формат.")
+    return payload
+
+
+async def _migrate_message_payloads(db: aiosqlite.Connection) -> None:
+    migrated = await _encrypt_legacy_messages(db)
+    for archive_path in _message_archive_paths():
+        try:
+            async with aiosqlite.connect(archive_path) as archive:
+                await _ensure_columns(
+                    archive,
+                    "messages",
+                    {"payload_version": "INTEGER NOT NULL DEFAULT 0"},
+                )
+                archive_migrated = await _encrypt_legacy_messages(archive)
+                await archive.commit()
+            if archive_migrated:
+                await db.execute(
+                    "DELETE FROM meta WHERE key = ?",
+                    (f"message_archive_file_id:{archive_path.name}",),
+                )
+                migrated += archive_migrated
+        except (OSError, sqlite3.Error):
+            logging.exception(
+                "Не удалось подготовить шифрование архива истории %s.",
+                archive_path,
+            )
+            raise
+    if migrated:
+        await db.execute(
+            """
+            INSERT INTO meta(key, value) VALUES ('dirty', '1')
+            ON CONFLICT(key) DO UPDATE SET value = '1'
+            """
+        )
+
+
+async def _encrypt_legacy_messages(db: aiosqlite.Connection) -> int:
+    db.row_factory = aiosqlite.Row
+    cursor = await db.execute(
+        """
+        SELECT id, sender_name, text
+        FROM messages
+        WHERE payload_version = 0
+        """
+    )
+    rows = await cursor.fetchall()
+    for row in rows:
+        encrypted_text = _encrypt_message_payload(
+            str(row["sender_name"]),
+            str(row["text"]),
+        )
+        await db.execute(
+            """
+            UPDATE messages
+            SET sender_name = '[encrypted]', text = ?, payload_version = 1
+            WHERE id = ?
+            """,
+            (encrypted_text, int(row["id"])),
+        )
+    return len(rows)
 
 
 async def _migrate_global_profiles(db: aiosqlite.Connection) -> None:
@@ -583,6 +690,35 @@ async def get_or_create_profile_decoration(user_id: int) -> str:
     return decoration
 
 
+async def get_profile_banner_records() -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, username, display_name, callsign
+            FROM global_profiles
+            ORDER BY user_id
+            """
+        )
+        profiles = [dict(row) for row in await cursor.fetchall()]
+    banners: list[dict[str, Any]] = []
+    for profile in profiles:
+        user_id = int(profile["user_id"])
+        nickname = str(
+            profile.get("callsign")
+            or profile.get("display_name")
+            or profile.get("username")
+            or f"Пользователь {user_id}"
+        )
+        banners.append(
+            {
+                "user_id": user_id,
+                "nickname": nickname,
+                "decoration": await get_or_create_profile_decoration(user_id),
+            }
+        )
+    return banners
+
+
 async def get_user_group_ids(user_id: int) -> list[int]:
     async with _connect() as db:
         cursor = await db.execute(
@@ -708,17 +844,32 @@ async def save_message(
     message_id: int,
     sender_name: str,
     text: str,
+    *,
+    gender: str = "неизвестен",
+    age: int | None = None,
+    reactions: list[dict[str, object]] | None = None,
+    reply_to: str | None = None,
 ) -> None:
     if chat_id > 0:
         return
+    encrypted_text = _encrypt_message_payload(
+        sender_name,
+        text,
+        gender=gender,
+        age=age,
+        reactions=reactions,
+        reply_to=reply_to,
+    )
     async with _write_lock:
         async with _connect() as db:
             await db.execute(
                 """
-                INSERT INTO messages(chat_id, user_id, message_id, sender_name, text)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages(
+                    chat_id, user_id, message_id, sender_name, text, payload_version
+                )
+                VALUES (?, ?, ?, '[encrypted]', ?, 1)
                 """,
-                (chat_id, user_id, message_id, sender_name, text),
+                (chat_id, user_id, message_id, encrypted_text),
             )
             cursor = await db.execute(
                 "SELECT COUNT(*) FROM messages WHERE chat_id = ?",
@@ -816,11 +967,13 @@ async def load_chat_history(
                 minutes=summary_minutes,
             )
         return await get_recent_history(chat_id, limit + 1)
-    except Exception:
+    except Exception as exc:
         logging.exception(
-            "Не удалось загрузить историю чата %s; продолжаю без контекста.",
+            "Не удалось загрузить историю чата %s.",
             chat_id,
         )
+        if summary or isinstance(exc, HistoryDecryptionError):
+            raise
         return []
 
 
@@ -1028,7 +1181,8 @@ async def _get_message_rows(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     query = (
-        "SELECT id, message_id, sender_name, user_id, text, created_at FROM messages "
+        "SELECT id, message_id, sender_name, user_id, text, created_at, payload_version "
+        "FROM messages "
         "WHERE chat_id = ? "
     )
     params: tuple[object, ...] = (chat_id,)
@@ -1058,7 +1212,158 @@ async def _get_message_rows(
                 await archive.close()
         except (OSError, sqlite3.Error):
             logging.exception("Не удалось прочитать архив сообщений %s.", archive_path)
+    for row in rows:
+        if int(row.get("payload_version") or 0) == 1:
+            payload = _decrypt_message_payload(str(row["text"]))
+            row.update(payload)
+        else:
+            row.setdefault("gender", "неизвестен")
+            row.setdefault("age", None)
+            row.setdefault("reactions", [])
+            row.setdefault("reply_to", None)
     return rows
+
+
+async def get_group_history_export_rows(chat_id: int) -> list[dict[str, Any]]:
+    rows = await _get_message_rows(chat_id, None)
+    rows.sort(
+        key=lambda row: (
+            str(row["created_at"]),
+            int(row["message_id"]),
+            int(row["id"]),
+        )
+    )
+    return rows
+
+
+async def get_summary_history_rows(
+    chat_id: int,
+    period_minutes: int,
+) -> list[dict[str, Any]]:
+    rows = await _get_message_rows(chat_id, None, minutes=period_minutes)
+    rows.sort(
+        key=lambda row: (
+            str(row["created_at"]),
+            int(row["message_id"]),
+            int(row["id"]),
+        )
+    )
+    return rows
+
+
+def format_group_history_export(rows: list[dict[str, Any]]) -> bytes:
+    def field(value: object) -> str:
+        return str(value if value is not None else "").replace("\r", " ").replace(
+            "\n", " ⏎ "
+        ).replace("|", "\\|")
+
+    lines = [
+        "время | имя | пол | возраст | текст | реакции и от кого | reply-to"
+    ]
+    for row in rows:
+        reactions = row.get("reactions")
+        reaction_text = ", ".join(
+            f"{item.get('reaction', '')} от {item.get('name', 'участник')}"
+            for item in reactions
+            if isinstance(item, dict)
+        ) if isinstance(reactions, list) else ""
+        lines.append(
+            " | ".join(
+                (
+                    field(row.get("created_at")),
+                    field(row.get("sender_name")),
+                    field(row.get("gender") or "неизвестен"),
+                    field(row.get("age")),
+                    field(row.get("text")),
+                    field(reaction_text),
+                    field(row.get("reply_to")),
+                )
+            )
+        )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+async def update_message_reaction(
+    chat_id: int,
+    message_id: int,
+    actor_id: int,
+    actor_name: str,
+    reaction: str | None,
+) -> bool:
+    async with _write_lock:
+        for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+            async with aiosqlite.connect(database_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    """
+                    SELECT id, sender_name, text, payload_version
+                    FROM messages
+                    WHERE chat_id = ? AND message_id = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (chat_id, message_id),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    continue
+                if int(row["payload_version"] or 0) == 1:
+                    payload = _decrypt_message_payload(str(row["text"]))
+                else:
+                    payload = {
+                        "sender_name": str(row["sender_name"]),
+                        "text": str(row["text"]),
+                        "gender": "неизвестен",
+                        "age": None,
+                        "reactions": [],
+                        "reply_to": None,
+                    }
+                reactions = [
+                    item
+                    for item in payload.get("reactions", [])
+                    if not isinstance(item, dict) or item.get("user_id") != actor_id
+                ]
+                if reaction:
+                    reactions.append(
+                        {
+                            "user_id": actor_id,
+                            "name": actor_name,
+                            "reaction": reaction,
+                        }
+                    )
+                payload["reactions"] = reactions
+                encrypted_text = _encrypt_message_payload(
+                    str(payload.get("sender_name") or "Без имени"),
+                    str(payload["text"]),
+                    gender=str(payload.get("gender") or "неизвестен"),
+                    age=payload.get("age")
+                    if isinstance(payload.get("age"), int)
+                    else None,
+                    reactions=reactions,
+                    reply_to=(
+                        str(payload["reply_to"])
+                        if payload.get("reply_to") is not None
+                        else None
+                    ),
+                )
+                await db.execute(
+                    """
+                    UPDATE messages
+                    SET sender_name = '[encrypted]', text = ?, payload_version = 1
+                    WHERE id = ?
+                    """,
+                    (encrypted_text, int(row["id"])),
+                )
+                await db.commit()
+                if database_path != DATABASE_PATH:
+                    async with _connect() as main_db:
+                        await main_db.execute(
+                            "DELETE FROM meta WHERE key = ?",
+                            (f"message_archive_file_id:{database_path.name}",),
+                        )
+                        await main_db.commit()
+                _record_write()
+                return True
+    return False
 
 
 def _utc5_date() -> date:
@@ -1660,6 +1965,71 @@ async def set_meta(key: str, value: str) -> None:
         _record_write()
 
 
+async def get_known_backup_message_ids() -> set[int]:
+    async with _connect() as db:
+        cursor = await db.execute("SELECT key, value FROM meta")
+        records = await cursor.fetchall()
+    message_ids: set[int] = set()
+    for row in records:
+        key = str(row["key"])
+        value = str(row["value"])
+        if key == "backup_message_id" or key.startswith(
+            "message_archive_message_id:"
+        ):
+            try:
+                message_ids.add(int(value))
+            except ValueError:
+                logging.warning("Некорректный ID резервного сообщения в meta: %s.", key)
+        elif key == _TELEGRAM_SESSION_BACKUPS_KEY or key.startswith(
+            ("history_backup:", "profile_banner_backup:")
+        ):
+            try:
+                payload = json.loads(value)
+                if key == _TELEGRAM_SESSION_BACKUPS_KEY and isinstance(payload, dict):
+                    message_ids.update(
+                        int(entry["message_id"])
+                        for entry in payload.values()
+                        if isinstance(entry, dict)
+                        and str(entry.get("message_id", "")).isdigit()
+                    )
+                elif isinstance(payload, dict) and str(
+                    payload.get("message_id", "")
+                ).isdigit():
+                    message_ids.add(int(payload["message_id"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                logging.exception("Повреждены метаданные бэкапа %s.", key)
+    return message_ids
+
+
+async def reset_all_application_data() -> int:
+    global _dirty_generation, _synced_generation
+    archive_paths = list(DATABASE_ARCHIVE_DIR.rglob("messages_*.db"))
+    for archive_path in archive_paths:
+        await asyncio.to_thread(archive_path.unlink)
+    if DATABASE_BACKUP_PATH.exists():
+        await asyncio.to_thread(DATABASE_BACKUP_PATH.unlink)
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                """
+            )
+            table_names = [str(row["name"]) for row in await cursor.fetchall()]
+            deleted_rows = 0
+            for table_name in table_names:
+                cursor = await db.execute(f'DELETE FROM "{table_name}"')
+                deleted_rows += max(cursor.rowcount, 0)
+            await db.execute(
+                "INSERT INTO meta(key, value) VALUES ('dirty', '1')"
+            )
+            await db.commit()
+        _record_write()
+    return deleted_rows
+
+
 async def get_telegram_session_backup_manifest() -> dict[int, dict[str, Any]]:
     raw_manifest = await get_meta(_TELEGRAM_SESSION_BACKUPS_KEY)
     if raw_manifest is None:
@@ -1887,6 +2257,16 @@ def list_message_archives() -> list[Path]:
 async def get_message_archive_file_id(filename: str) -> str | None:
     key = f"message_archive_file_id:{Path(filename).name}"
     return await get_meta(key)
+
+
+async def get_message_archive_message_id(filename: str) -> int | None:
+    key = f"message_archive_message_id:{Path(filename).name}"
+    value = await get_meta(key)
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        logging.exception("Некорректный ID сообщения архива %s в SQLite.", filename)
+        return None
 
 
 async def set_message_archive_backup_meta(

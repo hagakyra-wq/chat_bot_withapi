@@ -30,6 +30,8 @@ def _required_int(name: str) -> int:
 
 TELEGRAM_TOKEN = _required_text("TELEGRAM_TOKEN")
 GROQ_API_KEY = _required_text("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+HISTORY_ENCRYPTION_KEY = _required_text("HISTORY_ENCRYPTION_KEY")
 ADMIN_ID = _required_int("ADMIN_ID")
 BACKUP_CHANNEL_ID = _required_int("BACKUP_CHANNEL_ID")
 LOGS_CHAT = _required_int("LOGS_CHAT")
