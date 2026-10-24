@@ -1244,6 +1244,10 @@ async def on_game_callback(
         if item is None or int(item["user_id"]) != user.id:
             await query.message.reply_text("Этот баннер уже недоступен.")
             return
+        progress = await query.message.reply_text(
+            f"⏳ Начала восстановление баннера #{item_id}. "
+            "Это может занять несколько секунд."
+        )
         try:
             item = await ensure_banner_file(
                 context.bot,
@@ -1274,13 +1278,13 @@ async def on_game_callback(
                 item_id,
                 user.id,
             )
-            await query.message.edit_text(
+            await progress.edit_text(
                 f"Баннер #{item_id} сохранён, но изображение пока не удалось подготовить. "
-                "Попробуй повторить позже.",
+                "Нажми «Повторить подготовку» ещё раз или открой инвентарь позже.",
                 reply_markup=_banner_retry_markup(item_id),
             )
             return
-        await query.message.edit_text(
+        await progress.edit_text(
             f"✅ Баннер #{item_id} восстановлен и сохранён в инвентаре.",
             reply_markup=InlineKeyboardMarkup(
                 [

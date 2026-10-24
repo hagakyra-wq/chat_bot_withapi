@@ -105,7 +105,7 @@ async def _render_and_backup(
     if int(item["level"]) >= 5:
         try:
             avatar, avatar_id = await _avatar_for_user(bot, user_id)
-        except TelegramError:
+        except Exception:
             logging.warning(
                 "Не удалось получить аватар для баннера item_id=%s; будет использован инициал.",
                 item["item_id"],
