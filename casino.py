@@ -11,6 +11,8 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaAnimation,
     InputMediaPhoto,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     Update,
 )
 from telegram.constants import ChatType
@@ -83,6 +85,18 @@ _RARITY_ALIASES = {
 }
 
 
+def _banner_retry_markup(item_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Повторить подготовку", callback_data=f"inv:retry:{item_id}")],
+            [
+                InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
+                _menu_button(),
+            ],
+        ]
+    )
+
+
 def _coins(cents: int) -> str:
     sign = "-" if cents < 0 else ""
     value = abs(cents)
@@ -102,6 +116,35 @@ def _inventory_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButto
 
 def _menu_button() -> InlineKeyboardButton:
     return InlineKeyboardButton("↩️ В меню", callback_data="casino:home")
+
+
+def _user_bottom_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("🎰 Казино"), KeyboardButton("🎒 Инвентарь")],
+            [KeyboardButton("🏪 Площадка"), KeyboardButton("👤 Мой профиль")],
+            [KeyboardButton("🎁 Бонус"), KeyboardButton("🏠 Главное меню")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выбери раздел",
+    )
+
+
+async def ensure_user_bottom_menu(
+    message: Any,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if (
+        message.chat.type != ChatType.PRIVATE
+        or context.user_data.get("user_bottom_menu_enabled")
+    ):
+        return
+    await message.reply_text(
+        "Меню разделов закреплено внизу чата.",
+        reply_markup=_user_bottom_menu(),
+    )
+    context.user_data["user_bottom_menu_enabled"] = True
 
 
 def _casino_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
@@ -221,9 +264,15 @@ async def open_main_menu(
     if message is None:
         return
     private = message.chat.type == ChatType.PRIVATE
+    if private:
+        context.user_data["user_bottom_menu_enabled"] = True
     await message.reply_text(
-        "Главное меню Юбары:",
-        reply_markup=_main_menu_keyboard(context, private=private),
+        "Главное меню Юбары. Выбери раздел кнопкой внизу:",
+        reply_markup=(
+            _user_bottom_menu()
+            if private
+            else _main_menu_keyboard(context, private=False)
+        ),
     )
 
 
@@ -232,6 +281,7 @@ async def _return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     if query is None or query.message is None or user is None:
         return
+    await ensure_user_bottom_menu(query.message, context)
     keyboard = _main_menu_keyboard(
         context,
         private=query.message.chat.type == ChatType.PRIVATE,
@@ -405,19 +455,18 @@ async def _spin(
             except TimeoutError:
                 pass
             finally:
-                if skip_animation or spins == 10:
-                    for dice_message in dice_messages:
-                        try:
-                            await context.bot.delete_message(
-                                chat_id=dice_chat_id,
-                                message_id=dice_message.message_id,
-                            )
-                        except TelegramError:
-                            logging.exception(
-                                "Не удалось удалить кубик user_id=%s message_id=%s.",
-                                user.id,
-                                dice_message.message_id,
-                            )
+                for dice_message in dice_messages:
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=dice_chat_id,
+                            message_id=dice_message.message_id,
+                        )
+                    except TelegramError:
+                        logging.exception(
+                            "Не удалось удалить кубик user_id=%s message_id=%s.",
+                            user.id,
+                            dice_message.message_id,
+                        )
             if not skip_animation and spin_index + 1 < spins:
                 await status.edit_text(
                     f"🎲 Крутка: {spin_index + 1}/{spins}",
@@ -516,7 +565,8 @@ async def _spin(
         if prepared_item is None:
             await message.reply_text(
                 f"Приз #{item['item_id']} записан в инвентарь, "
-                "но не удалось подготовить превью."
+                "но не удалось подготовить изображение. Его можно повторить ниже.",
+                reply_markup=_banner_retry_markup(int(item["item_id"])),
             )
             continue
         try:
@@ -619,7 +669,20 @@ async def _show_inventory(
     if not items:
         await message.reply_text("Не удалось открыть баннер. Обнови инвентарь.")
         return
-    item = await ensure_banner_file(context.bot, items[0], priority=0)
+    try:
+        item = await ensure_banner_file(context.bot, items[0], priority=0)
+    except Exception:
+        logging.exception(
+            "Не удалось открыть баннер в инвентаре item_id=%s user_id=%s.",
+            items[0]["item_id"],
+            user.id,
+        )
+        await message.reply_text(
+            f"Баннер #{items[0]['item_id']} сохранён, но изображение пока не подготовлено. "
+            "Попробуй повторить через кнопку ниже.",
+            reply_markup=_banner_retry_markup(int(items[0]["item_id"])),
+        )
+        return
     item_id = int(item["item_id"])
     rarity = int(item["level"])
     rows: list[list[InlineKeyboardButton]] = []
@@ -1101,6 +1164,7 @@ async def on_game_callback(
     await query.answer()
     if user is None or query.message is None:
         return
+    await ensure_user_bottom_menu(query.message, context)
     action = query.data or ""
     if action == "casino:home":
         await _return_to_main_menu(update, context)
@@ -1172,6 +1236,59 @@ async def on_game_callback(
         item_id = await _parse_callback_int(query, action.split(":")[2])
         if item_id is not None:
             await _show_item(update, context, item_id)
+    elif action.startswith("inv:retry:"):
+        item_id = await _parse_callback_int(query, action.split(":")[2])
+        if item_id is None:
+            return
+        item = await database.get_banner_item(item_id)
+        if item is None or int(item["user_id"]) != user.id:
+            await query.message.reply_text("Этот баннер уже недоступен.")
+            return
+        try:
+            item = await ensure_banner_file(
+                context.bot,
+                item,
+                priority=0,
+                force=True,
+            )
+            rarity = int(item["level"])
+            await send_banner(
+                context.bot,
+                query.message.chat_id,
+                str(item["file_id"]),
+                animated=rarity == 6,
+                caption=f"Баннер #{item_id} · {_RARITY[rarity]}",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("✅ Активировать", callback_data=f"inv:s:{item_id}")],
+                        [
+                            InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
+                            _menu_button(),
+                        ],
+                    ]
+                ),
+            )
+        except Exception:
+            logging.exception(
+                "Не удалось повторно подготовить баннер item_id=%s user_id=%s.",
+                item_id,
+                user.id,
+            )
+            await query.message.edit_text(
+                f"Баннер #{item_id} сохранён, но изображение пока не удалось подготовить. "
+                "Попробуй повторить позже.",
+                reply_markup=_banner_retry_markup(item_id),
+            )
+            return
+        await query.message.edit_text(
+            f"✅ Баннер #{item_id} восстановлен и сохранён в инвентаре.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🎒 Открыть инвентарь", callback_data="menu:inv")],
+                    [_menu_button()],
+                ]
+            ),
+        )
     elif action.startswith("inv:s:"):
         item_id = await _parse_callback_int(query, action.split(":")[2])
         if item_id is None:
@@ -1480,6 +1597,7 @@ async def handle_game_message(
         "казино",
         "казик",
         "крутка",
+        "🎰 казино",
     }:
         await open_casino(update, context)
         return True
@@ -1487,6 +1605,7 @@ async def handle_game_message(
         "инвентарь",
         "сменить банер",
         "сменить баннер",
+        "🎒 инвентарь",
     }:
         await _show_inventory(update, context)
         return True
@@ -1513,7 +1632,7 @@ async def handle_game_message(
             logging.exception("Не удалось показать баннер user_id=%s.", user.id)
             await message.reply_text("Не удалось открыть баннер. Попробуй позже.")
         return True
-    if text in {"площадка", "маркет", "маркетплейс"} or re.fullmatch(
+    if text in {"площадка", "маркет", "маркетплейс", "🏪 площадка"} or re.fullmatch(
         r"/market(?:@\w+)?", text
     ):
         await _show_market(update, context, 0, "all", "date")
@@ -1529,8 +1648,11 @@ async def handle_game_message(
             logging.exception("Не удалось прочитать комиссию маркетплейса.")
             await message.reply_text("Не удалось получить сумму комиссии.")
         return True
-    if text in {"бонус", "бонус подписка"}:
+    if text in {"бонус", "бонус подписка", "🎁 бонус"}:
         await _bonus_prompt(update, context)
+        return True
+    if text in {"🏠 главное меню", "главное меню"}:
+        await open_main_menu(update, context)
         return True
     return False
 

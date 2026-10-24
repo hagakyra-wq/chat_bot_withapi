@@ -103,7 +103,14 @@ async def _render_and_backup(
     avatar: bytes | None = None
     avatar_id: str | None = None
     if int(item["level"]) >= 5:
-        avatar, avatar_id = await _avatar_for_user(bot, user_id)
+        try:
+            avatar, avatar_id = await _avatar_for_user(bot, user_id)
+        except TelegramError:
+            logging.warning(
+                "Не удалось получить аватар для баннера item_id=%s; будет использован инициал.",
+                item["item_id"],
+                exc_info=True,
+            )
     digest = content_hash(name, tag, avatar_id)
     current_hash = str(item.get("content_hash") or "")
     file_id = str(item.get("file_id") or "")

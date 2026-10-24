@@ -26,7 +26,11 @@ import database
 import autoresponder
 import personal_account
 from banner_store import get_profile_banner, send_banner
-from casino import handle_coin_promo_message, handle_game_message
+from casino import (
+    ensure_user_bottom_menu,
+    handle_coin_promo_message,
+    handle_game_message,
+)
 from config import ADMIN_ID, AVAILABLE_REACTIONS, BACKUP_CHANNEL_ID, PROFILE_TRIGGERS
 from duel import (
     handle_balance_request,
@@ -177,6 +181,7 @@ async def on_profile_callback(
         or query.message.chat_id != user.id
     ):
         return
+    await ensure_user_bottom_menu(query.message, context)
 
     action = query.data or ""
     if action == "profile:show":
@@ -3413,6 +3418,8 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not has_access:
         await _private_dialog(update, context, message.text)
         return
+    if re.fullmatch(r"/start(?:@\w+)?", message.text.strip(), re.IGNORECASE) is None:
+        await ensure_user_bottom_menu(message, context)
     fill_stage = context.user_data.get("profile_fill_stage")
     if fill_stage == "name":
         nickname = extract_reported_nickname(message.text) or re.sub(
