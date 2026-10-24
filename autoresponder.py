@@ -129,15 +129,18 @@ async def _evening_user_messages(
     client: TelegramClient,
     group_id: int,
     window_start: datetime,
+    window_end: datetime,
 ) -> tuple[datetime | None, list[str]]:
     last_outgoing: datetime | None = None
     outgoing_texts: list[str] = []
     async for message in client.iter_messages(group_id, limit=None):
         message_date = _message_datetime(message)
-        if message.out and last_outgoing is None:
-            last_outgoing = message_date
+        if message_date > window_end:
+            continue
         if message_date < window_start:
             break
+        if message.out and last_outgoing is None:
+            last_outgoing = message_date
         if not message.out:
             continue
         text = getattr(message, "message", None)
@@ -150,6 +153,7 @@ async def _process_night_group(
     client: TelegramClient,
     group_id: int,
     window_start: datetime,
+    window_end: datetime,
     now_utc: datetime,
     local_date: str,
     user_id: int = ADMIN_ID,
@@ -162,8 +166,9 @@ async def _process_night_group(
         client,
         group_id,
         window_start,
+        window_end,
     )
-    if last_outgoing is not None and now_utc - last_outgoing <= _INACTIVITY_INTERVAL:
+    if last_outgoing is not None and now_utc - last_outgoing < _INACTIVITY_INTERVAL:
         return
 
     if await has_goodnight_message(outgoing_texts):
@@ -235,12 +240,18 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         datetime_time(21, 0),
                         tzinfo=local_timezone,
                     ).astimezone(timezone.utc)
+                    window_end = datetime.combine(
+                        datetime.fromisoformat(local_date).date(),
+                        datetime_time(23, 0),
+                        tzinfo=local_timezone,
+                    ).astimezone(timezone.utc)
                     for group_id in group_ids:
                         try:
                             await _process_night_group(
                                 client,
                                 group_id,
                                 window_start,
+                                window_end,
                                 now_utc,
                                 local_date,
                                 user_id,

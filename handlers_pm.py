@@ -2576,7 +2576,12 @@ async def _private_dialog(
             profile = await database.get_global_profile(user_id)
             if profile is None:
                 raise RuntimeError(f"Глобальный профиль пользователя {user_id} отсутствует.")
-            nickname = f"@{user.username}" if user.username else user.first_name or "Без имени"
+            nickname = str(
+                profile.get("callsign")
+                or profile.get("display_name")
+                or user.first_name
+                or "Без имени"
+            )
             decoration = await database.get_or_create_profile_decoration(user_id)
             card = create_profile_card(nickname, decoration)
             profile_text = _format_private_profile(profile)

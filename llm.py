@@ -23,7 +23,7 @@ from config import (
 WORD_RE = re.compile(r"[a-zа-яё]+", re.IGNORECASE)
 _SUMMARY_PERIOD_RE = re.compile(
     r"\bза\s+(?:последн\w+\s+)?(?:(?P<amount>\d+)\s*)?"
-    r"(?P<unit>минут\w*|мин|час\w*|ч|дн\w*|сутк\w*|h|m)\b",
+    r"(?P<unit>минут\w*|мин|час\w*|ч|день|дня|дней|дн\w*|сутки|суток|сутк\w*|h|m)\b",
     re.IGNORECASE,
 )
 _REPORTED_AGE_RE = re.compile(
@@ -153,10 +153,15 @@ def build_prompt(
     )
     if replied_message is not None:
         message_id, sender_name, sender_id, text = replied_message
+        replied_gender = (participant_genders or {}).get(
+            sender_id if sender_id is not None else -1,
+            "неизвестен",
+        )
         prompt += (
             f"\n\nСообщение, на которое отвечает {display_name}: "
             f"[MsgID: {message_id}] {sender_name} (UserIDs: "
-            f"{sender_id if sender_id is not None else 'неизвестно'}): {text}"
+            f"{sender_id if sender_id is not None else 'неизвестно'}; "
+            f"пол: {replied_gender}): {text}"
         )
 
     prompt += (

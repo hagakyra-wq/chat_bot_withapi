@@ -9,6 +9,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+import personal_account
 
 _DELETE_COMMAND_RE = re.compile(
     r"^\s*(?P<address>(?:юбара|юбари|юбару|yubara)[,\s:!-]+)?\s*"
@@ -89,19 +90,49 @@ async def handle_delete_bot_messages(
         if count <= 0:
             await message.reply_text("Укажи положительное количество сообщений.")
             return True
-        try:
-            message_ids = await database.get_recent_chat_message_ids(
-                message.chat_id,
-                count,
-                exclude_message_id=message.message_id,
-            )
-        except Exception:
-            logging.exception(
-                "Не удалось получить последние сообщения чата %s для удаления.",
-                message.chat_id,
-            )
-            await message.reply_text("Не удалось получить список сообщений. Попробуй позже.")
-            return True
+        message_ids: list[int] = []
+        user_client = personal_account.get_authorized_client()
+        if user_client is not None:
+            try:
+                async for chat_message in user_client.iter_messages(
+                    message.chat_id,
+                    limit=count + 1,
+                ):
+                    if chat_message.id != message.message_id:
+                        message_ids.append(chat_message.id)
+                    if len(message_ids) >= count:
+                        break
+            except Exception:
+                logging.exception(
+                    "Не удалось получить последние сообщения Telegram для чата %s; "
+                    "использую сохранённую историю.",
+                    message.chat_id,
+                )
+                message_ids.clear()
+        if len(message_ids) < count:
+            try:
+                stored_ids = await database.get_recent_chat_message_ids(
+                    message.chat_id,
+                    count,
+                    exclude_message_id=message.message_id,
+                )
+                seen_ids = set(message_ids)
+                message_ids.extend(
+                    message_id for message_id in stored_ids if message_id not in seen_ids
+                )
+                message_ids = message_ids[:count]
+            except Exception:
+                if not message_ids:
+                    logging.exception(
+                        "Не удалось получить последние сообщения чата %s для удаления.",
+                        message.chat_id,
+                    )
+                    await message.reply_text("Не удалось получить список сообщений. Попробуй позже.")
+                    return True
+                logging.exception(
+                    "Не удалось дополнить список сообщений чата %s сохранённой историей.",
+                    message.chat_id,
+                )
 
         deleted_ids: list[int] = []
         failed = 0
@@ -133,7 +164,10 @@ async def handle_delete_bot_messages(
             return True
         result = f"Удалено сообщений чата: {len(deleted_ids)}."
         if len(message_ids) < count:
-            result += f" В сохранённой истории нашлось только {len(message_ids)}."
+            result += (
+                f" Нашлось только {len(message_ids)}. Для доступа к полной истории "
+                "нужно подключить личный Telegram-аккаунт Юбары."
+            )
         if failed:
             result += f" Не удалось удалить: {failed}."
         await message.reply_text(result)

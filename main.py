@@ -243,7 +243,8 @@ async def _post_init(application: Application) -> None:
     await database.rotate_messages_if_needed()
     await _restore_user_sessions(application.bot)
     try:
-        if await personal_account.startup():
+        feature_user_ids = await database.list_feature_user_ids("autoresponder")
+        if await personal_account.startup(feature_user_ids):
             logging.info("Сохранённая Telegram user-сессия восстановлена.")
     except Exception:
         logging.exception("Не удалось восстановить Telegram user-сессию.")

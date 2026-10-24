@@ -155,6 +155,8 @@ async def _send_profile_messages(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     profile_photo: BytesIO | None = None,
+    *,
+    animated_profile: bool = False,
 ) -> None:
     chunks: list[str] = []
     current = ""
@@ -169,7 +171,14 @@ async def _send_profile_messages(
     if not chunks:
         chunks = [text]
     if profile_photo is not None and chunks:
-        sent = await message.reply_photo(photo=profile_photo, caption=chunks.pop(0))
+        caption = chunks.pop(0)
+        if animated_profile:
+            sent = await message.reply_animation(
+                animation=profile_photo,
+                caption=caption,
+            )
+        else:
+            sent = await message.reply_photo(photo=profile_photo, caption=caption)
         await database.save_message(
             message.chat_id,
             context.bot.id,
@@ -435,13 +444,38 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 ),
             )
             profile_photo = None
+            animated_profile = False
             if not group_profile_request:
                 decoration = await database.get_or_create_profile_decoration(user.id)
-                profile_photo = create_profile_card(
-                    f"@{user.username}" if user.username else _user_name(user),
-                    decoration,
+                nickname = str(
+                    person.get("callsign")
+                    or person.get("display_name")
+                    or _user_name(user)
                 )
-            await _send_profile_messages(message, context, answer, profile_photo)
+                try:
+                    member = await context.bot.get_chat_member(group_id, user.id)
+                    member_status = getattr(member.status, "value", member.status)
+                    animated_profile = member_status in ("creator", "administrator")
+                except TelegramError:
+                    logging.warning(
+                        "Не удалось определить статус пользователя %s в группе %s; "
+                        "отправляю обычный баннер профиля.",
+                        user.id,
+                        group_id,
+                        exc_info=True,
+                    )
+                profile_photo = create_profile_card(
+                    nickname,
+                    decoration,
+                    animated=animated_profile,
+                )
+            await _send_profile_messages(
+                message,
+                context,
+                answer,
+                profile_photo,
+                animated_profile=animated_profile,
+            )
             await maybe_react(message)
             return
         prompt = build_prompt(
