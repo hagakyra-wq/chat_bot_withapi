@@ -62,6 +62,7 @@ from handlers_group import (
     on_group_message,
     on_message_reaction,
     on_new_members,
+    on_group_profile_stats_callback,
     on_welcome_callback,
 )
 from handlers_pm import (
@@ -704,6 +705,12 @@ def build_application() -> Application:
         CallbackQueryHandler(
             on_game_callback,
             pattern=r"^(?:casino:|inv:|menu:inv|mkt:|bonus:)",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            on_group_profile_stats_callback,
+            pattern=r"^profile:groupstats:",
         )
     )
     application.add_handler(

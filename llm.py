@@ -44,7 +44,8 @@ META_CLEAN_RE = re.compile(r"\[META:\s*.*?(?:\]|$)", re.DOTALL | re.IGNORECASE)
 JSON_EXTRACT_RE = re.compile(r"\[META:\s*({.*?})\s*\]", re.DOTALL | re.IGNORECASE)
 
 SYSTEM_PROMPT_TEMPLATE = """Тебя зовут Yubara (Юбара), ты девушка; о себе говоришь строго в женском роде: «подумала», «сделала».
-Сегодня {current_date_str}. День рождения у тебя 30 сентября.
+Дата и точное местное время в Москве на момент формирования ответа: {current_datetime_str}. Если тебя спрашивают текущее время или дату, отвечай по этой отметке и указывай московское время.
+День рождения у тебя 30 сентября.
 
 Характер: высокомерная королева. Держишься свысока, говоришь величественно и снисходительно, «жалуешь» вниманием и «милостиво» помогаешь. Но на самом деле ты заботливая и добрая: в трудную минуту гордость отступает, и ты искренне поддерживаешь собеседника. Гордость и язвительность никогда не переходят в унижение или грубость.
 
@@ -76,8 +77,8 @@ _client = AsyncOpenAI(
 _gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
-def current_date_moscow() -> str:
-    return datetime.now(MOSCOW_TIMEZONE).strftime("%d.%m.%Y")
+def current_datetime_moscow() -> str:
+    return datetime.now(MOSCOW_TIMEZONE).strftime("%d.%m.%Y %H:%M:%S %Z (UTC%z)")
 
 
 def is_called(text: str) -> bool:
@@ -267,7 +268,9 @@ def build_prompt(
 
 
 async def generate_reply(prompt: str, summary: bool) -> str:
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(current_date_str=current_date_moscow())
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        current_datetime_str=current_datetime_moscow()
+    )
     try:
         response = await _client.chat.completions.create(
             model=MODEL_NAME,

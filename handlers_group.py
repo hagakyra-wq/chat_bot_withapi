@@ -202,6 +202,8 @@ async def _send_message_leaderboard(
 def _format_person_profile(
     person: dict[str, object],
     activity: dict[str, int] | None = None,
+    *,
+    stats_period: str | None = None,
 ) -> str:
     display_name = str(person.get("display_name") or "").strip()
     callsign = str(person.get("callsign") or "").strip()
@@ -234,7 +236,15 @@ def _format_person_profile(
         lines.append(
             f"<blockquote expandable>{html.escape(fact_text)}</blockquote>"
         )
-    if activity is not None:
+    if activity is not None and stats_period is not None:
+        period_labels = {"d": "D · сегодня", "w": "W · неделя", "m": "M · месяц"}
+        if stats_period not in period_labels:
+            raise ValueError(f"Неизвестный период статистики группы: {stats_period!r}.")
+        lines.append(
+            f"<i>Сообщения в группе · {period_labels[stats_period]}: "
+            f"{activity.get(stats_period, 0)}</i>"
+        )
+    elif activity is not None:
         lines.append(
             "<i>Сообщения · D/W/M: "
             f"{activity.get('d', 0)} / {activity.get('w', 0)} / "
@@ -249,6 +259,7 @@ def _format_profile_response(
     *,
     group_title: str | None = None,
     activity_by_user: dict[int, dict[str, int]] | None = None,
+    stats_period: str = "d",
 ) -> str:
     if participants is None:
         user_id = person.get("user_id")
@@ -257,10 +268,14 @@ def _format_profile_response(
             if activity_by_user is not None and user_id is not None
             else None
         )
-        return "Профиль участника:\n" + _format_person_profile(person, activity)
+        return "Профиль участника:\n" + _format_person_profile(
+            person,
+            activity,
+            stats_period=stats_period,
+        )
 
     total = len(participants)
-    title = f"«{group_title}»" if group_title else "эта группа"
+    title = f"«{html.escape(group_title)}»" if group_title else "эта группа"
     lines = [
         f"Профили участников {title}:",
     ]
@@ -287,12 +302,33 @@ def _parse_profile_group_id(text: str, current_group_id: int) -> int:
     return int(phrase_match.group(1)) if phrase_match else current_group_id
 
 
+def _group_profile_stats_keyboard(
+    target_user_id: int,
+    group_id: int,
+    stats_period: str,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"{'● ' if period == stats_period else ''}{label}",
+                    callback_data=(
+                        f"profile:groupstats:{target_user_id}:{group_id}:{period}"
+                    ),
+                )
+                for period, label in (("d", "D"), ("w", "W"), ("m", "M"))
+            ]
+        ]
+    )
+
+
 async def _send_profile_messages(
     message: object,
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     profile_photo: BytesIO | str | None = None,
     profile_animated: bool = False,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     chunks: list[str] = []
     current = ""
@@ -313,12 +349,14 @@ async def _send_profile_messages(
                 animation=profile_photo,
                 caption=caption,
                 parse_mode="HTML",
+                reply_markup=reply_markup,
             )
         else:
             sent = await message.reply_photo(
                 photo=profile_photo,
                 caption=caption,
                 parse_mode="HTML",
+                reply_markup=reply_markup,
             )
         await database.save_message(
             message.chat_id,
@@ -327,8 +365,12 @@ async def _send_profile_messages(
             "Юбара",
             sent.caption or "Профиль пользователя",
         )
-    for chunk in chunks:
-        sent = await message.reply_text(chunk, parse_mode="HTML")
+    for index, chunk in enumerate(chunks):
+        sent = await message.reply_text(
+            chunk,
+            parse_mode="HTML",
+            reply_markup=reply_markup if profile_photo is None and index == 0 else None,
+        )
         await database.save_message(
             message.chat_id,
             context.bot.id,
@@ -336,6 +378,63 @@ async def _send_profile_messages(
             "Юбара",
             sent.text or chunk,
         )
+
+
+async def on_group_profile_stats_callback(
+    update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    answered = False
+    try:
+        parts = (query.data or "").split(":")
+        if len(parts) != 5 or parts[1] != "groupstats":
+            await query.answer("Кнопка профиля устарела.", show_alert=True)
+            return
+        target_user_id = int(parts[2])
+        group_id = int(parts[3])
+        stats_period = parts[4]
+        if stats_period not in ("d", "w", "m"):
+            await query.answer("Неизвестный период статистики.", show_alert=True)
+            return
+        if (
+            query.message is None
+            or query.message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP)
+            or query.message.chat_id != group_id
+            or not await database.is_group_allowed(group_id)
+        ):
+            await query.answer("Эта карточка больше недоступна.", show_alert=True)
+            return
+        person = await database.get_user_data(target_user_id, group_id)
+        if person is None:
+            await query.answer("Профиль участника больше недоступен.", show_alert=True)
+            return
+        activity = (await database.get_group_message_activity(group_id)).get(
+            target_user_id,
+            {"d": 0, "w": 0, "m": 0},
+        )
+        await query.answer()
+        answered = True
+        await query.message.edit_caption(
+            caption="Профиль участника:\n"
+            + _format_person_profile(
+                person,
+                activity,
+                stats_period=stats_period,
+            ),
+            parse_mode="HTML",
+            reply_markup=_group_profile_stats_keyboard(
+                target_user_id,
+                group_id,
+                stats_period,
+            ),
+        )
+    except Exception:
+        logging.exception("Не удалось переключить статистику группового профиля.")
+        if not answered:
+            await query.answer("Не удалось обновить статистику. Попробуй ещё раз.")
 
 
 async def _apply_meta(
@@ -684,10 +783,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 if group_profile_request
                 else None
             )
-            activity_by_user = (
-                await database.get_group_message_activity(requested_group_id)
-                if group_profile_request
-                else {user.id: await database.get_user_message_activity(user.id)}
+            activity_by_user = await database.get_group_message_activity(
+                requested_group_id if group_profile_request else group_id
             )
             answer = _format_profile_response(
                 person,
@@ -698,6 +795,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     else None
                 ),
                 activity_by_user=activity_by_user,
+                stats_period="d",
             )
             profile_photo: BytesIO | str | None = None
             profile_animated = False
@@ -723,6 +821,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 answer,
                 profile_photo,
                 profile_animated,
+                reply_markup=(
+                    _group_profile_stats_keyboard(user.id, group_id, "d")
+                    if profile_request
+                    else None
+                ),
             )
             await maybe_react(message)
             return
