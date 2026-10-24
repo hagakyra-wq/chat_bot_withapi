@@ -115,6 +115,11 @@ async def initialize() -> None:
                 CREATE TABLE IF NOT EXISTS allowed_groups (
                     group_id INTEGER PRIMARY KEY
                 );
+                CREATE TABLE IF NOT EXISTS user_group_memberships (
+                    group_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    PRIMARY KEY (group_id, user_id)
+                );
                 CREATE TABLE IF NOT EXISTS group_promo_codes (
                     code TEXT PRIMARY KEY,
                     created_by INTEGER NOT NULL,
@@ -329,6 +334,16 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_allowed_groups_update
                 AFTER UPDATE ON allowed_groups BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_user_group_memberships_insert
+                AFTER INSERT ON user_group_memberships BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_user_group_memberships_delete
+                AFTER DELETE ON user_group_memberships BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -595,6 +610,41 @@ async def is_group_allowed(group_id: int) -> bool:
             (group_id,),
         )
         return await cursor.fetchone() is not None
+
+
+async def set_group_membership(
+    group_id: int,
+    user_id: int,
+    *,
+    is_member: bool,
+) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            if is_member:
+                cursor = await db.execute(
+                    "INSERT OR IGNORE INTO user_group_memberships(group_id, user_id) "
+                    "VALUES (?, ?)",
+                    (group_id, user_id),
+                )
+            else:
+                cursor = await db.execute(
+                    "DELETE FROM user_group_memberships WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id),
+                )
+            await db.commit()
+        if cursor.rowcount:
+            _record_write()
+    return cursor.rowcount == 1
+
+
+async def list_user_group_memberships(user_id: int) -> list[int]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT group_id FROM user_group_memberships WHERE user_id = ? ORDER BY group_id",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["group_id"]) for row in rows]
 
 
 async def list_allowed_groups() -> list[int]:

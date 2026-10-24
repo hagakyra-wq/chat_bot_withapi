@@ -68,6 +68,7 @@ from handlers_pm import (
     build_personal_autoresponder_conversation_handler,
     on_profile_callback,
     on_private_message,
+    private_access_callback_guard,
 )
 from images import create_profile_card, on_image_callback, stop_image_jobs
 from banner_store import stop_banner_render_queue
@@ -649,6 +650,10 @@ def build_application() -> Application:
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
+    )
+    application.add_handler(
+        CallbackQueryHandler(private_access_callback_guard),
+        group=-1,
     )
     application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
     application.add_handler(

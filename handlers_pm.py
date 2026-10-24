@@ -13,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Reacti
 from telegram.constants import ChatAction, ChatType
 from telegram.error import TelegramError
 from telegram.ext import (
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -73,8 +74,9 @@ ACCESS_DURATIONS = {
     "day": (24 * 60 * 60, "24 часа"),
 }
 ACCESS_MESSAGE = (
-    "Чтобы получить доступ к функционалу бота, необходимо ввести пароль, "
-    "который можно получить у @BIGBACA"
+    "Чтобы пользоваться Юбарой в ЛС, вступи в группу, где есть бот, "
+    "и отправь там любое сообщение, на которое Юбара ответит. "
+    "Либо запроси пароль доступа у @BIGBACA."
 )
 _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
 
@@ -985,6 +987,79 @@ async def break_command(
 
 async def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID or await database.is_admin_user(user_id)
+
+
+async def has_private_bot_access(user_id: int, bot: Any) -> bool:
+    if user_id == ADMIN_ID or await database.is_authorized(user_id):
+        return True
+
+    group_ids = await database.list_user_group_memberships(user_id)
+    verification_failed = False
+    active_membership = False
+    for group_id in group_ids:
+        try:
+            member = await bot.get_chat_member(group_id, user_id)
+        except TelegramError:
+            verification_failed = True
+            logging.exception(
+                "Не удалось подтвердить членство user_id=%s в группе %s.",
+                user_id,
+                group_id,
+            )
+            continue
+
+        status = getattr(member.status, "value", member.status)
+        is_member = status in ("member", "administrator", "creator") or (
+            status == "restricted" and bool(getattr(member, "is_member", False))
+        )
+        await database.set_group_membership(
+            group_id,
+            user_id,
+            is_member=is_member,
+        )
+        if is_member:
+            active_membership = True
+
+    if active_membership:
+        return True
+    if verification_failed:
+        raise RuntimeError("Не удалось проверить членство пользователя в группах.")
+    return False
+
+
+async def private_access_callback_guard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if (
+        query is None
+        or user is None
+        or query.message is None
+        or query.message.chat.type != ChatType.PRIVATE
+    ):
+        return
+    try:
+        if await has_private_bot_access(user.id, context.bot):
+            return
+    except Exception:
+        logging.exception(
+            "Не удалось проверить доступ к личным функциям user_id=%s.",
+            user.id,
+        )
+        await query.answer(
+            "Не удалось проверить доступ. Напиши в общей группе с Юбарой и попробуй снова.",
+            show_alert=True,
+        )
+        raise ApplicationHandlerStop
+
+    await query.answer(
+        "Доступ в ЛС есть только у участников группы с Юбарой. "
+        "Напиши любое сообщение в группе, чтобы подключиться.",
+        show_alert=True,
+    )
+    raise ApplicationHandlerStop
 
 
 async def _history_group_access(
@@ -3248,6 +3323,18 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logging.exception("Не удалось проверить право администратора в личном чате")
             return
         ADMIN_PANEL_USERS.discard(user.id)
+    try:
+        has_access = await has_private_bot_access(user.id, context.bot)
+    except Exception:
+        logging.exception("Не удалось проверить членство user_id=%s в группе с ботом.", user.id)
+        await message.reply_text(
+            "Не удалось подтвердить членство в группе с Юбарой. "
+            "Попробуй позже или попроси администратора проверить права бота."
+        )
+        return
+    if not has_access:
+        await _private_dialog(update, context, message.text)
+        return
     fill_stage = context.user_data.get("profile_fill_stage")
     if fill_stage == "name":
         nickname = extract_reported_nickname(message.text) or re.sub(

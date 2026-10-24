@@ -82,7 +82,6 @@ TRIGGERS = ("юбара", "yubara")
 TRIGGER_THRESHOLD = 0.72
 BACKUP_INTERVAL_SECONDS = 10 * 60
 BACKUP_MAX_DOWNLOAD_SIZE = 20 * 1024 * 1024
-UNKNOWN_GROUP_NOTICE_SECONDS = 10 * 60
 
 AVAILABLE_REACTIONS = (
     "👍", "👎", "❤️", "🔥", "😁", "🤔", "🤯", "😱", "😢", "😭",

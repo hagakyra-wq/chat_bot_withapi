@@ -22,7 +22,6 @@ from config import (
     DEFAULT_CONTEXT_SIZE,
     KNOWN_PEOPLE_TRIGGERS,
     PROFILE_TRIGGERS,
-    UNKNOWN_GROUP_NOTICE_SECONDS,
 )
 from duel import (
     handle_balance_request,
@@ -48,11 +47,6 @@ from message_deletion import (
 from reactions import maybe_react
 from voice_transcription import handle_voice_transcription, is_transcription_request
 
-UNKNOWN_GROUP_NOTICE = (
-    "Если хотите воспользоваться функциями бота, обратитесь за помощью "
-    "к моему создателю @BIGBACA"
-)
-_last_unknown_group_notice: dict[int, float] = {}
 _pending_welcome_ages: dict[tuple[int, int], float] = {}
 _WELCOME_MESSAGES = (
     "Надеюсь, здесь тебе будет уютно — располагайся.",
@@ -154,18 +148,6 @@ def _parse_profile_group_id(text: str, current_group_id: int) -> int:
         return int(command_match.group(1))
     phrase_match = _PROFILE_GROUP_ID_RE.search(text)
     return int(phrase_match.group(1)) if phrase_match else current_group_id
-
-
-async def _send_unknown_group_notice(message: object, group_id: int) -> None:
-    now = time.monotonic()
-    previous = _last_unknown_group_notice.get(group_id, 0.0)
-    if now - previous < UNKNOWN_GROUP_NOTICE_SECONDS:
-        return
-    _last_unknown_group_notice[group_id] = now
-    try:
-        await message.reply_text(UNKNOWN_GROUP_NOTICE)
-    except TelegramError:
-        logging.exception("Не удалось уведомить о закрытом доступе в группе %s", group_id)
 
 
 async def _send_profile_messages(
@@ -300,12 +282,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     called = is_called(text)
     mentioned = _is_bot_mentioned(message, context.bot.username, context.bot.id)
 
-    try:
-        allowed = await database.is_group_allowed(group_id)
-    except Exception:
-        logging.exception("Не удалось проверить белый список группы %s", group_id)
-        return
-
     promo_match = _GROUP_PROMO_COMMAND_RE.fullmatch(text.strip())
     if promo_match is not None:
         try:
@@ -352,16 +328,16 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await message.reply_text("Не удалось активировать группу. Попробуй позже.")
         return
 
-    if not allowed:
-        if (
-            called
-            or replied_to_bot
-            or mentioned
-            or command
-            or profile_request
-            or group_profile_request
-        ):
-            await _send_unknown_group_notice(message, group_id)
+    try:
+        await database.add_allowed_group(group_id)
+        await database.set_group_membership(group_id, user.id, is_member=True)
+    except Exception:
+        logging.exception(
+            "Не удалось сохранить доступ или членство пользователя %s в группе %s.",
+            user.id,
+            group_id,
+        )
+        await message.reply_text("Не удалось проверить доступ к боту. Попробуй позже.")
         return
 
     if await image_manager.consume_setting_input(update, context):
@@ -708,10 +684,9 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ):
         return
     try:
-        if not await database.is_group_allowed(message.chat_id):
-            return
+        await database.add_allowed_group(message.chat_id)
     except Exception:
-        logging.exception("Не удалось проверить доступ группы %s для приветствия.", message.chat_id)
+        logging.exception("Не удалось зарегистрировать группу %s.", message.chat_id)
         return
 
     for member in message.new_chat_members:
@@ -719,6 +694,11 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             continue
         name = member.first_name or member.username or "новый участник"
         try:
+            await database.set_group_membership(
+                message.chat_id,
+                member.id,
+                is_member=True,
+            )
             await database.ensure_user(
                 member.id,
                 message.chat_id,

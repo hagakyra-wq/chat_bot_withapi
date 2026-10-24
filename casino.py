@@ -788,11 +788,42 @@ async def on_chat_member_update(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     member_update = update.chat_member
-    if member_update is None or str(member_update.chat.username or "").casefold() != "megurushka":
+    if member_update is None:
         return
-    status = getattr(member_update.new_chat_member.status, "value", member_update.new_chat_member.status)
-    if status in ("left", "kicked"):
-        await _handle_unsubscribe(context.bot, member_update.new_chat_member.user.id)
+    status = getattr(
+        member_update.new_chat_member.status,
+        "value",
+        member_update.new_chat_member.status,
+    )
+    member = member_update.new_chat_member.user
+    if (
+        member_update.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+        and not member.is_bot
+    ):
+        is_member = status in ("member", "administrator", "creator") or (
+            status == "restricted"
+            and bool(getattr(member_update.new_chat_member, "is_member", False))
+        )
+        try:
+            if is_member:
+                await database.add_allowed_group(member_update.chat.id)
+            await database.set_group_membership(
+                member_update.chat.id,
+                member.id,
+                is_member=is_member,
+            )
+        except Exception:
+            logging.exception(
+                "Не удалось обновить членство user_id=%s в группе %s.",
+                member.id,
+                member_update.chat.id,
+            )
+
+    if (
+        str(member_update.chat.username or "").casefold() == "megurushka"
+        and status in ("left", "kicked")
+    ):
+        await _handle_unsubscribe(context.bot, member.id)
 
 
 async def audit_subscription_bonuses(context: ContextTypes.DEFAULT_TYPE) -> None:
