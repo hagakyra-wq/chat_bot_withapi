@@ -12,8 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaAnimation,
     InputMediaPhoto,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ChatType
@@ -125,33 +124,20 @@ def _menu_button() -> InlineKeyboardButton:
     return InlineKeyboardButton("↩️ В меню", callback_data="casino:home")
 
 
-def _user_bottom_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("🎡 Колесо удачи"), KeyboardButton("🎒 Инвентарь")],
-            [KeyboardButton("🏪 Площадка"), KeyboardButton("👤 Мой профиль")],
-            [KeyboardButton("🎁 Бонус"), KeyboardButton("🏠 Главное меню")],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Выбери раздел",
-    )
-
-
-async def ensure_user_bottom_menu(
+async def remove_legacy_reply_menu(
     message: Any,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     if (
         message.chat.type != ChatType.PRIVATE
-        or context.user_data.get("user_bottom_menu_enabled")
+        or context.user_data.get("legacy_reply_menu_removed")
     ):
         return
     await message.reply_text(
-        "Меню разделов закреплено внизу чата.",
-        reply_markup=_user_bottom_menu(),
+        "Перешла на inline-меню под сообщениями.",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    context.user_data["user_bottom_menu_enabled"] = True
+    context.user_data["legacy_reply_menu_removed"] = True
 
 
 def _casino_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
@@ -271,15 +257,10 @@ async def open_main_menu(
     if message is None:
         return
     private = message.chat.type == ChatType.PRIVATE
-    if private:
-        context.user_data["user_bottom_menu_enabled"] = True
+    await remove_legacy_reply_menu(message, context)
     await message.reply_text(
-        "Главное меню Юбары. Выбери раздел кнопкой внизу:",
-        reply_markup=(
-            _user_bottom_menu()
-            if private
-            else _main_menu_keyboard(context, private=False)
-        ),
+        "Главное меню Юбары. Выбери раздел кнопкой ниже:",
+        reply_markup=_main_menu_keyboard(context, private=private),
     )
 
 
@@ -288,11 +269,10 @@ async def _return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     if query is None or query.message is None or user is None:
         return
-    await ensure_user_bottom_menu(query.message, context)
     private = query.message.chat.type == ChatType.PRIVATE
-    keyboard = None if private else _main_menu_keyboard(context, private=False)
+    keyboard = _main_menu_keyboard(context, private=private)
     text = (
-        "Главное меню Юбары. Выбери раздел кнопкой внизу чата:"
+        "Главное меню Юбары. Выбери раздел кнопкой ниже:"
         if private
         else "Главное меню Юбары:"
     )
@@ -1292,9 +1272,20 @@ async def on_game_callback(
     await query.answer()
     if user is None or query.message is None:
         return
-    await ensure_user_bottom_menu(query.message, context)
+    await remove_legacy_reply_menu(query.message, context)
     action = query.data or ""
     if action == "casino:home":
+        await _return_to_main_menu(update, context)
+        return
+    if action == "casino:cancel":
+        for key in (
+            "market_search_waiting",
+            "market_search_query",
+            "market_listing_item",
+            "market_listing_title_item",
+            "market_listing_price_cents",
+        ):
+            context.user_data.pop(key, None)
         await _return_to_main_menu(update, context)
         return
     if action in ("inv:noop", "mkt:noop"):
@@ -1498,8 +1489,10 @@ async def on_game_callback(
         context.user_data["market_search_waiting"] = True
         await query.message.reply_text(
             "Напиши, что искать: название, редкость, цену или seed. "
-            "Слова можно вводить в любом порядке; поиск приблизительный. "
-            "Для отмены отправь /cancel."
+            "Слова можно вводить в любом порядке; поиск приблизительный.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+            ),
         )
     elif action == "mkt:clear":
         context.user_data.pop("market_search_query", None)
@@ -1533,7 +1526,10 @@ async def on_game_callback(
             return
         context.user_data["market_listing_item"] = item_id
         await query.message.reply_text(
-            f"Укажи цену баннера #{item_id} в монетах (например, 12.50)."
+            f"Укажи цену баннера #{item_id} в монетах (например, 12.50).",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+            ),
         )
     elif action.startswith("mkt:b:"):
         lot_id = await _parse_callback_int(query, action.split(":")[2])
@@ -1601,11 +1597,21 @@ async def _handle_listing_price(
         return False
     match = _PRICE_RE.fullmatch(message.text or "")
     if match is None:
-        await message.reply_text("Укажи положительную цену, например 12.50.")
+        await message.reply_text(
+            "Укажи положительную цену, например 12.50.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+            ),
+        )
         return True
     cents = int(match.group(1)) * 100 + int((match.group(2) or "0").ljust(2, "0"))
     if cents <= 0:
-        await message.reply_text("Цена должна быть больше нуля.")
+        await message.reply_text(
+            "Цена должна быть больше нуля.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+            ),
+        )
         return True
     item_id = int(context.user_data["market_listing_item"])
     context.user_data.pop("market_listing_item", None)
@@ -1613,7 +1619,10 @@ async def _handle_listing_price(
     context.user_data["market_listing_price_cents"] = cents
     await message.reply_text(
         "Придумай название лота (до 48 символов), например «Розовый элитный». "
-        "Отправь «-», если хочешь оставить лот без названия."
+        "Отправь «-», если хочешь оставить лот без названия.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+        ),
     )
     return True
 
@@ -1644,7 +1653,10 @@ async def _handle_listing_title(
     ):
         await message.reply_text(
             "Название должно быть от 1 до 48 символов. "
-            "Или отправь «-», чтобы оставить лот без названия."
+            "Или отправь «-», чтобы оставить лот без названия.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+            ),
         )
         return True
     price_cents = context.user_data.get("market_listing_price_cents")
@@ -1711,7 +1723,13 @@ async def _handle_market_search_input(
         await message.reply_text("Поиск отменён.")
         return True
     if not query or len(query) > 100:
-        await message.reply_text("Запрос должен содержать от 1 до 100 символов.")
+        context.user_data["market_search_waiting"] = True
+        await message.reply_text(
+            "Запрос должен содержать от 1 до 100 символов.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="casino:cancel")]]
+            ),
+        )
         return True
     await _show_market(
         update,

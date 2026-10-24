@@ -36,10 +36,10 @@ import autoresponder
 import personal_account
 from banner_store import get_profile_banner, send_banner
 from casino import (
-    ensure_user_bottom_menu,
     handle_coin_promo_message,
     handle_game_message,
     maybe_award_temporary_owner_banner,
+    remove_legacy_reply_menu,
 )
 from config import (
     ADMIN_ID,
@@ -164,6 +164,9 @@ def _profile_keyboard(
             [
                 InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
                 InlineKeyboardButton("✏️ Изменить кличку", callback_data="profile:callsign"),
+            ],
+            [
+                InlineKeyboardButton("📝 Заполнить профиль", callback_data="profile:fill"),
             ],
             [
                 InlineKeyboardButton(
@@ -313,9 +316,31 @@ async def on_profile_callback(
         or query.message.chat_id != user.id
     ):
         return
-    await ensure_user_bottom_menu(query.message, context)
+    await remove_legacy_reply_menu(query.message, context)
 
     action = query.data or ""
+    if action == "profile:cancel":
+        context.user_data.pop("profile_edit_stage", None)
+        context.user_data.pop("profile_fill_stage", None)
+        if query.message.photo or query.message.animation:
+            await query.message.reply_text(
+                "Действие отменено.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К профилю", callback_data="profile:show")]]
+                ),
+            )
+        else:
+            await query.message.edit_text(
+                "Действие отменено.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ К профилю", callback_data="profile:show")]]
+                ),
+            )
+        try:
+            await _refresh_profile_card(query.message, user.id, context)
+        except Exception:
+            logging.exception("Не удалось обновить профиль после отмены user_id=%s.", user.id)
+        return
     if action.startswith("profile:stats:"):
         stats_period = action.removeprefix("profile:stats:")
         if stats_period not in ("d", "w", "m"):
@@ -368,11 +393,21 @@ async def on_profile_callback(
         return
     if action == "profile:callsign":
         context.user_data["profile_edit_stage"] = "callsign"
-        await query.message.reply_text("Отправь новую кличку одним сообщением.")
+        await query.message.reply_text(
+            "Отправь новую кличку одним сообщением.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")]]
+            ),
+        )
         return
     if action == "profile:fact":
         context.user_data["profile_edit_stage"] = "fact"
-        await query.message.reply_text("Отправь один факт, который нужно сохранить в профиле.")
+        await query.message.reply_text(
+            "Отправь один факт, который нужно сохранить в профиле.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")]]
+            ),
+        )
         return
     if action == "profile:fill":
         try:
@@ -390,7 +425,10 @@ async def on_profile_callback(
         await query.message.reply_text(
             "Как тебя называть? Ответь именем или нажми «Оставить как есть».",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Оставить как есть", callback_data="profile:skip:name")]]
+                [
+                    [InlineKeyboardButton("Оставить как есть", callback_data="profile:skip:name")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                ]
             ),
         )
         return
@@ -433,11 +471,14 @@ async def on_profile_callback(
         await query.message.reply_text(
             "Какой у тебя пол? Это нужно, чтобы я обращалась правильно.",
             reply_markup=InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton("Парень", callback_data="profile:gender:парень"),
-                    InlineKeyboardButton("Девушка", callback_data="profile:gender:девушка"),
-                    InlineKeyboardButton("Пропустить", callback_data="profile:gender:skip"),
-                ]]
+                [
+                    [
+                        InlineKeyboardButton("Парень", callback_data="profile:gender:парень"),
+                        InlineKeyboardButton("Девушка", callback_data="profile:gender:девушка"),
+                        InlineKeyboardButton("Пропустить", callback_data="profile:gender:skip"),
+                    ],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                ]
             ),
         )
         return
@@ -465,7 +506,10 @@ async def on_profile_callback(
         await query.message.reply_text(
             "Сколько тебе лет? Можно ответить числом или пропустить.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Пропустить", callback_data="profile:skip:age")]]
+                [
+                    [InlineKeyboardButton("Пропустить", callback_data="profile:skip:age")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                ]
             ),
         )
         return
@@ -475,7 +519,12 @@ async def on_profile_callback(
             await query.message.reply_text("Эта кнопка уже устарела. Открой профиль заново.")
             return
         context.user_data.pop("profile_fill_stage", None)
-        await query.message.reply_text("Профиль заполнен. Сведения можно изменить, пройдя опрос снова.")
+        await query.message.reply_text(
+            "Профиль заполнен. Сведения можно изменить, пройдя опрос снова.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Открыть профиль", callback_data="profile:show")]]
+            ),
+        )
         try:
             await _refresh_profile_card(query.message, user.id, context)
         except Exception:
@@ -3594,6 +3643,7 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logging.exception("Не удалось проверить право администратора в личном чате")
             return
         ADMIN_PANEL_USERS.discard(user.id)
+    await remove_legacy_reply_menu(message, context)
     if await handle_coin_promo_message(update):
         return
     try:
@@ -3609,8 +3659,20 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _private_dialog(update, context, message.text)
         return
     await maybe_award_temporary_owner_banner(update, context)
-    if re.fullmatch(r"/start(?:@\w+)?", message.text.strip(), re.IGNORECASE) is None:
-        await ensure_user_bottom_menu(message, context)
+    if re.fullmatch(r"/cancel(?:@\w+)?", message.text.strip(), re.IGNORECASE):
+        context.user_data.pop("profile_edit_stage", None)
+        context.user_data.pop("profile_fill_stage", None)
+        context.user_data.pop("market_search_waiting", None)
+        context.user_data.pop("market_listing_item", None)
+        context.user_data.pop("market_listing_title_item", None)
+        context.user_data.pop("market_listing_price_cents", None)
+        await message.reply_text(
+            "Текущий шаг отменён.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Главное меню", callback_data="casino:home")]]
+            ),
+        )
+        return
     edit_stage = context.user_data.get("profile_edit_stage")
     if edit_stage is not None:
         context.user_data.pop("profile_edit_stage", None)
@@ -3669,7 +3731,15 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             message.text.strip(),
         ).strip()
         if not nickname or nickname.startswith("/") or len(nickname) > 80:
-            await message.reply_text("Введи имя длиной до 80 символов или нажми «Оставить как есть».")
+            await message.reply_text(
+                "Введи имя длиной до 80 символов или нажми «Оставить как есть».",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("Оставить как есть", callback_data="profile:skip:name")],
+                        [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                    ]
+                ),
+            )
             return
         try:
             await database.update_user_profile(
@@ -3685,11 +3755,14 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text(
             "Какой у тебя пол? Это нужно, чтобы я обращалась правильно.",
             reply_markup=InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton("Парень", callback_data="profile:gender:парень"),
-                    InlineKeyboardButton("Девушка", callback_data="profile:gender:девушка"),
-                    InlineKeyboardButton("Пропустить", callback_data="profile:gender:skip"),
-                ]]
+                [
+                    [
+                        InlineKeyboardButton("Парень", callback_data="profile:gender:парень"),
+                        InlineKeyboardButton("Девушка", callback_data="profile:gender:девушка"),
+                        InlineKeyboardButton("Пропустить", callback_data="profile:gender:skip"),
+                    ],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                ]
             ),
         )
         return
@@ -3700,11 +3773,27 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             re.IGNORECASE,
         )
         if age_match is None:
-            await message.reply_text("Введи возраст числом от 1 до 120 или нажми «Пропустить».")
+            await message.reply_text(
+                "Введи возраст числом от 1 до 120 или нажми «Пропустить».",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("Пропустить", callback_data="profile:skip:age")],
+                        [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                    ]
+                ),
+            )
             return
         age = int(age_match.group(1))
         if not 1 <= age <= 120:
-            await message.reply_text("Возраст должен быть от 1 до 120 лет или нажми «Пропустить».")
+            await message.reply_text(
+                "Возраст должен быть от 1 до 120 лет или нажми «Пропустить».",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("Пропустить", callback_data="profile:skip:age")],
+                        [InlineKeyboardButton("❌ Отмена", callback_data="profile:cancel")],
+                    ]
+                ),
+            )
             return
         try:
             await database.update_user_profile(user.id, message.chat_id, age=age)
@@ -3713,7 +3802,12 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await message.reply_text("Не удалось сохранить возраст. Попробуй ещё раз.")
             return
         context.user_data.pop("profile_fill_stage", None)
-        await message.reply_text("Профиль заполнен. Спасибо, теперь я буду обращаться правильно.")
+        await message.reply_text(
+            "Профиль заполнен. Спасибо, теперь я буду обращаться правильно.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Открыть профиль", callback_data="profile:show")]]
+            ),
+        )
         try:
             await _refresh_profile_card(message, user.id, context)
         except Exception:
