@@ -56,6 +56,7 @@ from casino import (
     audit_subscription_bonuses,
     on_chat_member_update,
     on_game_callback,
+    test_banner_command,
 )
 from handlers_group import (
     on_group_activity,
@@ -730,6 +731,13 @@ def build_application() -> Application:
     )
     application.add_handler(
         CommandHandler("break", break_command, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler(
+            "testbanner",
+            test_banner_command,
+            filters=filters.ChatType.PRIVATE,
+        )
     )
     application.add_handler(build_admin_conversation_handler())
     application.add_handler(build_delete_all_data_handler())

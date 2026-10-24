@@ -75,6 +75,71 @@ class _BannerRenderQueue:
 _render_queue = _BannerRenderQueue()
 
 
+async def render_banner_preview(
+    *,
+    priority: int = 0,
+    **arguments: Any,
+) -> io.BytesIO:
+    return await _render_queue.render(priority, **arguments)
+
+
+async def _recover_banner_from_backup(
+    bot: Any,
+    backup_msg_id: int,
+    *,
+    animated: bool,
+    label: str,
+) -> tuple[str, int] | None:
+    try:
+        backup_copy = await bot.forward_message(
+            chat_id=BACKUP_CHANNEL_ID,
+            from_chat_id=BACKUP_CHANNEL_ID,
+            message_id=backup_msg_id,
+            disable_notification=True,
+        )
+    except TelegramError:
+        logging.warning(
+            "Не удалось восстановить %s из сообщения бэкапа message_id=%s; "
+            "будет выполнена повторная генерация.",
+            label,
+            backup_msg_id,
+            exc_info=True,
+        )
+        return None
+
+    if animated:
+        media = backup_copy.animation
+        file_id = media.file_id if media is not None else None
+    else:
+        file_id = backup_copy.photo[-1].file_id if backup_copy.photo else None
+    if not file_id:
+        try:
+            await bot.delete_message(BACKUP_CHANNEL_ID, backup_copy.message_id)
+        except TelegramError:
+            logging.warning(
+                "Не удалось удалить некорректную копию бэкапа message_id=%s.",
+                backup_copy.message_id,
+                exc_info=True,
+            )
+        logging.warning(
+            "В сообщении бэкапа message_id=%s нет ожидаемого изображения для %s; "
+            "будет выполнена повторная генерация.",
+            backup_msg_id,
+            label,
+        )
+        return None
+    return str(file_id), int(backup_copy.message_id)
+
+
+async def _delete_replaced_backup(bot: Any, backup_msg_id: int | None, label: str) -> None:
+    if not backup_msg_id:
+        return
+    try:
+        await bot.delete_message(BACKUP_CHANNEL_ID, int(backup_msg_id))
+    except (TelegramError, ValueError):
+        logging.exception("Не удалось удалить предыдущий бэкап %s.", label)
+
+
 async def _avatar_for_user(bot: Any, user_id: int) -> tuple[bytes | None, str | None]:
     photos = await bot.get_user_profile_photos(user_id, limit=1)
     if not photos.photos or not photos.photos[0]:
@@ -116,6 +181,37 @@ async def _render_and_backup(
     file_id = str(item.get("file_id") or "")
     if file_id and current_hash == digest:
         return {**item, "content_hash": digest}
+    old_backup_id = item.get("backup_msg_id")
+    if (
+        not file_id
+        and old_backup_id
+        and current_hash == digest
+    ):
+        recovered = await _recover_banner_from_backup(
+            bot,
+            int(old_backup_id),
+            animated=int(item["level"]) == 6,
+            label=f"баннер item_id={item['item_id']}",
+        )
+        if recovered is not None:
+            recovered_file_id, recovered_backup_id = recovered
+            await database.set_banner_item_rendering(
+                int(item["item_id"]),
+                file_id=recovered_file_id,
+                backup_msg_id=recovered_backup_id,
+                content_hash=digest,
+            )
+            await _delete_replaced_backup(
+                bot,
+                int(old_backup_id),
+                f"баннера item_id={item['item_id']}",
+            )
+            updated = await database.get_banner_item(int(item["item_id"]))
+            if updated is None:
+                raise RuntimeError(
+                    f"Баннер item_id={item['item_id']} исчез после восстановления из бэкапа."
+                )
+            return updated
     rendered_at = float(item.get("rendered_at") or 0)
     if (
         not force
@@ -161,21 +257,17 @@ async def _render_and_backup(
             raise RuntimeError("Telegram принял изображение без данных photo.")
         new_file_id = sent.photo[-1].file_id
 
-    old_backup_id = item.get("backup_msg_id")
     await database.set_banner_item_rendering(
         int(item["item_id"]),
         file_id=new_file_id,
         backup_msg_id=sent.message_id,
         content_hash=digest,
     )
-    if old_backup_id:
-        try:
-            await bot.delete_message(BACKUP_CHANNEL_ID, int(old_backup_id))
-        except (TelegramError, ValueError):
-            logging.exception(
-                "Не удалось удалить предыдущую копию баннера item_id=%s.",
-                item["item_id"],
-            )
+    await _delete_replaced_backup(
+        bot,
+        int(old_backup_id) if old_backup_id else None,
+        f"баннера item_id={item['item_id']}",
+    )
     updated = await database.get_banner_item(int(item["item_id"]))
     if updated is None:
         raise RuntimeError(f"Баннер item_id={item['item_id']} исчез после генерации.")
@@ -206,6 +298,32 @@ async def ensure_market_banner_file(
     if isinstance(file_id, str) and file_id:
         return item
     item_id = int(item["item_id"])
+    old_backup_id = item.get("market_backup_msg_id")
+    if old_backup_id:
+        recovered = await _recover_banner_from_backup(
+            bot,
+            int(old_backup_id),
+            animated=int(item["level"]) == 6,
+            label=f"превью лота item_id={item_id}",
+        )
+        if recovered is not None:
+            recovered_file_id, recovered_backup_id = recovered
+            await database.set_market_banner_rendering(
+                item_id,
+                file_id=recovered_file_id,
+                backup_msg_id=recovered_backup_id,
+            )
+            await _delete_replaced_backup(
+                bot,
+                int(old_backup_id),
+                f"превью лота item_id={item_id}",
+            )
+            updated = await database.get_banner_item(item_id)
+            if updated is None:
+                raise RuntimeError(
+                    f"Баннер item_id={item_id} исчез после восстановления превью."
+                )
+            return updated
     buffer = await _render_queue.render(
         priority,
         user_id=int(item["user_id"]),
@@ -246,6 +364,11 @@ async def ensure_market_banner_file(
         item_id,
         file_id=new_file_id,
         backup_msg_id=sent.message_id,
+    )
+    await _delete_replaced_backup(
+        bot,
+        int(old_backup_id) if old_backup_id else None,
+        f"превью лота item_id={item_id}",
     )
     updated = await database.get_banner_item(item_id)
     if updated is None:
@@ -333,6 +456,33 @@ async def get_group_owner_banner(
     file_id = str(item.get("file_id") or "")
     if file_id and item.get("content_hash") == digest:
         return file_id, True
+    old_backup_id = item.get("backup_msg_id")
+    if not file_id and old_backup_id and item.get("content_hash") == digest:
+        recovered = await _recover_banner_from_backup(
+            bot,
+            int(old_backup_id),
+            animated=True,
+            label=f"групповой баннер group_id={group_id}",
+        )
+        if recovered is not None:
+            recovered_file_id, recovered_backup_id = recovered
+            saved = await database.set_group_owner_banner_rendering(
+                group_id,
+                owner_user_id,
+                file_id=recovered_file_id,
+                content_hash=digest,
+                backup_msg_id=recovered_backup_id,
+            )
+            if not saved:
+                raise RuntimeError(
+                    f"Баннер владельца group_id={group_id} изменился во время восстановления."
+                )
+            await _delete_replaced_backup(
+                bot,
+                int(old_backup_id),
+                f"группового баннера group_id={group_id}",
+            )
+            return recovered_file_id, True
 
     buffer = await _render_queue.render(
         1,
@@ -353,7 +503,6 @@ async def get_group_owner_banner(
     )
     if sent.animation is None:
         raise RuntimeError("Telegram принял баннер владельца без данных animation.")
-    old_backup_id = item.get("backup_msg_id")
     saved = await database.set_group_owner_banner_rendering(
         group_id,
         owner_user_id,
@@ -365,14 +514,11 @@ async def get_group_owner_banner(
         raise RuntimeError(
             f"Баннер владельца group_id={group_id} изменился во время рендера."
         )
-    if old_backup_id:
-        try:
-            await bot.delete_message(BACKUP_CHANNEL_ID, int(old_backup_id))
-        except (TelegramError, ValueError):
-            logging.exception(
-                "Не удалось удалить предыдущую копию баннера владельца group_id=%s.",
-                group_id,
-            )
+    await _delete_replaced_backup(
+        bot,
+        int(old_backup_id) if old_backup_id else None,
+        f"группового баннера group_id={group_id}",
+    )
     return sent.animation.file_id, True
 
 

@@ -24,6 +24,7 @@ from banner_store import (
     ensure_banner_file,
     ensure_market_banner_file,
     get_profile_banner,
+    render_banner_preview,
     send_banner,
 )
 from config import (
@@ -1022,13 +1023,12 @@ async def _show_market(
     rows.append([_menu_button()])
     preset_name = PRESET_NAMES.get(str(item.get("preset") or ""), "")
     title = html.escape(str(lot.get("title") or "").strip())
-    preset_name = html.escape(preset_name)
+    pattern_label = html.escape(preset_name or "Стандартный")
     text = (
         f"🏪 Лот #{lot['lot_id']}"
         f"{f' · {title}' if title else ''}\n"
-        f"{_RARITY[level]}"
-        f"{f' · {preset_name}' if preset_name else ''}\n"
-        f"Seed: <code>{html.escape(str(item['seed']))}</code>\n"
+        f"{_RARITY[level]}\n"
+        f"Паттерн: {pattern_label}\n"
         f"Цена: {_coins(int(lot['price_cents']))} монет\n"
         "Цена включает комиссию площадки 20%."
     )
@@ -1961,3 +1961,73 @@ async def handle_coin_promo_message(update: Update) -> bool:
     else:
         await message.reply_text("Промокод не найден или указан неверно.")
     return True
+
+
+async def test_banner_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None or message.chat.type != ChatType.PRIVATE:
+        return
+    if user.id != ADMIN_ID and not await database.is_admin_user(user.id):
+        return
+
+    args = list(context.args or [])
+    try:
+        level = int(args[0]) if args else 6
+    except ValueError:
+        await message.reply_text("Использование: /testbanner [уровень 1-6] [паттерн]")
+        return
+    if (
+        not 1 <= level <= 6
+        or len(args) > 2
+        or (len(args) == 2 and level != 6)
+    ):
+        await message.reply_text("Использование: /testbanner [уровень 1-6] [паттерн]")
+        return
+
+    seed = secrets.token_hex(16)
+    preset = args[1] if len(args) == 2 else pick_preset(
+        make_digest(user.id, item_seed=seed)
+    )
+    if preset not in PRESET_NAMES:
+        await message.reply_text(
+            "Неизвестный паттерн. Доступные: "
+            + ", ".join(sorted(PRESET_NAMES))
+        )
+        return
+
+    progress = await message.reply_text("Готовлю тестовый баннер…")
+    try:
+        buffer = await render_banner_preview(
+            priority=0,
+            user_id=user.id,
+            name=user.full_name,
+            tag=user.username,
+            level=level,
+            item_seed=seed,
+            preset=preset,
+            salt="yubari",
+            show_name=True,
+        )
+        await send_banner(
+            context.bot,
+            message.chat_id,
+            buffer,
+            animated=level == 6,
+            caption=(
+                f"🧪 Тестовый баннер · уровень {level}"
+                f"{f' · паттерн {PRESET_NAMES[preset]}' if level == 6 else ''}"
+            ),
+        )
+        await progress.delete()
+    except Exception:
+        logging.exception(
+            "Не удалось создать тестовый баннер user_id=%s level=%s.",
+            user.id,
+            level,
+        )
+        await progress.edit_text("Не удалось создать тестовый баннер. Ошибка записана в журнал.")
+        raise
