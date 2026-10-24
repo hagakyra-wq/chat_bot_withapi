@@ -282,18 +282,21 @@ async def _return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     if query is None or query.message is None or user is None:
         return
     await ensure_user_bottom_menu(query.message, context)
-    keyboard = _main_menu_keyboard(
-        context,
-        private=query.message.chat.type == ChatType.PRIVATE,
+    private = query.message.chat.type == ChatType.PRIVATE
+    keyboard = None if private else _main_menu_keyboard(context, private=False)
+    text = (
+        "Главное меню Юбары. Выбери раздел кнопкой внизу чата:"
+        if private
+        else "Главное меню Юбары:"
     )
     if query.message.caption is not None:
         await query.message.edit_caption(
-            caption="Главное меню Юбары:",
+            caption=text,
             reply_markup=keyboard,
         )
     else:
         await query.message.edit_text(
-            "Главное меню Юбары:",
+            text,
             reply_markup=keyboard,
         )
 
@@ -1670,7 +1673,6 @@ async def handle_coin_promo_message(update: Update) -> bool:
     if match is None:
         return False
     if message.chat.type != ChatType.PRIVATE:
-        await message.reply_text("Активируй промокод в личном чате с Юбарой.")
         return True
     try:
         result, credited, balance = await database.redeem_coin_promo_code(
