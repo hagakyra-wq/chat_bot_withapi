@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from . import banner
 from .bn_common import H, W, font, lerp, make_digest
 
-OUT_W = 900
+OUT_W = 1200
 TAU = 2 * math.pi
 
 
@@ -977,7 +977,7 @@ def pick_preset(digest):
 
 # =============================================================== главная функция
 def scene_for(user_id, preset, salt="yubari", item_seed=None):
-    """Только фоновая сцена пресета: render(t) -> PIL RGB 900x472."""
+    """Только фоновая сцена пресета: render(t) -> PIL RGB 1200x630."""
     digest = make_digest(user_id, salt, False, item_seed)
     _, _, hue, builder = PRESET_BY_ID[preset]
     P = banner.build_parts(digest, "x", None, 6, None, hue=hue)
@@ -1075,7 +1075,10 @@ def make_animated_banner(user_id, name, tag=None, preset=None, salt="yubari", fr
         arr[y0:y1, x0:x1] += Mc * (i1 * h1c * .95 + i2 * h2c * .8 + base_c * pulse)
         pos = -.15 * span + t * 1.3 * span
         arr += (np.exp(-((sweep - pos) / (span * .05)) ** 2) * 50)[..., None] * np.array(gold, np.float32) / 255.0
-        seq.append(Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)))
+        frame = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+        seq.append(
+            frame.filter(ImageFilter.UnsharpMask(radius=1.1, percent=120, threshold=4))
+        )
 
     # общая палитра по нескольким кадрам - цвета не «прыгают»
     pick = [seq[int(j * frames / 6)] for j in range(6)]

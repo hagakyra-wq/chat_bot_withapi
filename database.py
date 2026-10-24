@@ -27,7 +27,6 @@ from config import (
     DATABASE_SHARD_THRESHOLD_BYTES,
     HISTORY_ENCRYPTION_KEY,
     MOSCOW_TIMEZONE,
-    TEMPORARY_OWNER_BANNER_USERNAME,
 )
 
 _write_lock = asyncio.Lock()
@@ -3241,77 +3240,6 @@ async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
-
-
-async def ensure_temporary_owner_banner_item(
-    user_id: int,
-    username: str | None,
-    *,
-    seed: str,
-    preset: str,
-) -> dict[str, Any] | None:
-    if (
-        username is None
-        or username.lstrip("@").casefold()
-        != TEMPORARY_OWNER_BANNER_USERNAME.casefold()
-    ):
-        return None
-    async with _write_lock:
-        async with _connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                "SELECT value FROM meta WHERE key = ?",
-                (_OWNER_BANNER_USER_ID_META_KEY,),
-            )
-            authorized = await cursor.fetchone()
-            if authorized is not None and int(authorized["value"]) != user_id:
-                await db.rollback()
-                return None
-            if authorized is None:
-                await db.execute(
-                    "INSERT INTO meta(key, value) VALUES (?, ?)",
-                    (_OWNER_BANNER_USER_ID_META_KEY, str(user_id)),
-                )
-            cursor = await db.execute(
-                """
-                SELECT item_id FROM banner_items
-                WHERE user_id = ? AND source = 'owner'
-                ORDER BY item_id LIMIT 1
-                """,
-                (user_id,),
-            )
-            existing = await cursor.fetchone()
-            if existing is None:
-                cursor = await db.execute(
-                    """
-                    INSERT INTO banner_items(
-                        user_id, level, seed, preset, source, is_active
-                    )
-                    VALUES (?, 6, ?, ?, 'owner', 0)
-                    """,
-                    (user_id, seed, preset),
-                )
-                item_id = int(cursor.lastrowid)
-            else:
-                item_id = int(existing["item_id"])
-            await db.execute(
-                "UPDATE banner_items SET is_active = 0 "
-                "WHERE user_id = ? AND is_active = 1",
-                (user_id,),
-            )
-            await db.execute(
-                "UPDATE banner_items SET is_active = 1 "
-                "WHERE item_id = ? AND user_id = ?",
-                (item_id, user_id),
-            )
-            await db.commit()
-        _record_write()
-    item = await get_banner_item(item_id)
-    if item is None:
-        raise sqlite3.DatabaseError(
-            f"Не удалось подготовить временный баннер user_id={user_id}."
-        )
-    return item
 
 
 async def get_user_banner_items(

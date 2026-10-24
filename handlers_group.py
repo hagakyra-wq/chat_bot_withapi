@@ -26,7 +26,6 @@ from banner_store import get_profile_banner
 from casino import (
     handle_coin_promo_message,
     handle_game_message,
-    maybe_award_temporary_owner_banner,
 )
 from config import (
     ADMIN_ID,
@@ -702,7 +701,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logging.exception("Ошибка сохранения группового сообщения в SQLite")
         return
 
-    await maybe_award_temporary_owner_banner(update, context)
     if await handle_game_message(update, context):
         return
 

@@ -36,7 +36,6 @@ from config import (
     CASINO_SPIN_COST_CENTS,
     CASINO_UNSUBSCRIBE_PENALTY_CENTS,
     DICE_ANIMATION_DELAY_SECONDS,
-    TEMPORARY_OWNER_BANNER_USERNAME,
 )
 from yubari_banner import PRESET_NAMES, make_digest, pick_preset
 
@@ -1962,57 +1961,3 @@ async def handle_coin_promo_message(update: Update) -> bool:
     else:
         await message.reply_text("Промокод не найден или указан неверно.")
     return True
-
-
-async def maybe_award_temporary_owner_banner(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    message = update.effective_message
-    user = update.effective_user
-    if message is None or user is None or message.chat.type not in (
-        ChatType.PRIVATE,
-        ChatType.GROUP,
-        ChatType.SUPERGROUP,
-    ):
-        return
-    if (
-        user.username is None
-        or user.username.casefold() != TEMPORARY_OWNER_BANNER_USERNAME.casefold()
-    ):
-        return
-    checked: set[int] = context.application.bot_data.setdefault(
-        "banner_owner_checks",
-        set(),
-    )
-    if user.id in checked:
-        return
-    checked.add(user.id)
-    try:
-        active_item = await database.get_active_banner_item(user.id)
-        if message.chat.type == ChatType.PRIVATE:
-            await database.ensure_user(
-                user.id,
-                message.chat_id,
-                user.username,
-                user.first_name or user.username,
-            )
-        seed = secrets.token_hex(16)
-        item = await database.ensure_temporary_owner_banner_item(
-            user.id,
-            user.username,
-            seed=seed,
-            preset=pick_preset(make_digest(user.id, item_seed=seed)),
-        )
-        if item is not None:
-            await ensure_banner_file(context.bot, item, priority=0)
-            if active_item is None or active_item.get("source") != "owner":
-                await message.reply_text(
-                    "✨ Легендарный баннер добавлен в инвентарь и экипирован."
-                )
-    except Exception:
-        checked.discard(user.id)
-        logging.exception(
-            "Не удалось выдать и экипировать временный баннер user_id=%s.",
-            user.id,
-        )

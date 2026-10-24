@@ -38,7 +38,6 @@ from banner_store import get_profile_banner, send_banner
 from casino import (
     handle_coin_promo_message,
     handle_game_message,
-    maybe_award_temporary_owner_banner,
     remove_legacy_reply_menu,
 )
 from config import (
@@ -3658,7 +3657,6 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not has_access:
         await _private_dialog(update, context, message.text)
         return
-    await maybe_award_temporary_owner_banner(update, context)
     if re.fullmatch(r"/cancel(?:@\w+)?", message.text.strip(), re.IGNORECASE):
         context.user_data.pop("profile_edit_stage", None)
         context.user_data.pop("profile_fill_stage", None)
