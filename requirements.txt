@@ -7,3 +7,5 @@ Telethon==1.42.0
 qrcode[pil]==8.2
 google-genai==2.24.0
 cryptography==50.0.1
+numpy>=1.26,<3
+pillow>=10,<13

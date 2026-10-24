@@ -18,6 +18,7 @@ from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -38,6 +39,7 @@ from config import (
     BACKUP_CHANNEL_ID,
     BACKUP_INTERVAL_SECONDS,
     BACKUP_MAX_DOWNLOAD_SIZE,
+    CASINO_BONUS_AUDIT_INTERVAL_SECONDS,
     DATABASE_ARCHIVE_DIR,
     DATABASE_BACKUP_PATH,
     DATABASE_PATH,
@@ -47,6 +49,11 @@ from config import (
     TELEGRAM_TOKEN,
 )
 from duel import handle_player_duel_callback
+from casino import (
+    audit_subscription_bonuses,
+    on_chat_member_update,
+    on_game_callback,
+)
 from handlers_group import (
     on_group_message,
     on_message_reaction,
@@ -59,9 +66,11 @@ from handlers_pm import (
     build_delete_all_data_handler,
     build_history_conversation_handler,
     build_personal_autoresponder_conversation_handler,
+    on_profile_callback,
     on_private_message,
 )
 from images import create_profile_card, on_image_callback, stop_image_jobs
+from banner_store import stop_banner_render_queue
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -252,6 +261,12 @@ async def _post_init(application: Application) -> None:
     )
     restored_info = await _restore_database(application.bot)
     await database.initialize()
+    recovered_rounds = await database.recover_pending_casino_rounds()
+    if recovered_rounds:
+        logging.warning(
+            "Возвращены монеты за незавершённые крутки: %s.",
+            recovered_rounds,
+        )
     await database.purge_private_message_history()
     await database.rotate_messages_if_needed()
     await _restore_user_sessions(application.bot)
@@ -277,6 +292,12 @@ async def _post_init(application: Application) -> None:
         _daily_duel_mining_job,
         time=datetime_time(0, 5, tzinfo=PERSONAL_ACCOUNT_TIMEZONE),
         name="daily-duel-mining",
+    )
+    application.job_queue.run_repeating(
+        audit_subscription_bonuses,
+        interval=CASINO_BONUS_AUDIT_INTERVAL_SECONDS,
+        first=CASINO_BONUS_AUDIT_INTERVAL_SECONDS,
+        name="subscription-bonus-audit",
     )
     await autoresponder.initialize(application)
     await send_channel_event(
@@ -470,6 +491,8 @@ async def _backup_profile_banners(bot: object, caption: str) -> None:
         return
     for profile in profiles:
         user_id = int(profile["user_id"])
+        if await database.get_active_banner_item(user_id) is not None:
+            continue
         nickname = str(profile["nickname"])[:48]
         decoration = str(profile["decoration"])
         signature = hashlib.sha256(
@@ -602,6 +625,7 @@ async def _post_shutdown(application: Application) -> None:
     except Exception:
         logging.exception("Не удалось корректно отключить Telegram user-сессию.")
     await stop_image_jobs()
+    await stop_banner_render_queue()
     await _perform_backup(application.bot)
     log_handler = application.bot_data.pop("channel_log_handler", None)
     if isinstance(log_handler, TelegramChannelLogHandler):
@@ -628,10 +652,22 @@ def build_application() -> Application:
     )
     application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
     application.add_handler(
+        CallbackQueryHandler(
+            on_game_callback,
+            pattern=r"^(?:casino:|inv:|menu:inv|mkt:|bonus:)",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(on_profile_callback, pattern=r"^profile:")
+    )
+    application.add_handler(
         CallbackQueryHandler(on_welcome_callback, pattern=r"^(?:wg|wa):")
     )
     application.add_handler(
         TypeHandler(MessageReactionUpdated, on_message_reaction)
+    )
+    application.add_handler(
+        ChatMemberHandler(on_chat_member_update, ChatMemberHandler.CHAT_MEMBER)
     )
     application.add_handler(
         CallbackQueryHandler(handle_player_duel_callback, pattern=r"^pvp:")

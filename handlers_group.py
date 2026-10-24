@@ -14,6 +14,8 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+from banner_store import get_profile_banner
+from casino import handle_game_message, maybe_award_group_owner
 from config import (
     ADMIN_ID,
     AVAILABLE_REACTIONS,
@@ -31,6 +33,7 @@ from images import create_profile_card, extract_image_request, image_manager, is
 from llm import (
     build_prompt,
     extract_reported_age,
+    extract_reported_nickname,
     extract_summary_period_minutes,
     generate_reply,
     generate_summary,
@@ -169,7 +172,8 @@ async def _send_profile_messages(
     message: object,
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
-    profile_photo: BytesIO | None = None,
+    profile_photo: BytesIO | str | None = None,
+    profile_animated: bool = False,
 ) -> None:
     chunks: list[str] = []
     current = ""
@@ -185,7 +189,10 @@ async def _send_profile_messages(
         chunks = [text]
     if profile_photo is not None and chunks:
         caption = chunks.pop(0)
-        sent = await message.reply_photo(photo=profile_photo, caption=caption)
+        if profile_animated:
+            sent = await message.reply_animation(animation=profile_photo, caption=caption)
+        else:
+            sent = await message.reply_photo(photo=profile_photo, caption=caption)
         await database.save_message(
             message.chat_id,
             context.bot.id,
@@ -433,6 +440,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             _user_name(user),
             is_bot=user.is_bot,
         )
+        reported_nickname = extract_reported_nickname(text)
+        if reported_nickname is not None:
+            await database.update_user_profile(
+                user.id,
+                group_id,
+                callsign=reported_nickname,
+            )
         person = await database.get_user_data(user.id, group_id)
         if person is None:
             logging.error("Профиль пользователя %s не создан в группе %s", user.id, group_id)
@@ -455,6 +469,10 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     except Exception:
         logging.exception("Ошибка сохранения группового сообщения в SQLite")
+        return
+
+    await maybe_award_group_owner(update, context)
+    if await handle_game_message(update, context):
         return
 
     if is_transcription_request(text, message):
@@ -543,20 +561,30 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     else None
                 ),
             )
-            profile_photo = None
+            profile_photo: BytesIO | str | None = None
+            profile_animated = False
             if not group_profile_request:
-                decoration = await database.get_or_create_profile_decoration(user.id)
-                nickname = str(
-                    person.get("callsign")
-                    or person.get("display_name")
-                    or _user_name(user)
+                media = await get_profile_banner(
+                    context.bot,
+                    user.id,
+                    profile=await database.get_global_profile(user.id),
                 )
-                profile_photo = create_profile_card(nickname, decoration)
+                if media is not None:
+                    profile_photo, profile_animated = media
+                else:
+                    decoration = await database.get_or_create_profile_decoration(user.id)
+                    nickname = str(
+                        person.get("callsign")
+                        or person.get("display_name")
+                        or _user_name(user)
+                    )
+                    profile_photo = create_profile_card(nickname, decoration)
             await _send_profile_messages(
                 message,
                 context,
                 answer,
                 profile_photo,
+                profile_animated,
             )
             await maybe_react(message)
             return

@@ -160,6 +160,98 @@ async def initialize() -> None:
                     last_mined_on TEXT NOT NULL,
                     is_bot INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS banner_items (
+                    item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL CHECK(level BETWEEN 1 AND 6),
+                    seed TEXT NOT NULL,
+                    preset TEXT,
+                    source TEXT NOT NULL,
+                    obtained_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    file_id TEXT,
+                    backup_msg_id INTEGER,
+                    content_hash TEXT,
+                    rendered_at REAL,
+                    is_active INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_banner_items_user
+                    ON banner_items(user_id, obtained_at DESC, item_id DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_banner_items_active_user
+                    ON banner_items(user_id) WHERE is_active = 1;
+                CREATE TABLE IF NOT EXISTS casino_rounds (
+                    round_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    cost_cents INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'failed')),
+                    results TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_casino_rounds_pending_user
+                    ON casino_rounds(user_id) WHERE status = 'pending';
+                CREATE TABLE IF NOT EXISTS market_lots (
+                    lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL UNIQUE,
+                    seller_id INTEGER NOT NULL,
+                    price_cents INTEGER NOT NULL CHECK(price_cents > 0),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL CHECK(status IN ('open', 'sold', 'withdrawn'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_market_lots_open
+                    ON market_lots(status, created_at DESC);
+                CREATE TABLE IF NOT EXISTS bonus_claims (
+                    claim_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    claimed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL CHECK(status IN ('subscribed', 'unsubscribed')),
+                    penalized_at TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_bonus_claims_user
+                    ON bonus_claims(user_id, claim_id DESC);
+                CREATE TRIGGER IF NOT EXISTS dirty_banner_items_insert
+                AFTER INSERT ON banner_items BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_banner_items_update
+                AFTER UPDATE ON banner_items BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_banner_items_delete
+                AFTER DELETE ON banner_items BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_casino_rounds_insert
+                AFTER INSERT ON casino_rounds BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_casino_rounds_update
+                AFTER UPDATE ON casino_rounds BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_market_lots_insert
+                AFTER INSERT ON market_lots BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_market_lots_update
+                AFTER UPDATE ON market_lots BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_bonus_claims_insert
+                AFTER INSERT ON bonus_claims BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_bonus_claims_update
+                AFTER UPDATE ON bonus_claims BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
                 CREATE TRIGGER IF NOT EXISTS dirty_image_settings_insert
                 AFTER INSERT ON image_settings BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
@@ -2513,3 +2605,667 @@ def reset_backup_state() -> None:
     global _dirty_generation, _synced_generation
     _dirty_generation = 0
     _synced_generation = 0
+
+
+class InsufficientCasinoBalanceError(ValueError):
+    """The player's balance cannot cover a casino round."""
+
+
+class ActiveCasinoRoundError(ValueError):
+    """The player already has an unfinished casino round."""
+
+
+async def get_banner_item(item_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute("SELECT * FROM banner_items WHERE item_id = ?", (item_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT * FROM banner_items WHERE user_id = ? AND is_active = 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_user_banner_items(
+    user_id: int,
+    *,
+    limit: int = 8,
+    offset: int = 0,
+    level: int | None = None,
+    sort_by: str = "date",
+) -> list[dict[str, Any]]:
+    order_by = (
+        "item.level DESC, item.obtained_at DESC, item.item_id DESC"
+        if sort_by == "level"
+        else "item.obtained_at DESC, item.item_id DESC"
+    )
+    async with _connect() as db:
+        cursor = await db.execute(
+            f"""
+            SELECT item.*,
+                   EXISTS(
+                       SELECT 1 FROM market_lots lot
+                       WHERE lot.item_id = item.item_id AND lot.status = 'open'
+                   ) AS is_listed
+            FROM banner_items item
+            WHERE item.user_id = ? AND (? IS NULL OR item.level = ?)
+            ORDER BY {order_by}
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, level, level, limit, offset),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def count_user_banner_items(user_id: int, *, level: int | None = None) -> int:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS total FROM banner_items "
+            "WHERE user_id = ? AND (? IS NULL OR level = ?)",
+            (user_id, level, level),
+        )
+        row = await cursor.fetchone()
+        return int(row["total"]) if row else 0
+
+
+async def set_banner_item_rendering(
+    item_id: int,
+    *,
+    file_id: str,
+    backup_msg_id: int,
+    content_hash: str,
+) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE banner_items
+                SET file_id = ?, backup_msg_id = ?, content_hash = ?, rendered_at = ?
+                WHERE item_id = ?
+                """,
+                (file_id, backup_msg_id, content_hash, time.time(), item_id),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError(f"Баннер item_id={item_id} не найден.")
+            await db.commit()
+        _record_write()
+
+
+async def activate_banner_item(user_id: int, item_id: int) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT 1 FROM banner_items WHERE item_id = ? AND user_id = ?",
+                (item_id, user_id),
+            )
+            if await cursor.fetchone() is None:
+                await db.rollback()
+                return False
+            await db.execute(
+                "UPDATE banner_items SET is_active = 0 WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            )
+            await db.execute(
+                "UPDATE banner_items SET is_active = 1 WHERE item_id = ? AND user_id = ?",
+                (item_id, user_id),
+            )
+            await db.commit()
+        _record_write()
+    return True
+
+
+async def create_owner_banner_item(
+    user_id: int,
+    *,
+    seed: str,
+    preset: str,
+) -> dict[str, Any]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT * FROM banner_items WHERE user_id = ? AND source = 'owner' LIMIT 1",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                await db.commit()
+                return dict(row)
+            cursor = await db.execute(
+                "SELECT 1 FROM banner_items WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            )
+            is_active = int(await cursor.fetchone() is None)
+            cursor = await db.execute(
+                """
+                INSERT INTO banner_items(user_id, level, seed, preset, source, is_active)
+                VALUES (?, 6, ?, ?, 'owner', ?)
+                """,
+                (user_id, seed, preset, is_active),
+            )
+            item_id = int(cursor.lastrowid)
+            await db.commit()
+        _record_write()
+    item = await get_banner_item(item_id)
+    if item is None:
+        raise sqlite3.DatabaseError(f"Не удалось прочитать баннер владельца item_id={item_id}.")
+    return item
+
+
+async def begin_casino_round(
+    round_id: str,
+    user_id: int,
+    username: str | None,
+    cost_cents: int,
+) -> None:
+    today_text = _utc5_date().isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO duel_players(
+                    user_id, username, balance_cents, last_mined_on, is_bot
+                )
+                VALUES (?, ?, 500, ?, 0)
+                """,
+                (user_id, username, today_text),
+            )
+            cursor = await db.execute(
+                "UPDATE duel_players SET username = ?, balance_cents = balance_cents - ? "
+                "WHERE user_id = ? AND balance_cents >= ?",
+                (username, cost_cents, user_id, cost_cents),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise InsufficientCasinoBalanceError("Недостаточно монет для крутки.")
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO casino_rounds(round_id, user_id, cost_cents, status)
+                    VALUES (?, ?, ?, 'pending')
+                    """,
+                    (round_id, user_id, cost_cents),
+                )
+            except sqlite3.IntegrityError as exc:
+                await db.rollback()
+                if "idx_casino_rounds_pending_user" in str(exc) or "UNIQUE constraint" in str(exc):
+                    raise ActiveCasinoRoundError("У пользователя уже есть активная крутка.") from exc
+                raise
+            await db.commit()
+        _record_write()
+
+
+async def complete_casino_round(
+    round_id: str,
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT user_id, status FROM casino_rounds WHERE round_id = ?",
+                (round_id,),
+            )
+            round_record = await cursor.fetchone()
+            if round_record is None or round_record["status"] != "pending":
+                await db.rollback()
+                raise sqlite3.DatabaseError(f"Крутка {round_id} не ожидает завершения.")
+            user_id = int(round_record["user_id"])
+            cursor = await db.execute(
+                "SELECT 1 FROM banner_items WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            )
+            activate_first = await cursor.fetchone() is None
+            items: list[dict[str, Any]] = []
+            for index, result in enumerate(results):
+                cursor = await db.execute(
+                    """
+                    INSERT INTO banner_items(
+                        user_id, level, seed, preset, source, is_active
+                    )
+                    VALUES (?, ?, ?, ?, 'casino', ?)
+                    """,
+                    (
+                        user_id,
+                        int(result["level"]),
+                        str(result["seed"]),
+                        str(result["preset"]) if result.get("preset") else None,
+                        int(activate_first and index == 0),
+                    ),
+                )
+                item_id = int(cursor.lastrowid)
+                items.append(
+                    {
+                        "item_id": item_id,
+                        "user_id": user_id,
+                        "level": int(result["level"]),
+                        "seed": str(result["seed"]),
+                        "preset": result.get("preset"),
+                        "source": "casino",
+                        "is_active": int(activate_first and index == 0),
+                    }
+                )
+            await db.execute(
+                "UPDATE casino_rounds SET status = 'completed', results = ? WHERE round_id = ?",
+                (json.dumps(results, ensure_ascii=False), round_id),
+            )
+            await db.commit()
+        _record_write()
+    return items
+
+
+async def fail_casino_round(round_id: str) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT user_id, cost_cents FROM casino_rounds "
+                "WHERE round_id = ? AND status = 'pending'",
+                (round_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await db.rollback()
+                return False
+            await db.execute(
+                "UPDATE duel_players SET balance_cents = balance_cents + ? WHERE user_id = ?",
+                (int(row["cost_cents"]), int(row["user_id"])),
+            )
+            await db.execute(
+                "UPDATE casino_rounds SET status = 'failed' WHERE round_id = ?",
+                (round_id,),
+            )
+            await db.commit()
+        _record_write()
+    return True
+
+
+async def recover_pending_casino_rounds() -> int:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT round_id, user_id, cost_cents FROM casino_rounds WHERE status = 'pending'"
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                await db.execute(
+                    "UPDATE duel_players SET balance_cents = balance_cents + ? WHERE user_id = ?",
+                    (int(row["cost_cents"]), int(row["user_id"])),
+                )
+                await db.execute(
+                    "UPDATE casino_rounds SET status = 'failed' WHERE round_id = ?",
+                    (str(row["round_id"]),),
+                )
+            await db.commit()
+        if rows:
+            _record_write()
+    return len(rows)
+
+
+async def recycle_banner_item(user_id: int, item_id: int, payout_cents: int) -> str:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                """
+                SELECT item.level, item.source, item.is_active,
+                       EXISTS(
+                           SELECT 1 FROM market_lots lot
+                           WHERE lot.item_id = item.item_id AND lot.status = 'open'
+                       ) AS is_listed,
+                       player.balance_cents
+                FROM banner_items item
+                JOIN duel_players player ON player.user_id = item.user_id
+                WHERE item.item_id = ? AND item.user_id = ?
+                """,
+                (item_id, user_id),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await db.rollback()
+                return "missing"
+            if row["source"] == "owner" or row["is_listed"]:
+                await db.rollback()
+                return "forbidden"
+            in_debt = int(row["balance_cents"]) < 0
+            if row["is_active"] and not in_debt:
+                await db.rollback()
+                return "active"
+            cursor = await db.execute(
+                "UPDATE banner_items SET is_active = 0 WHERE item_id = ? AND user_id = ?",
+                (item_id, user_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "missing"
+            await db.execute("DELETE FROM banner_items WHERE item_id = ?", (item_id,))
+            await db.execute(
+                "UPDATE duel_players SET balance_cents = balance_cents + ? WHERE user_id = ?",
+                (payout_cents, user_id),
+            )
+            await db.commit()
+        _record_write()
+    return "recycled"
+
+
+async def create_market_lot(user_id: int, item_id: int, price_cents: int) -> str:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            balance = await cursor.fetchone()
+            if balance is None or int(balance["balance_cents"]) < 0:
+                await db.rollback()
+                return "debt"
+            cursor = await db.execute(
+                "SELECT source, is_active FROM banner_items WHERE item_id = ? AND user_id = ?",
+                (item_id, user_id),
+            )
+            item = await cursor.fetchone()
+            if item is None:
+                await db.rollback()
+                return "missing"
+            if item["source"] == "owner" or item["is_active"]:
+                await db.rollback()
+                return "forbidden"
+            cursor = await db.execute(
+                "SELECT 1 FROM market_lots WHERE item_id = ? AND status = 'open'",
+                (item_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await db.rollback()
+                return "listed"
+            await db.execute(
+                "INSERT INTO market_lots(item_id, seller_id, price_cents, status) "
+                "VALUES (?, ?, ?, 'open')",
+                (item_id, user_id, price_cents),
+            )
+            await db.commit()
+        _record_write()
+    return "listed"
+
+
+async def get_market_lot(lot_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT lot.*, item.level, item.seed, item.preset, item.file_id,
+                   item.content_hash, item.source
+            FROM market_lots lot
+            JOIN banner_items item ON item.item_id = lot.item_id
+            WHERE lot.lot_id = ? AND lot.status = 'open'
+            """,
+            (lot_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_market_lot_for_item(item_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT * FROM market_lots WHERE item_id = ? AND status = 'open'",
+            (item_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_market_lots(
+    *,
+    level: int | None = None,
+    sort_by: str = "date",
+    limit: int = 8,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    sort = "lot.price_cents ASC, lot.created_at DESC" if sort_by == "price" else "lot.created_at DESC"
+    query = f"""
+        SELECT lot.lot_id, lot.item_id, lot.seller_id, lot.price_cents, lot.created_at,
+               item.level, item.file_id
+        FROM market_lots lot
+        JOIN banner_items item ON item.item_id = lot.item_id
+        WHERE lot.status = 'open' AND (? IS NULL OR item.level = ?)
+        ORDER BY {sort}
+        LIMIT ? OFFSET ?
+    """
+    async with _connect() as db:
+        cursor = await db.execute(query, (level, level, limit, offset))
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_user_market_lots(user_id: int) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT lot.lot_id, lot.item_id, lot.price_cents, lot.created_at, item.level
+            FROM market_lots lot
+            JOIN banner_items item ON item.item_id = lot.item_id
+            WHERE lot.seller_id = ? AND lot.status = 'open'
+            ORDER BY lot.created_at DESC
+            """,
+            (user_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def withdraw_market_lot(user_id: int, lot_id: int) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "UPDATE market_lots SET status = 'withdrawn' "
+                "WHERE lot_id = ? AND seller_id = ? AND status = 'open'",
+                (lot_id, user_id),
+            )
+            await db.commit()
+        if cursor.rowcount:
+            _record_write()
+    return cursor.rowcount == 1
+
+
+async def buy_market_lot(
+    buyer_id: int,
+    buyer_username: str | None,
+    lot_id: int,
+) -> tuple[str, dict[str, Any] | None]:
+    today_text = _utc5_date().isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                """
+                SELECT lot.item_id, lot.seller_id, lot.price_cents, item.level,
+                       item.seed, item.preset, item.source, item.backup_msg_id
+                FROM market_lots lot
+                JOIN banner_items item ON item.item_id = lot.item_id
+                WHERE lot.lot_id = ? AND lot.status = 'open'
+                """,
+                (lot_id,),
+            )
+            lot = await cursor.fetchone()
+            if lot is None:
+                await db.rollback()
+                return "sold", None
+            seller_id = int(lot["seller_id"])
+            item_id = int(lot["item_id"])
+            price = int(lot["price_cents"])
+            if seller_id == buyer_id:
+                await db.rollback()
+                return "own", None
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO duel_players("
+                "user_id, username, balance_cents, last_mined_on, is_bot"
+                ") VALUES (?, ?, 500, ?, 0)",
+                (buyer_id, buyer_username, today_text),
+            )
+            cursor = await db.execute(
+                "UPDATE duel_players SET username = ?, balance_cents = balance_cents - ? "
+                "WHERE user_id = ? AND balance_cents >= ?",
+                (buyer_username, price, buyer_id, price),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "funds", None
+            seller_income = price * 80 // 100
+            fee = price - seller_income
+            await db.execute(
+                "INSERT OR IGNORE INTO duel_players(user_id, balance_cents, last_mined_on) "
+                "VALUES (?, 500, ?)",
+                (seller_id, today_text),
+            )
+            await db.execute(
+                "UPDATE duel_players SET balance_cents = balance_cents + ? WHERE user_id = ?",
+                (seller_income, seller_id),
+            )
+            fee_key = "market_fee_cents"
+            fee_cursor = await db.execute("SELECT value FROM meta WHERE key = ?", (fee_key,))
+            fee_row = await fee_cursor.fetchone()
+            fee_total = int(fee_row["value"]) if fee_row else 0
+            await db.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (fee_key, str(fee_total + fee)),
+            )
+            cursor = await db.execute(
+                "UPDATE market_lots SET status = 'sold' WHERE lot_id = ? AND status = 'open'",
+                (lot_id,),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "sold", None
+            await db.execute(
+                "UPDATE banner_items SET user_id = ?, is_active = 0, file_id = NULL, "
+                "backup_msg_id = NULL, content_hash = NULL, rendered_at = NULL WHERE item_id = ?",
+                (buyer_id, item_id),
+            )
+            await db.commit()
+        _record_write()
+    return "bought", {
+        "item_id": item_id,
+        "user_id": buyer_id,
+        "level": int(lot["level"]),
+        "seed": str(lot["seed"]),
+        "preset": lot["preset"],
+        "source": str(lot["source"]),
+        "backup_msg_id": lot["backup_msg_id"],
+    }
+
+
+async def get_market_fee_cents() -> int:
+    value = await get_meta("market_fee_cents")
+    try:
+        return int(value or 0)
+    except ValueError:
+        logging.exception("Некорректное значение market_fee_cents в meta.")
+        raise sqlite3.DatabaseError("Повреждён счётчик комиссии площадки.")
+
+
+async def claim_subscription_bonus(
+    user_id: int,
+    bonus_cents: int,
+) -> tuple[str, int | None]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                "SELECT status, penalized_at FROM bonus_claims "
+                "WHERE user_id = ? ORDER BY claim_id DESC LIMIT 1",
+                (user_id,),
+            )
+            previous = await cursor.fetchone()
+            if previous is not None and previous["status"] == "subscribed":
+                await db.rollback()
+                return "already_claimed", None
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            player = await cursor.fetchone()
+            if player is None:
+                await db.rollback()
+                raise sqlite3.DatabaseError(f"Игровой профиль user_id={user_id} отсутствует.")
+            await db.execute(
+                "UPDATE duel_players SET balance_cents = balance_cents + ? WHERE user_id = ?",
+                (bonus_cents, user_id),
+            )
+            cursor = await db.execute(
+                "INSERT INTO bonus_claims(user_id, status) VALUES (?, 'subscribed')",
+                (user_id,),
+            )
+            claim_id = int(cursor.lastrowid)
+            await db.commit()
+        _record_write()
+    return "claimed", claim_id
+
+
+async def penalize_subscription_bonus(
+    user_id: int,
+    penalty_cents: int,
+) -> int | None:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                """
+                SELECT claim_id FROM bonus_claims
+                WHERE user_id = ? AND status = 'subscribed' AND penalized_at IS NULL
+                ORDER BY claim_id DESC LIMIT 1
+                """,
+                (user_id,),
+            )
+            claim = await cursor.fetchone()
+            if claim is None:
+                await db.rollback()
+                return None
+            await db.execute(
+                "UPDATE bonus_claims SET status = 'unsubscribed', penalized_at = CURRENT_TIMESTAMP "
+                "WHERE claim_id = ? AND status = 'subscribed' AND penalized_at IS NULL",
+                (int(claim["claim_id"]),),
+            )
+            await db.execute(
+                "UPDATE duel_players SET balance_cents = balance_cents - ? WHERE user_id = ?",
+                (penalty_cents, user_id),
+            )
+            await db.execute(
+                "UPDATE market_lots SET status = 'withdrawn' "
+                "WHERE seller_id = ? AND status = 'open'",
+                (user_id,),
+            )
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            await db.commit()
+        _record_write()
+    return int(row["balance_cents"]) if row else None
+
+
+async def get_users_with_active_subscription_bonus() -> list[int]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT claim.user_id
+            FROM bonus_claims claim
+            WHERE claim.status = 'subscribed'
+              AND claim.penalized_at IS NULL
+              AND claim.claim_id = (
+                  SELECT MAX(latest.claim_id)
+                  FROM bonus_claims latest
+                  WHERE latest.user_id = claim.user_id
+              )
+            ORDER BY claim.claim_id
+            """
+        )
+        return [int(row["user_id"]) for row in await cursor.fetchall()]

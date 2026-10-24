@@ -7,6 +7,7 @@ import random
 import re
 import secrets
 import time
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction, ChatType
@@ -23,6 +24,8 @@ from telegram.ext import (
 import database
 import autoresponder
 import personal_account
+from banner_store import get_profile_banner, send_banner
+from casino import handle_game_message
 from config import ADMIN_ID, AVAILABLE_REACTIONS, BACKUP_CHANNEL_ID, PROFILE_TRIGGERS
 from duel import (
     handle_balance_request,
@@ -36,6 +39,7 @@ from llm import (
     generate_reply,
     is_summary_request,
     parse_meta,
+    extract_reported_nickname,
 )
 from message_deletion import (
     handle_delete_bot_messages,
@@ -96,6 +100,192 @@ def _format_private_profile(
         "Будешь делиться фактами — я сохраню их в своих записях.",
     ]
     return "\n".join(lines)
+
+
+def _profile_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("📝 Заполнить профиль", callback_data="profile:fill"),
+            InlineKeyboardButton("🎨 Переделать баннер", callback_data="profile:banner"),
+        ]]
+    )
+
+
+async def _send_profile_card(
+    message: Message,
+    user_id: int,
+    profile: dict[str, Any],
+) -> None:
+    nickname = str(
+        profile.get("callsign")
+        or profile.get("display_name")
+        or profile.get("username")
+        or "Без имени"
+    )
+    decoration = await database.get_or_create_profile_decoration(user_id)
+    profile_text = _format_private_profile(profile)
+    chunks: list[str] = []
+    current = ""
+    for line in profile_text.splitlines():
+        if len(current) + len(line) + 1 > 950 and current:
+            chunks.append(current)
+            current = ""
+        current += ("\n" if current else "") + line
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [profile_text]
+    media = await get_profile_banner(message.get_bot(), user_id, profile=profile)
+    if media is None:
+        await message.reply_photo(
+            photo=create_profile_card(nickname, decoration),
+            caption=chunks[0],
+            reply_markup=_profile_keyboard(),
+        )
+    else:
+        payload, animated = media
+        await send_banner(
+            message.get_bot(),
+            message.chat_id,
+            payload,
+            animated=animated,
+            caption=chunks[0],
+            reply_markup=_profile_keyboard(),
+        )
+    for chunk in chunks[1:]:
+        await message.reply_text(chunk)
+
+
+async def on_profile_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None:
+        return
+    await query.answer()
+    if (
+        user is None
+        or query.message is None
+        or query.message.chat.type != ChatType.PRIVATE
+        or query.message.chat_id != user.id
+    ):
+        return
+
+    action = query.data or ""
+    if action == "profile:show":
+        try:
+            await database.ensure_user(
+                user.id,
+                query.message.chat_id,
+                user.username,
+                user.first_name or user.username,
+            )
+            profile = await database.get_global_profile(user.id)
+            if profile is None:
+                raise RuntimeError(f"Профиль пользователя {user.id} не создан.")
+            await _send_profile_card(query.message, user.id, profile)
+        except Exception:
+            logging.exception("Не удалось открыть профиль пользователя %s.", user.id)
+            await query.message.reply_text("Не удалось открыть профиль. Попробуй позже.")
+        return
+    if action == "profile:fill":
+        try:
+            await database.ensure_user(
+                user.id,
+                query.message.chat_id,
+                user.username,
+                user.first_name or user.username,
+            )
+        except Exception:
+            logging.exception("Не удалось подготовить анкету user_id=%s.", user.id)
+            await query.message.reply_text("Не удалось начать заполнение профиля. Попробуй позже.")
+            return
+        context.user_data["profile_fill_stage"] = "name"
+        await query.message.reply_text(
+            "Как тебя называть? Ответь именем или нажми «Оставить как есть».",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Оставить как есть", callback_data="profile:skip:name")]]
+            ),
+        )
+        return
+
+    if action == "profile:banner":
+        try:
+            active_item = await database.get_active_banner_item(user.id)
+            if active_item is not None:
+                await query.message.reply_text(
+                    "Баннеры меняются в твоём инвентаре.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🎒 Открыть инвентарь", callback_data="menu:inv")]]
+                    ),
+                )
+                return
+            profile = await database.get_global_profile(user.id)
+            if profile is None:
+                raise RuntimeError(f"Профиль пользователя {user.id} отсутствует.")
+            await database.set_meta(
+                f"profile_decoration:{user.id}",
+                secrets.token_hex(32),
+            )
+            await _send_profile_card(query.message, user.id, profile)
+        except Exception:
+            logging.exception("Не удалось переделать баннер профиля пользователя %s.", user.id)
+            await query.message.reply_text("Не удалось обновить баннер. Попробуй позже.")
+        return
+
+    if action == "profile:skip:name":
+        if context.user_data.get("profile_fill_stage") != "name":
+            await query.message.reply_text("Эта кнопка уже устарела. Открой профиль заново.")
+            return
+        context.user_data["profile_fill_stage"] = "gender"
+        await query.message.reply_text(
+            "Какой у тебя пол? Это нужно, чтобы я обращалась правильно.",
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("Парень", callback_data="profile:gender:парень"),
+                    InlineKeyboardButton("Девушка", callback_data="profile:gender:девушка"),
+                    InlineKeyboardButton("Пропустить", callback_data="profile:gender:skip"),
+                ]]
+            ),
+        )
+        return
+
+    if action.startswith("profile:gender:"):
+        if context.user_data.get("profile_fill_stage") != "gender":
+            await query.message.reply_text("Эта кнопка уже устарела. Открой профиль заново.")
+            return
+        gender = action.removeprefix("profile:gender:")
+        if gender not in ("парень", "девушка", "skip"):
+            await query.message.reply_text("Не удалось распознать ответ. Открой профиль заново.")
+            return
+        if gender != "skip":
+            try:
+                await database.update_user_profile(
+                    user.id,
+                    query.message.chat_id,
+                    gender=gender,
+                )
+            except Exception:
+                logging.exception("Не удалось сохранить пол пользователя %s.", user.id)
+                await query.message.reply_text("Не удалось сохранить ответ. Попробуй позже.")
+                return
+        context.user_data["profile_fill_stage"] = "age"
+        await query.message.reply_text(
+            "Сколько тебе лет? Можно ответить числом или пропустить.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Пропустить", callback_data="profile:skip:age")]]
+            ),
+        )
+        return
+
+    if action == "profile:skip:age":
+        if context.user_data.get("profile_fill_stage") != "age":
+            await query.message.reply_text("Эта кнопка уже устарела. Открой профиль заново.")
+            return
+        context.user_data.pop("profile_fill_stage", None)
+        await query.message.reply_text("Профиль заполнен. Сведения можно изменить, пройдя опрос снова.")
 
 
 async def _apply_private_profile_meta(
@@ -2896,6 +3086,19 @@ async def _private_dialog(
         )
     except Exception:
         logging.exception("Не удалось обновить глобальный профиль пользователя %s.", user_id)
+    reported_nickname = extract_reported_nickname(message_text)
+    if reported_nickname is not None:
+        try:
+            await database.update_user_profile(
+                user_id,
+                message.chat_id,
+                callsign=reported_nickname,
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить имя пользователя %s.", user_id)
+
+    if await handle_game_message(update, context):
+        return
 
     if is_transcription_request(message_text, message):
         await handle_voice_transcription(message, context)
@@ -2909,29 +3112,7 @@ async def _private_dialog(
             profile = await database.get_global_profile(user_id)
             if profile is None:
                 raise RuntimeError(f"Глобальный профиль пользователя {user_id} отсутствует.")
-            nickname = str(
-                profile.get("callsign")
-                or profile.get("display_name")
-                or user.first_name
-                or "Без имени"
-            )
-            decoration = await database.get_or_create_profile_decoration(user_id)
-            card = create_profile_card(nickname, decoration)
-            profile_text = _format_private_profile(profile)
-            chunks: list[str] = []
-            current = ""
-            for line in profile_text.splitlines():
-                if len(current) + len(line) + 1 > 950 and current:
-                    chunks.append(current)
-                    current = ""
-                current += ("\n" if current else "") + line
-            if current:
-                chunks.append(current)
-            if not chunks:
-                chunks = [profile_text]
-            await message.reply_photo(photo=card, caption=chunks.pop(0))
-            for chunk in chunks:
-                await message.reply_text(chunk)
+            await _send_profile_card(message, user_id, profile)
         except Exception:
             logging.exception("Не удалось показать глобальный профиль пользователя %s.", user_id)
             await message.reply_text("Не удалось открыть профиль. Попробуй позже.")
@@ -3067,4 +3248,60 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logging.exception("Не удалось проверить право администратора в личном чате")
             return
         ADMIN_PANEL_USERS.discard(user.id)
+    fill_stage = context.user_data.get("profile_fill_stage")
+    if fill_stage == "name":
+        nickname = extract_reported_nickname(message.text) or re.sub(
+            r"\s+",
+            " ",
+            message.text.strip(),
+        ).strip()
+        if not nickname or nickname.startswith("/") or len(nickname) > 80:
+            await message.reply_text("Введи имя длиной до 80 символов или нажми «Оставить как есть».")
+            return
+        try:
+            await database.update_user_profile(
+                user.id,
+                message.chat_id,
+                callsign=nickname,
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить имя пользователя %s.", user.id)
+            await message.reply_text("Не удалось сохранить имя. Попробуй ещё раз.")
+            return
+        context.user_data["profile_fill_stage"] = "gender"
+        await message.reply_text(
+            "Какой у тебя пол? Это нужно, чтобы я обращалась правильно.",
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("Парень", callback_data="profile:gender:парень"),
+                    InlineKeyboardButton("Девушка", callback_data="profile:gender:девушка"),
+                    InlineKeyboardButton("Пропустить", callback_data="profile:gender:skip"),
+                ]]
+            ),
+        )
+        return
+    if fill_stage == "age":
+        age_match = re.fullmatch(
+            r"\s*(\d{1,3})(?:\s*(?:лет|года?|год))?\s*",
+            message.text,
+            re.IGNORECASE,
+        )
+        if age_match is None:
+            await message.reply_text("Введи возраст числом от 1 до 120 или нажми «Пропустить».")
+            return
+        age = int(age_match.group(1))
+        if not 1 <= age <= 120:
+            await message.reply_text("Возраст должен быть от 1 до 120 лет или нажми «Пропустить».")
+            return
+        try:
+            await database.update_user_profile(user.id, message.chat_id, age=age)
+        except Exception:
+            logging.exception("Не удалось сохранить возраст пользователя %s.", user.id)
+            await message.reply_text("Не удалось сохранить возраст. Попробуй ещё раз.")
+            return
+        context.user_data.pop("profile_fill_stage", None)
+        await message.reply_text("Профиль заполнен. Спасибо, теперь я буду обращаться правильно.")
+        return
+    if await handle_game_message(update, context):
+        return
     await _private_dialog(update, context, message.text)
