@@ -18,6 +18,7 @@ _DELETE_COMMAND_RE = re.compile(
     r"(?:последних\s+)?сообщени\w*))\s*$",
     re.IGNORECASE,
 )
+_DELETE_CHAT_COMMAND_RE = re.compile(r"^\s*дэл\s+чат\s+(\d+)\s*$", re.IGNORECASE)
 
 
 def _requested_count(text: str) -> tuple[int, bool] | None:
@@ -80,6 +81,64 @@ async def handle_delete_bot_messages(
     message = update.effective_message
     if message is None or not message.text:
         return False
+    chat_delete_match = _DELETE_CHAT_COMMAND_RE.fullmatch(message.text)
+    if chat_delete_match is not None:
+        if message.chat.type == ChatType.PRIVATE:
+            return False
+        count = int(chat_delete_match.group(1))
+        if count <= 0:
+            await message.reply_text("Укажи положительное количество сообщений.")
+            return True
+        try:
+            message_ids = await database.get_recent_chat_message_ids(
+                message.chat_id,
+                count,
+                exclude_message_id=message.message_id,
+            )
+        except Exception:
+            logging.exception(
+                "Не удалось получить последние сообщения чата %s для удаления.",
+                message.chat_id,
+            )
+            await message.reply_text("Не удалось получить список сообщений. Попробуй позже.")
+            return True
+
+        deleted_ids: list[int] = []
+        failed = 0
+        for message_id in message_ids:
+            try:
+                await context.bot.delete_message(
+                    chat_id=message.chat_id,
+                    message_id=message_id,
+                )
+                deleted_ids.append(message_id)
+            except TelegramError:
+                failed += 1
+                logging.exception(
+                    "Не удалось удалить сообщение чата %s с ID %s.",
+                    message.chat_id,
+                    message_id,
+                )
+        try:
+            await database.delete_chat_message_records(message.chat_id, deleted_ids)
+        except Exception:
+            logging.exception(
+                "Не удалось обновить историю после удаления сообщений чата %s.",
+                message.chat_id,
+            )
+            await message.reply_text(
+                f"В Telegram удалено {len(deleted_ids)} из {len(message_ids)} сообщений, "
+                "но историю чата обновить не удалось."
+            )
+            return True
+        result = f"Удалено сообщений чата: {len(deleted_ids)}."
+        if len(message_ids) < count:
+            result += f" В сохранённой истории нашлось только {len(message_ids)}."
+        if failed:
+            result += f" Не удалось удалить: {failed}."
+        await message.reply_text(result)
+        return True
+
     request = _requested_count(message.text)
     if request is None:
         return False

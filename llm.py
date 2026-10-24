@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, BinaryIO
 
@@ -13,6 +13,7 @@ from config import (
     GROQ_API_KEY,
     MODEL_NAME,
     CONTEXT_CHAR_LIMIT,
+    PERSONAL_ACCOUNT_TIMEZONE,
     SUMMARY_CONTEXT_CHAR_LIMIT,
     SUMMARY_TRIGGERS,
     TRIGGER_THRESHOLD,
@@ -20,6 +21,11 @@ from config import (
 )
 
 WORD_RE = re.compile(r"[a-zа-яё]+", re.IGNORECASE)
+_SUMMARY_PERIOD_RE = re.compile(
+    r"\bза\s+(?:последн\w+\s+)?(?:(?P<amount>\d+)\s*)?"
+    r"(?P<unit>минут\w*|мин|час\w*|ч|дн\w*|сутк\w*|h|m)\b",
+    re.IGNORECASE,
+)
 _REPORTED_AGE_RE = re.compile(
     r"(?<!\w)(?:мне\s+(?:(?:уже|исполнилось|стукнуло)\s+)?|"
     r"мой\s+возраст\s*(?:[:=—-]\s*)?)"
@@ -61,8 +67,8 @@ _client = AsyncOpenAI(
 )
 
 
-def current_date_utc7() -> str:
-    return datetime.now(timezone(timedelta(hours=7))).strftime("%d.%m.%Y")
+def current_date_utc5() -> str:
+    return datetime.now(PERSONAL_ACCOUNT_TIMEZONE).strftime("%d.%m.%Y")
 
 
 def is_called(text: str) -> bool:
@@ -79,6 +85,21 @@ def is_called(text: str) -> bool:
 def is_summary_request(text: str) -> bool:
     normalized = text.casefold()
     return any(phrase.casefold() in normalized for phrase in SUMMARY_TRIGGERS)
+
+
+def extract_summary_period_minutes(text: str) -> int | None:
+    match = _SUMMARY_PERIOD_RE.search(text)
+    if match is None:
+        return None
+    unit = match.group("unit").casefold()
+    amount = int(match.group("amount") or 1)
+    if unit.startswith(("мин", "m")):
+        return amount
+    if unit.startswith(("час", "ч", "h")):
+        return amount * 60
+    if unit.startswith(("д", "сут")):
+        return amount * 24 * 60
+    return None
 
 
 def extract_reported_age(text: str) -> int | None:
@@ -103,6 +124,8 @@ def build_prompt(
     current_message_id: int | None = None,
     replied_message: tuple[int, str, int | None, str] | None = None,
     participants: list[dict[str, Any]] | None = None,
+    participant_genders: dict[int, str] | None = None,
+    summary_period_minutes: int = 12 * 60,
 ) -> str:
     max_history_chars = SUMMARY_CONTEXT_CHAR_LIMIT if summary else CONTEXT_CHAR_LIMIT
     formatted_history: list[str] = []
@@ -110,7 +133,11 @@ def build_prompt(
     for message_id, sender_name, sender_id, text in reversed(history):
         if message_id == current_message_id:
             continue
-        prefix = f"[MsgID: {message_id}] {sender_name} (UserIDs: {sender_id}): "
+        sender_gender = (participant_genders or {}).get(sender_id, "неизвестен")
+        prefix = (
+            f"[MsgID: {message_id}] {sender_name} "
+            f"(UserIDs: {sender_id}; пол: {sender_gender}): "
+        )
         available = max_history_chars - used_chars - len(prefix)
         if available <= 0:
             break
@@ -137,6 +164,11 @@ def build_prompt(
         f"\nИмя в Telegram: {user_name}"
         f"\nUser ID: {user_id}"
         f"\nИзвестный пол: {gender}"
+    )
+    prompt += (
+        "\n\nПри упоминании любого участника используй указанный рядом с его сообщениями "
+        "или в профиле пол для правильного рода. Не делай выводов о поле по имени; "
+        "если он неизвестен, формулируй нейтрально."
     )
     if callsign:
         prompt += f"\nТвоя кличка для него/неё: {callsign}"
@@ -171,8 +203,14 @@ def build_prompt(
         + "</user_message>"
     )
     if summary:
+        if summary_period_minutes % (24 * 60) == 0:
+            period_label = f"{summary_period_minutes // (24 * 60)} дн."
+        elif summary_period_minutes % 60 == 0:
+            period_label = f"{summary_period_minutes // 60} ч."
+        else:
+            period_label = f"{summary_period_minutes} мин."
         prompt += (
-            "\n\nПользователь просит подробный пересказ событий чата строго за последние 12 часов. "
+            f"\n\nПользователь просит подробный пересказ событий чата строго за последние {period_label}. "
             "Используй все сообщения в переданной истории, не ограничивай пересказ несколькими "
             "общими предложениями. Подробно перечисли обсуждавшиеся темы и важные детали, "
             "восстанови последовательность событий, укажи кто что предложил или решил, "
@@ -195,7 +233,7 @@ def build_prompt(
 
 
 async def generate_reply(prompt: str, summary: bool) -> str:
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(current_date_str=current_date_utc7())
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(current_date_str=current_date_utc5())
     try:
         response = await _client.chat.completions.create(
             model=MODEL_NAME,

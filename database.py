@@ -1,6 +1,7 @@
 """Асинхронный доступ к SQLite и создание согласованных копий БД."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ _AUTORESPONDER_DEFAULT_PRIVATE_TEXT = (
     "Это автоответчик, ожидайте, это не займет слишком много времени "
     "(около 5 лет)"
 )
+_TELEGRAM_SESSION_BACKUPS_KEY = "telegram_session_backups"
 
 
 def _autoresponder_meta_key(key: str, user_id: int | None) -> str:
@@ -571,6 +573,16 @@ async def get_global_profile(user_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+async def get_or_create_profile_decoration(user_id: int) -> str:
+    key = f"profile_decoration:{user_id}"
+    decoration = await get_meta(key)
+    if decoration is not None:
+        return decoration
+    decoration = hashlib.sha256(f"yubara-profile:{user_id}".encode("ascii")).hexdigest()
+    await set_meta(key, decoration)
+    return decoration
+
+
 async def get_user_group_ids(user_id: int) -> list[int]:
     async with _connect() as db:
         cursor = await db.execute(
@@ -605,6 +617,23 @@ async def get_group_users(group_id: int) -> list[dict[str, Any]]:
             (group_id,),
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_group_user_genders(group_id: int) -> dict[int, str]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT users.user_id, global_profiles.gender
+            FROM users
+            LEFT JOIN global_profiles ON global_profiles.user_id = users.user_id
+            WHERE users.group_id = ?
+            """,
+            (group_id,),
+        )
+        return {
+            int(row["user_id"]): str(row["gender"] or "неизвестен")
+            for row in await cursor.fetchall()
+        }
 
 
 async def update_user_profile(
@@ -680,6 +709,8 @@ async def save_message(
     sender_name: str,
     text: str,
 ) -> None:
+    if chat_id > 0:
+        return
     async with _write_lock:
         async with _connect() as db:
             await db.execute(
@@ -710,6 +741,46 @@ async def save_message(
         await _archive_messages_if_needed()
 
 
+async def has_chat_message(chat_id: int, message_id: int) -> bool:
+    for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+        async with aiosqlite.connect(database_path) as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM messages WHERE chat_id = ? AND message_id = ? LIMIT 1",
+                (chat_id, message_id),
+            )
+            if await cursor.fetchone() is not None:
+                return True
+    return False
+
+
+async def purge_private_message_history() -> int:
+    """Removes previously retained direct-message history from every message shard."""
+    deleted = 0
+    changed_archives: list[str] = []
+    for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+        async with aiosqlite.connect(database_path) as db:
+            cursor = await db.execute("DELETE FROM messages WHERE chat_id > 0")
+            deleted += cursor.rowcount
+            await db.commit()
+        if database_path != DATABASE_PATH and cursor.rowcount:
+            changed_archives.append(database_path.name)
+    if changed_archives:
+        async with _connect() as db:
+            for filename in changed_archives:
+                await db.executemany(
+                    "DELETE FROM meta WHERE key = ?",
+                    (
+                        (f"message_archive_file_id:{filename}",),
+                        (f"message_archive_message_id:{filename}",),
+                    ),
+                )
+            await db.commit()
+    if deleted:
+        _record_write()
+        logging.info("Удалена ранее сохранённая история личных сообщений: %s записей.", deleted)
+    return deleted
+
+
 async def get_recent_history(chat_id: int, limit: int) -> list[tuple[int, str, int, str]]:
     rows = await _get_message_rows(chat_id, max(1, limit))
     rows.sort(
@@ -733,12 +804,17 @@ async def load_chat_history(
     summary: bool,
     limit: int,
     hours: int = 12,
+    summary_minutes: int | None = None,
 ) -> list[tuple[int, str, int, str]]:
     try:
         if (await get_meta(_CHAT_CONTEXT_ENABLED_KEY)) == "0":
             return []
         if summary:
-            return await get_history_for_summary(chat_id, hours=hours)
+            return await get_history_for_summary(
+                chat_id,
+                hours=hours,
+                minutes=summary_minutes,
+            )
         return await get_recent_history(chat_id, limit + 1)
     except Exception:
         logging.exception(
@@ -797,6 +873,80 @@ async def get_recent_bot_message_ids(
     return message_ids
 
 
+async def get_recent_chat_message_ids(
+    chat_id: int,
+    limit: int,
+    *,
+    exclude_message_id: int | None = None,
+) -> list[int]:
+    if limit <= 0:
+        return []
+    rows: list[tuple[int, str, int]] = []
+    for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+        async with aiosqlite.connect(database_path) as db:
+            cursor = await db.execute(
+                """
+                SELECT message_id, created_at, id
+                FROM messages
+                WHERE chat_id = ?
+                ORDER BY created_at DESC, message_id DESC, id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            )
+            rows.extend(
+                (int(row[0]), str(row[1]), int(row[2]))
+                for row in await cursor.fetchall()
+            )
+    rows.sort(key=lambda row: (row[1], row[0], row[2]), reverse=True)
+    message_ids: list[int] = []
+    seen: set[int] = set()
+    for message_id, _created_at, _row_id in rows:
+        if message_id == exclude_message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        message_ids.append(message_id)
+        if len(message_ids) >= limit:
+            break
+    return message_ids
+
+
+async def delete_chat_message_records(chat_id: int, message_ids: list[int]) -> int:
+    if not message_ids:
+        return 0
+    placeholders = ",".join("?" for _ in message_ids)
+    total_deleted = 0
+    changed_archives: list[str] = []
+    async with _write_lock:
+        for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+            async with aiosqlite.connect(database_path) as db:
+                cursor = await db.execute(
+                    f"""
+                    DELETE FROM messages
+                    WHERE chat_id = ? AND message_id IN ({placeholders})
+                    """,
+                    (chat_id, *message_ids),
+                )
+                total_deleted += cursor.rowcount
+                await db.commit()
+            if database_path != DATABASE_PATH and cursor.rowcount:
+                changed_archives.append(database_path.name)
+        if changed_archives:
+            async with _connect() as db:
+                for filename in changed_archives:
+                    await db.executemany(
+                        "DELETE FROM meta WHERE key = ?",
+                        (
+                            (f"message_archive_file_id:{filename}",),
+                            (f"message_archive_message_id:{filename}",),
+                        ),
+                    )
+                await db.commit()
+        if total_deleted:
+            _record_write()
+    return total_deleted
+
+
 async def delete_message_records(
     chat_id: int,
     user_id: int,
@@ -844,12 +994,14 @@ async def get_history_for_summary(
     chat_id: int,
     *,
     hours: int = 12,
+    minutes: int | None = None,
     limit: int | None = None,
 ) -> list[tuple[int, str, int, str]]:
     rows = await _get_message_rows(
         chat_id,
         max(1, limit) if limit is not None else None,
         hours=hours,
+        minutes=minutes,
     )
     rows.sort(
         key=lambda row: (
@@ -872,6 +1024,7 @@ async def _get_message_rows(
     per_database_limit: int | None,
     *,
     hours: int | None = None,
+    minutes: int | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     query = (
@@ -879,7 +1032,10 @@ async def _get_message_rows(
         "WHERE chat_id = ? "
     )
     params: tuple[object, ...] = (chat_id,)
-    if hours is not None:
+    if minutes is not None:
+        query += "AND created_at >= datetime('now', ?) "
+        params += (f"-{max(1, minutes)} minutes",)
+    elif hours is not None:
         query += "AND created_at >= datetime('now', ?) "
         params += (f"-{max(1, hours)} hours",)
     query += "ORDER BY created_at DESC, message_id DESC, id DESC"
@@ -905,8 +1061,8 @@ async def _get_message_rows(
     return rows
 
 
-def _utc7_date() -> date:
-    return datetime.now(timezone(timedelta(hours=7))).date()
+def _utc5_date() -> date:
+    return datetime.now(timezone(timedelta(hours=5))).date()
 
 
 async def get_duel_balance(
@@ -915,7 +1071,7 @@ async def get_duel_balance(
     *,
     is_bot: bool = False,
 ) -> int:
-    today = _utc7_date()
+    today = _utc5_date()
     today_text = today.isoformat()
     async with _write_lock:
         async with _connect() as db:
@@ -1054,7 +1210,7 @@ async def settle_player_duel(
 
 
 async def mine_duel_coins_daily() -> int:
-    today = _utc7_date()
+    today = _utc5_date()
     today_text = today.isoformat()
     mined_players = 0
     async with _write_lock:
@@ -1499,6 +1655,71 @@ async def set_meta(key: str, value: str) -> None:
                 WHERE meta.value IS NOT excluded.value
                 """,
                 (key, value),
+            )
+            await db.commit()
+        _record_write()
+
+
+async def get_telegram_session_backup_manifest() -> dict[int, dict[str, Any]]:
+    raw_manifest = await get_meta(_TELEGRAM_SESSION_BACKUPS_KEY)
+    if raw_manifest is None:
+        return {}
+    try:
+        stored = json.loads(raw_manifest)
+        if not isinstance(stored, dict):
+            raise ValueError("Список бэкапов Telegram-сессий должен быть объектом.")
+        return {
+            int(user_id): dict(entry)
+            for user_id, entry in stored.items()
+            if isinstance(entry, dict)
+        }
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("Повреждён список бэкапов Telegram-сессий.") from exc
+
+
+async def is_telegram_session_backup_warning_sent(user_id: int) -> bool:
+    return await get_meta(f"telegram_session_backup_warning:{user_id}") == "1"
+
+
+async def mark_telegram_session_backup_warning_sent(user_id: int) -> None:
+    await set_meta(f"telegram_session_backup_warning:{user_id}", "1")
+
+
+async def set_telegram_session_backup(
+    user_id: int,
+    *,
+    file_id: str,
+    message_id: int,
+    modified_ns: int,
+    size: int,
+    enabled: bool,
+) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (_TELEGRAM_SESSION_BACKUPS_KEY,),
+            )
+            row = await cursor.fetchone()
+            manifest: dict[str, Any] = {}
+            if row is not None:
+                parsed = json.loads(str(row["value"]))
+                if not isinstance(parsed, dict):
+                    raise ValueError("Список бэкапов Telegram-сессий должен быть объектом.")
+                manifest = parsed
+            manifest[str(user_id)] = {
+                "file_id": file_id,
+                "message_id": message_id,
+                "modified_ns": modified_ns,
+                "size": size,
+                "enabled": enabled,
+            }
+            await db.execute(
+                """
+                INSERT INTO meta(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (_TELEGRAM_SESSION_BACKUPS_KEY, json.dumps(manifest, sort_keys=True)),
             )
             await db.commit()
         _record_write()

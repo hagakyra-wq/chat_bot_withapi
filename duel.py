@@ -539,6 +539,9 @@ async def handle_coin_leaderboard_request(
         or _COIN_LEADERBOARD_REQUEST_RE.search(message.text) is None
     ):
         return False
+    if message.chat.type == ChatType.PRIVATE:
+        await message.reply_text("Топ монет доступен только в групповых чатах.")
+        return True
 
     try:
         players = await database.get_duel_leaderboard(limit=10)

@@ -22,13 +22,13 @@ from telegram.ext import (
 import database
 import autoresponder
 import personal_account
-from config import ADMIN_ID, AVAILABLE_REACTIONS, DEFAULT_CONTEXT_SIZE, PROFILE_TRIGGERS
+from config import ADMIN_ID, AVAILABLE_REACTIONS, PROFILE_TRIGGERS
 from duel import (
     handle_balance_request,
     handle_coin_leaderboard_request,
     handle_duel_challenge,
 )
-from images import extract_image_request, image_manager
+from images import create_profile_card, extract_image_request, image_manager
 from llm import (
     build_prompt,
     extract_reported_age,
@@ -74,7 +74,6 @@ _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
 
 def _format_private_profile(
     profile: dict[str, object],
-    group_ids: list[int],
 ) -> str:
     notes = [
         fact
@@ -85,12 +84,10 @@ def _format_private_profile(
     lines = [
         "Мой глобальный архив о тебе:\n"
         f"Имя: {profile.get('display_name') or 'не указано'}",
-        f"Telegram ID: {profile['user_id']}",
         f"Username: @{profile['username']}" if profile.get("username") else "Username: не указан",
         f"Кличка: {profile.get('callsign') or 'не задана'}",
         f"Возраст: {profile.get('age') or 'не указан'}",
         f"Пол: {profile.get('gender') if profile.get('gender') != 'неизвестен' else 'не указан'}",
-        "ID групп: " + (", ".join(map(str, group_ids)) if group_ids else "пока нет"),
         "Факты:",
         facts,
         "Будешь делиться фактами — я сохраню их в своих записях.",
@@ -143,23 +140,53 @@ def _admin_keyboard(context_enabled: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
+                InlineKeyboardButton("👥 Группы", callback_data="admin:groups"),
+                InlineKeyboardButton("🔐 Доступ и ключи", callback_data="admin:access"),
+            ],
+            [
+                InlineKeyboardButton("👤 Личный аккаунт", callback_data="admin:userbot"),
+                InlineKeyboardButton("🌙 Автоответчик", callback_data="admin:autoresponder_settings"),
+            ],
+            [
                 InlineKeyboardButton(
                     f"🧠 Контекст: {'ВКЛ' if context_enabled else 'ВЫКЛ'}",
                     callback_data="admin:toggle_context",
                 )
             ],
-            [InlineKeyboardButton("➕ Добавить группу", callback_data="admin:add_group")],
-            [InlineKeyboardButton("➖ Удалить группу", callback_data="admin:remove_group")],
-            [InlineKeyboardButton("🔑 Ключ обычного доступа", callback_data="admin:create_user_key")],
-            [InlineKeyboardButton("👑 Пригласить админа", callback_data="admin:create_admin_key")],
-            [InlineKeyboardButton("🎟 Ключ автоответчика", callback_data="admin:create_autoresponder_key")],
-            [InlineKeyboardButton("🚫 Отозвать ключ", callback_data="admin:revoke_key")],
-            [InlineKeyboardButton("👥 Список людей с доступом", callback_data="admin:people")],
-            [InlineKeyboardButton("🚫 Отозвать доступ пользователя", callback_data="admin:revoke_user")],
-            [InlineKeyboardButton("🚫 Отозвать админа", callback_data="admin:revoke_admin")],
-            [InlineKeyboardButton("👤 Личный Telegram-аккаунт", callback_data="admin:userbot")],
-            [InlineKeyboardButton("🌙 Настройки автоответчика", callback_data="admin:autoresponder_settings")],
-            [InlineKeyboardButton("🚪 Выйти из админ-панели", callback_data="admin:exit")],
+            [InlineKeyboardButton("🚪 Закрыть панель", callback_data="admin:exit")],
+        ]
+    )
+
+
+def _admin_groups_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("➕ Добавить группу", callback_data="admin:add_group"),
+                InlineKeyboardButton("➖ Удалить группу", callback_data="admin:remove_group"),
+            ],
+            [InlineKeyboardButton("↩️ Главное меню", callback_data="admin:menu")],
+        ]
+    )
+
+
+def _admin_access_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔑 Ключ доступа", callback_data="admin:create_user_key"),
+                InlineKeyboardButton("👑 Пригласить админа", callback_data="admin:create_admin_key"),
+            ],
+            [
+                InlineKeyboardButton("🎟 Ключ автоответчика", callback_data="admin:create_autoresponder_key"),
+                InlineKeyboardButton("🚫 Отозвать ключ", callback_data="admin:revoke_key"),
+            ],
+            [InlineKeyboardButton("👥 Список людей", callback_data="admin:people")],
+            [
+                InlineKeyboardButton("🚫 Отозвать доступ", callback_data="admin:revoke_user"),
+                InlineKeyboardButton("🚫 Отозвать админа", callback_data="admin:revoke_admin"),
+            ],
+            [InlineKeyboardButton("↩️ Главное меню", callback_data="admin:menu")],
         ]
     )
 
@@ -181,14 +208,29 @@ async def _show_admin_menu(update: Update) -> None:
         return
     if query:
         await query.edit_message_text(
-            "Панель администратора Юбары:",
+            "⚙️ Панель администратора\nВыбери раздел или быстро переключи контекст:",
             reply_markup=_admin_keyboard(context_enabled),
         )
     elif update.effective_message:
         await update.effective_message.reply_text(
-            "Панель администратора Юбары:",
+            "⚙️ Панель администратора\nВыбери раздел или быстро переключи контекст:",
             reply_markup=_admin_keyboard(context_enabled),
         )
+
+
+async def _show_admin_section(
+    update: Update,
+    *,
+    title: str,
+    description: str,
+    keyboard: InlineKeyboardMarkup,
+) -> None:
+    query = update.callback_query
+    text = f"{title}\n{description}"
+    if query is not None:
+        await query.edit_message_text(text, reply_markup=keyboard)
+    elif update.effective_message is not None:
+        await update.effective_message.reply_text(text, reply_markup=keyboard)
 
 
 def _format_utc_offset(offset: int) -> str:
@@ -203,13 +245,13 @@ async def _show_autoresponder_settings(update: Update) -> None:
         [
             [
                 InlineKeyboardButton(
-                    f"🌙 Ночная рассылка: {'ВКЛ' if night_enabled else 'ВЫКЛ'}",
+                    f"🌙 Ночь: {'ВКЛ' if night_enabled else 'ВЫКЛ'}",
                     callback_data="admin:autoresponder_toggle_night",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"💬 Автоответ в ЛС: {'ВКЛ' if private_enabled else 'ВЫКЛ'}",
+                    f"💬 ЛС: {'ВКЛ' if private_enabled else 'ВЫКЛ'}",
                     callback_data="admin:autoresponder_toggle_private",
                 )
             ],
@@ -378,7 +420,12 @@ async def _show_userbot_menu(
             [InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")],
         ]
     )
-    message = f"Личный Telegram-аккаунт:\n{status}"
+    message = (
+        f"Личный Telegram-аккаунт:\n{status}\n\n"
+        "⚠️ Важно: файл сессии даёт полный доступ к аккаунту. Он будет "
+        "сохраняться в канале резервных копий Telegram и восстанавливаться "
+        "при перезапуске. Убедись, что канал бэкапов приватный."
+    )
     query = update.callback_query
     if query is not None:
         await query.edit_message_text(
@@ -405,8 +452,6 @@ async def _show_personal_autoresponder_menu(
     timezone_offset, night_enabled, private_enabled = (
         await database.get_autoresponder_settings(user.id)
     )
-    night_text = await database.get_autoresponder_night_text(user.id)
-    private_text = await database.get_autoresponder_private_text(user.id)
     status = (
         "Аккаунт подключён."
         if connected and authorized
@@ -415,45 +460,53 @@ async def _show_personal_autoresponder_menu(
         else "Свой Telegram-аккаунт не подключён."
     )
     keyboard = [
-        [InlineKeyboardButton("🔐 Подключить по номеру", callback_data="auto:connect_phone")],
-        [InlineKeyboardButton("📷 Подключить по QR", callback_data="auto:connect_qr")],
+        [
+            InlineKeyboardButton("🔐 По номеру", callback_data="auto:connect_phone"),
+            InlineKeyboardButton("📷 По QR", callback_data="auto:connect_qr"),
+        ],
         [
             InlineKeyboardButton(
                 f"🌙 Ночная рассылка: {'ВКЛ' if night_enabled else 'ВЫКЛ'}",
                 callback_data="auto:toggle_night",
-            )
-        ],
-        [
+            ),
             InlineKeyboardButton(
                 f"💬 Автоответ в ЛС: {'ВКЛ' if private_enabled else 'ВЫКЛ'}",
                 callback_data="auto:toggle_private",
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
                 f"🕒 Часовой пояс: {_format_utc_offset(timezone_offset)}",
                 callback_data="auto:timezone",
-            )
+            ),
+            InlineKeyboardButton("👥 Группы", callback_data="auto:groups"),
         ],
-        [InlineKeyboardButton("👥 Группы ночной рассылки", callback_data="auto:groups")],
-        [InlineKeyboardButton("✏️ Текст спокойной ночи", callback_data="auto:night_text")],
-        [InlineKeyboardButton("✏️ Текст автоответа в ЛС", callback_data="auto:private_text")],
+        [
+            InlineKeyboardButton("✏️ Текст на ночь", callback_data="auto:night_text"),
+            InlineKeyboardButton("✏️ Текст в ЛС", callback_data="auto:private_text"),
+        ],
     ]
+    account_actions = []
     if enabled or authorized:
-        keyboard.append(
-            [InlineKeyboardButton("⏸ Отключить аккаунт", callback_data="auto:disable")]
+        account_actions.append(
+            InlineKeyboardButton("⏸ Отключить", callback_data="auto:disable")
         )
     if personal_account.session_exists(user.id):
-        keyboard.append(
-            [InlineKeyboardButton("🧹 Сбросить сессию", callback_data="auto:reset")]
+        account_actions.append(
+            InlineKeyboardButton("🧹 Сбросить сессию", callback_data="auto:reset")
         )
+    if account_actions:
+        keyboard.append(account_actions)
     keyboard.append([InlineKeyboardButton("🚪 Закрыть", callback_data="auto:close")])
     message = (
-        "Личный автоответчик (настройки и аккаунт принадлежат только тебе).\n"
-        f"{status} Режимы работают, когда аккаунт включён: "
-        f"{'да' if enabled else 'нет'}.\n"
-        f"Текст ночного сообщения: {night_text}\n"
-        f"Текст автоответа в ЛС: {private_text}"
+        "🌙 Личный автоответчик\n"
+        f"{status} Автоматические режимы {'включены' if enabled else 'выключены'}.\n"
+        f"Ночная рассылка: {'включена' if night_enabled else 'выключена'} · "
+        f"автоответ в ЛС: {'включён' if private_enabled else 'выключен'}.\n"
+        f"Часовой пояс: {_format_utc_offset(timezone_offset)}.\n"
+        "Аккаунт и настройки видны только тебе.\n"
+        "⚠️ Файл сессии даёт полный доступ к аккаунту и хранится в канале "
+        "резервных копий Telegram; канал должен быть приватным."
     )
     query = update.callback_query
     if query is not None:
@@ -763,6 +816,22 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     action = query.data or ""
+    if action == "admin:groups":
+        await _show_admin_section(
+            update,
+            title="👥 Управление группами",
+            description="Добавляй группы в список бота или удаляй их из него.",
+            keyboard=_admin_groups_keyboard(),
+        )
+        return ADMIN_MENU
+    if action == "admin:access":
+        await _show_admin_section(
+            update,
+            title="🔐 Доступ и ключи",
+            description="Создавай ключи, проверяй доступ и управляй пользователями.",
+            keyboard=_admin_access_keyboard(),
+        )
+        return ADMIN_MENU
     if action == "admin:exit":
         ADMIN_PANEL_USERS.discard(user.id)
         await _cancel_userbot_login(user.id, context)
@@ -2507,18 +2576,31 @@ async def _private_dialog(
             profile = await database.get_global_profile(user_id)
             if profile is None:
                 raise RuntimeError(f"Глобальный профиль пользователя {user_id} отсутствует.")
-            group_ids = await database.get_user_group_ids(user_id)
-            sent = await message.reply_text(_format_private_profile(profile, group_ids))
-            await database.save_message(
-                message.chat_id,
-                context.bot.id,
-                sent.message_id,
-                "Юбара",
-                sent.text or "Профиль пользователя",
-            )
+            nickname = f"@{user.username}" if user.username else user.first_name or "Без имени"
+            decoration = await database.get_or_create_profile_decoration(user_id)
+            card = create_profile_card(nickname, decoration)
+            profile_text = _format_private_profile(profile)
+            chunks: list[str] = []
+            current = ""
+            for line in profile_text.splitlines():
+                if len(current) + len(line) + 1 > 950 and current:
+                    chunks.append(current)
+                    current = ""
+                current += ("\n" if current else "") + line
+            if current:
+                chunks.append(current)
+            if not chunks:
+                chunks = [profile_text]
+            await message.reply_photo(photo=card, caption=chunks.pop(0))
+            for chunk in chunks:
+                await message.reply_text(chunk)
         except Exception:
             logging.exception("Не удалось показать глобальный профиль пользователя %s.", user_id)
             await message.reply_text("Не удалось открыть профиль. Попробуй позже.")
+        return
+
+    if is_summary_request(message_text):
+        await message.reply_text("Подробное саммари доступно в группах за период до 24 часов.")
         return
 
     if await image_manager.consume_setting_input(update, context):
@@ -2551,27 +2633,18 @@ async def _private_dialog(
                 reaction=[ReactionTypeEmoji(random.choice(AVAILABLE_REACTIONS))]
             )
         except TelegramError:
-            logging.exception("Не удалось установить реакцию командой в личном чате")
+            logging.exception("Не удалось установить реакцию в личном чате")
         return
 
+    summary = is_summary_request(message_text)
+    gender = "неизвестен"
     try:
-        summary = is_summary_request(message_text)
-        await database.save_message(
-            message.chat_id,
-            user_id,
-            message.message_id,
-            user.first_name or user.username or str(user_id),
-            message_text,
-        )
         is_image_request, image_prompt = extract_image_request(message_text)
         if is_image_request:
             await image_manager.offer(update, context, image_prompt)
             return
-        history = await database.load_chat_history(
-            message.chat_id,
-            summary=summary,
-            limit=DEFAULT_CONTEXT_SIZE,
-        )
+        profile = await database.get_global_profile(user_id)
+        gender = str(profile.get("gender") or "неизвестен") if profile else "неизвестен"
         replied_data = None
         replied = message.reply_to_message
         if replied and replied.text:
@@ -2582,23 +2655,25 @@ async def _private_dialog(
                 replied.text,
             )
         prompt = build_prompt(
-            history=history,
+            history=[],
             user_id=user_id,
             user_name=user.first_name or user.username or str(user_id),
             display_name=user.first_name or user.username or str(user_id),
+            gender=gender,
             current_message=message_text,
             summary=summary,
             current_message_id=message.message_id,
             replied_message=replied_data,
         )
     except Exception:
-        logging.exception("Ошибка сохранения личного диалога в SQLite")
+        logging.exception("Не удалось подготовить личный диалог.")
         try:
             prompt = build_prompt(
                 history=[],
                 user_id=user_id,
                 user_name=user.first_name or user.username or str(user_id),
                 display_name=user.first_name or user.username or str(user_id),
+                gender=gender,
                 current_message=message_text,
                 summary=summary,
                 current_message_id=message.message_id,
@@ -2627,26 +2702,16 @@ async def _private_dialog(
     if not answer:
         answer = "Чего уставился? Я просто немного смутилась..."
     try:
-        sent = await message.reply_text(answer)
+        await message.reply_text(answer)
     except TelegramError:
         logging.exception("Не удалось ответить в личном чате")
         return
     await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
     await maybe_react(message)
-    try:
-        await database.save_message(
-            message.chat_id,
-            context.bot.id,
-            sent.message_id,
-            "Юбара",
-            answer,
-        )
-    except Exception:
-        logging.exception("Не удалось сохранить ответ в личной истории")
 
 
 async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
+    message = update.message
     user = update.effective_user
     if (
         message is None

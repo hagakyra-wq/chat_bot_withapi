@@ -4,6 +4,7 @@ import logging
 import random
 import re
 import time
+from io import BytesIO
 
 from telegram import ReactionTypeEmoji, Update
 from telegram.constants import ChatAction, ChatType, MessageEntityType
@@ -23,10 +24,11 @@ from duel import (
     handle_coin_leaderboard_request,
     handle_duel_challenge,
 )
-from images import extract_image_request, image_manager, is_image_command
+from images import create_profile_card, extract_image_request, image_manager, is_image_command
 from llm import (
     build_prompt,
     extract_reported_age,
+    extract_summary_period_minutes,
     generate_reply,
     is_called,
     is_summary_request,
@@ -85,7 +87,6 @@ def _command_name(text: str) -> str | None:
 def _format_person_profile(person: dict[str, object]) -> str:
     lines = [
         f"Имя: {person.get('display_name') or person.get('username') or 'не указано'}",
-        f"Telegram ID: {person['user_id']}",
         f"Username: @{person['username']}" if person.get("username") else "Username: не указан",
     ]
     callsign = person.get("callsign")
@@ -93,8 +94,6 @@ def _format_person_profile(person: dict[str, object]) -> str:
     lines.append(f"Возраст: {person.get('age') or 'не указан'}")
     gender = person.get("gender")
     lines.append(f"Пол: {gender if gender and gender != 'неизвестен' else 'не указан'}")
-    if person.get("group_id") is not None:
-        lines.append(f"ID группы: {person['group_id']}")
     notes = str(person.get("notes") or "").strip()
     lines.append("Факты:")
     lines.extend(f"• {note}" for note in notes.splitlines() if note.strip())
@@ -107,7 +106,6 @@ def _format_profile_response(
     person: dict[str, object],
     participants: list[dict[str, object]] | None,
     *,
-    group_id: int | None = None,
     group_title: str | None = None,
 ) -> str:
     if participants is None:
@@ -120,7 +118,7 @@ def _format_profile_response(
     total = len(participants)
     title = f"«{group_title}»" if group_title else "эта группа"
     lines = [
-        f"Профили участников {title} (ID группы: {group_id if group_id is not None else 'текущая'}):",
+        f"Профили участников {title}:",
     ]
     if not total:
         lines.append("Участников пока нет в моём реестре.")
@@ -156,11 +154,13 @@ async def _send_profile_messages(
     message: object,
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
+    profile_photo: BytesIO | None = None,
 ) -> None:
     chunks: list[str] = []
     current = ""
     for line in text.splitlines():
-        if len(current) + len(line) + 1 > 3500 and current:
+        max_length = 950 if profile_photo is not None else 3500
+        if len(current) + len(line) + 1 > max_length and current:
             chunks.append(current)
             current = ""
         current += ("\n" if current else "") + line
@@ -168,6 +168,15 @@ async def _send_profile_messages(
         chunks.append(current)
     if not chunks:
         chunks = [text]
+    if profile_photo is not None and chunks:
+        sent = await message.reply_photo(photo=profile_photo, caption=chunks.pop(0))
+        await database.save_message(
+            message.chat_id,
+            context.bot.id,
+            sent.message_id,
+            "Юбара",
+            sent.caption or "Профиль пользователя",
+        )
     for chunk in chunks:
         sent = await message.reply_text(chunk)
         await database.save_message(
@@ -240,7 +249,7 @@ async def _apply_meta(
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
+    message = update.message
     user = update.effective_user
     if (
         message is None
@@ -376,13 +385,26 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     summary = is_summary_request(text)
+    summary_period_minutes = extract_summary_period_minutes(text)
+    if summary and summary_period_minutes is not None:
+        if summary_period_minutes <= 0:
+            await message.reply_text("Укажи положительный период саммари.")
+            return
+        if summary_period_minutes > 24 * 60:
+            await message.reply_text("Саммари можно запросить максимум за последние 24 часа.")
+            return
+    if summary_period_minutes is None:
+        summary_period_minutes = 12 * 60
     participants = None
+    participant_genders: dict[int, str] = {}
     try:
         history = await database.load_chat_history(
             group_id,
             summary=summary,
             limit=DEFAULT_CONTEXT_SIZE,
+            summary_minutes=summary_period_minutes,
         )
+        participant_genders = await database.get_group_user_genders(group_id)
         replied = message.reply_to_message
         replied_data = None
         if replied and replied.text:
@@ -406,14 +428,20 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             answer = _format_profile_response(
                 person,
                 participants,
-                group_id=requested_group_id if group_profile_request else group_id,
                 group_title=(
                     message.chat.title
                     if group_profile_request and requested_group_id == group_id
                     else None
                 ),
             )
-            await _send_profile_messages(message, context, answer)
+            profile_photo = None
+            if not group_profile_request:
+                decoration = await database.get_or_create_profile_decoration(user.id)
+                profile_photo = create_profile_card(
+                    f"@{user.username}" if user.username else _user_name(user),
+                    decoration,
+                )
+            await _send_profile_messages(message, context, answer, profile_photo)
             await maybe_react(message)
             return
         prompt = build_prompt(
@@ -425,10 +453,12 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             callsign=person["callsign"],
             current_message=text,
             summary=summary,
+            summary_period_minutes=summary_period_minutes,
             profile_request=profile_request,
             current_message_id=message.message_id,
             replied_message=replied_data,
             participants=participants,
+            participant_genders=participant_genders,
         )
     except Exception:
         logging.exception("Не удалось собрать контекст группы %s", group_id)
@@ -445,7 +475,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 callsign=person["callsign"],
                 current_message=text,
                 summary=summary,
+                summary_period_minutes=summary_period_minutes,
                 current_message_id=message.message_id,
+                participant_genders=participant_genders,
             )
         except Exception:
             logging.exception("Не удалось создать запрос без контекста группы %s", group_id)

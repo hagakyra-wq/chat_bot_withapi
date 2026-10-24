@@ -5,7 +5,7 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime, time as datetime_time, timedelta, timezone
+from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from config import (
     DATABASE_ARCHIVE_DIR,
     DATABASE_BACKUP_PATH,
     DATABASE_PATH,
+    PERSONAL_ACCOUNT_TIMEZONE,
     PORT,
     TELEGRAM_TOKEN,
 )
@@ -147,6 +148,38 @@ async def _restore_database(bot: object) -> tuple[str, int] | None:
     return None
 
 
+async def _restore_user_sessions(bot: object) -> None:
+    manifest = await database.get_telegram_session_backup_manifest()
+    for user_id, entry in manifest.items():
+        session_path = personal_account.session_file_path(user_id)
+        if session_path.is_file():
+            continue
+        file_id = entry.get("file_id")
+        if not isinstance(file_id, str) or not file_id:
+            logging.error("В бэкапе отсутствует file_id Telegram-сессии user_id=%s.", user_id)
+            continue
+        temporary_path = session_path.with_name(session_path.name + ".restore.tmp")
+        try:
+            session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            telegram_file = await bot.get_file(file_id)
+            if telegram_file.file_size and telegram_file.file_size > BACKUP_MAX_DOWNLOAD_SIZE:
+                raise ValueError(
+                    f"Бэкап Telegram-сессии user_id={user_id} превышает лимит скачивания."
+                )
+            await telegram_file.download_to_drive(custom_path=str(temporary_path))
+            if not await asyncio.to_thread(database.validate_sqlite, temporary_path):
+                raise sqlite3.DatabaseError(
+                    f"Бэкап Telegram-сессии user_id={user_id} повреждён."
+                )
+            await asyncio.to_thread(os.replace, temporary_path, session_path)
+            personal_account.set_enabled(bool(entry.get("enabled", False)), user_id)
+            logging.info("Telegram user-сессия восстановлена из бэкапа user_id=%s.", user_id)
+        except (TelegramError, OSError, ValueError, sqlite3.Error):
+            logging.exception("Не удалось восстановить Telegram user-сессию user_id=%s.", user_id)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+
 async def _stage_message_archives(
     bot: object,
     manifest_path: str | os.PathLike[str],
@@ -206,7 +239,9 @@ async def _post_init(application: Application) -> None:
     )
     restored_info = await _restore_database(application.bot)
     await database.initialize()
+    await database.purge_private_message_history()
     await database.rotate_messages_if_needed()
+    await _restore_user_sessions(application.bot)
     try:
         if await personal_account.startup():
             logging.info("Сохранённая Telegram user-сессия восстановлена.")
@@ -226,7 +261,7 @@ async def _post_init(application: Application) -> None:
     )
     application.job_queue.run_daily(
         _daily_duel_mining_job,
-        time=datetime_time(0, 5, tzinfo=timezone(timedelta(hours=7))),
+        time=datetime_time(0, 5, tzinfo=PERSONAL_ACCOUNT_TIMEZONE),
         name="daily-duel-mining",
     )
     await autoresponder.initialize(application)
@@ -239,7 +274,7 @@ async def _post_init(application: Application) -> None:
 async def _perform_backup(bot: object) -> None:
     try:
         caption = "📅 Дата и время: " + datetime.now(
-            timezone(timedelta(hours=7))
+            PERSONAL_ACCOUNT_TIMEZONE
         ).strftime("%d.%m.%Y в %H:%M:%S")
         for archive_path in database.list_message_archives():
             if await database.get_message_archive_file_id(archive_path.name):
@@ -273,6 +308,86 @@ async def _perform_backup(bot: object) -> None:
                 archive_path.name,
                 archived_message.message_id,
             )
+
+        session_manifest = await database.get_telegram_session_backup_manifest()
+        for user_id in personal_account.session_user_ids():
+            session_path = personal_account.session_file_path(user_id)
+            if not session_path.is_file():
+                continue
+            source_stat = session_path.stat()
+            previous = session_manifest.get(user_id, {})
+            session_enabled = personal_account.is_enabled(user_id)
+            if (
+                previous.get("modified_ns") == source_stat.st_mtime_ns
+                and previous.get("size") == source_stat.st_size
+                and previous.get("enabled") == session_enabled
+            ):
+                continue
+            temporary_path = session_path.with_name(session_path.name + ".backup.tmp")
+            try:
+                if not await database.is_telegram_session_backup_warning_sent(user_id):
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            "⚠️ Важно: файл Telegram-сессии даёт полный доступ к аккаунту. "
+                            "Перед сохранением в канал резервных копий убедись, что "
+                            "BACKUP_CHANNEL_ID доступен только доверенным людям."
+                        ),
+                        disable_notification=True,
+                    )
+                    await database.mark_telegram_session_backup_warning_sent(user_id)
+                await asyncio.to_thread(
+                    personal_account.snapshot_session_for_backup,
+                    user_id,
+                    temporary_path,
+                )
+                if not await asyncio.to_thread(database.validate_sqlite, temporary_path):
+                    raise sqlite3.DatabaseError(
+                        f"Снимок Telegram-сессии user_id={user_id} повреждён."
+                    )
+                if temporary_path.stat().st_size > BACKUP_MAX_DOWNLOAD_SIZE:
+                    raise ValueError(
+                        f"Снимок Telegram-сессии user_id={user_id} превышает лимит Telegram."
+                    )
+                with temporary_path.open("rb") as session_file:
+                    session_message = await bot.send_document(
+                        chat_id=BACKUP_CHANNEL_ID,
+                        document=session_file,
+                        filename=f"telegram_session_{user_id}.session",
+                        caption=(
+                            f"{caption}\n🔐 Telegram user-сессия пользователя {user_id}; "
+                            "даёт доступ к аккаунту — храните канал бэкапов приватным."
+                        ),
+                        disable_notification=True,
+                    )
+                if session_message.document is None:
+                    raise RuntimeError(
+                        f"Telegram принял файл сессии user_id={user_id} без document."
+                    )
+                await database.set_telegram_session_backup(
+                    user_id,
+                    file_id=session_message.document.file_id,
+                    message_id=session_message.message_id,
+                    modified_ns=source_stat.st_mtime_ns,
+                    size=source_stat.st_size,
+                    enabled=session_enabled,
+                )
+                old_message_id = previous.get("message_id")
+                if isinstance(old_message_id, int) and old_message_id != session_message.message_id:
+                    try:
+                        await bot.delete_message(BACKUP_CHANNEL_ID, old_message_id)
+                    except TelegramError:
+                        logging.exception(
+                            "Не удалось удалить предыдущий бэкап Telegram-сессии user_id=%s.",
+                            user_id,
+                        )
+            except Exception:
+                logging.exception(
+                    "Не удалось сохранить Telegram user-сессию user_id=%s в бэкап.",
+                    user_id,
+                )
+            finally:
+                temporary_path.unlink(missing_ok=True)
 
         generation = await database.create_consistent_backup()
         if generation is None:

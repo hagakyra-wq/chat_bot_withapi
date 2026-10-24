@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -84,6 +85,39 @@ def _session_file_path(user_id: int = ADMIN_ID) -> Path:
     if not str(base_path).endswith(".session"):
         base_path = Path(f"{base_path}.session")
     return base_path
+
+
+def session_file_path(user_id: int = ADMIN_ID) -> Path:
+    return _session_file_path(user_id)
+
+
+def session_user_ids() -> list[int]:
+    user_ids = {ADMIN_ID}
+    accounts_dir = Path(f"{TELEGRAM_USER_SESSION_PATH}.accounts")
+    if accounts_dir.is_dir():
+        for account_dir in accounts_dir.iterdir():
+            if account_dir.is_dir() and account_dir.name.isdecimal():
+                user_ids.add(int(account_dir.name))
+    return sorted(user_ids)
+
+
+def snapshot_session_for_backup(user_id: int, destination: Path) -> None:
+    session_path = _session_file_path(user_id)
+    if not session_path.is_file():
+        raise FileNotFoundError(f"Telegram user-сессия не найдена: {session_path}")
+    state = _state(user_id)
+    if state.client is not None:
+        state.client.session.save()
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    source = sqlite3.connect(str(session_path), timeout=10)
+    backup = sqlite3.connect(str(destination), timeout=10)
+    try:
+        source.backup(backup)
+    finally:
+        backup.close()
+        source.close()
+    if os.name != "nt":
+        os.chmod(destination, 0o600)
 
 
 def session_exists(user_id: int = ADMIN_ID) -> bool:

@@ -8,9 +8,11 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+from PIL import Image, ImageDraw, ImageFont
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
 from telegram.error import TelegramError
@@ -111,6 +113,72 @@ def extract_image_request(text: str) -> tuple[bool, str]:
 
 def is_image_command(text: str) -> bool:
     return _IMAGE_COMMAND_RE.match(text.strip()) is not None
+
+
+def create_profile_card(nickname: str, decoration: str) -> io.BytesIO:
+    """Builds a stable, user-specific profile image without an external image service."""
+    digest = bytes.fromhex(decoration[:64])
+    accent = tuple(90 + byte % 150 for byte in digest[:3])
+    width, height = 900, 480
+    image = Image.new("RGB", (width, height), (20, 24, 44))
+    draw = ImageDraw.Draw(image)
+    for y in range(height):
+        blend = y / height
+        color = tuple(
+            int(start * (1 - blend) + end * blend)
+            for start, end in zip((20, 24, 44), (43, 30, 68))
+        )
+        draw.line((0, y, width, y), fill=color)
+
+    motif_count = 5 + digest[3] % 8
+    for index in range(motif_count):
+        offset = (digest[(index + 4) % len(digest)] * 7) % width
+        radius = 12 + digest[(index + 12) % len(digest)] % 45
+        left = (offset + index * 137) % width
+        top = (digest[(index + 20) % len(digest)] * 3) % height
+        draw.ellipse(
+            (left - radius, top - radius, left + radius, top + radius),
+            outline=accent,
+            width=3,
+        )
+
+    font_path: Path | None = None
+    try:
+        font_path = next(
+            path
+            for path in (
+                Path(r"C:\Windows\Fonts\arial.ttf"),
+                Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+                Path("/usr/share/fonts/dejavu/DejaVuSans.ttf"),
+            )
+            if path.is_file()
+        )
+        title_font = ImageFont.truetype(str(font_path), 28)
+        name_font = ImageFont.truetype(str(font_path), 56)
+    except (OSError, StopIteration):
+        title_font = ImageFont.load_default()
+        name_font = ImageFont.load_default()
+
+    draw.rounded_rectangle((48, 48, width - 48, height - 48), radius=28, outline=accent, width=3)
+    draw.text((86, 102), "ПРОФИЛЬ ЮБАРЫ", font=title_font, fill=(225, 218, 242))
+    displayed_name = re.sub(r"\s+", " ", nickname).strip()[:48] or "Без имени"
+    name_size = 56
+    while (
+        font_path is not None
+        and name_size > 24
+        and draw.textbbox((0, 0), displayed_name, font=name_font)[2] > width - 172
+    ):
+        name_size -= 2
+        name_font = ImageFont.truetype(str(font_path), name_size)
+    draw.text((86, 190), displayed_name, font=name_font, fill=(255, 255, 255))
+    draw.line((86, 290, width - 86, 290), fill=accent, width=4)
+    draw.text((86, 325), "Особая королевская декорация", font=title_font, fill=(214, 203, 229))
+
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    output.name = "profile.png"
+    return output
 
 
 def _mode_keyboard(request_id: str) -> InlineKeyboardMarkup:
