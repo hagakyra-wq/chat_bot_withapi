@@ -189,6 +189,63 @@ async def ensure_banner_file(
         raise
 
 
+async def ensure_market_banner_file(
+    bot: Any,
+    item: dict[str, Any],
+    *,
+    priority: int = 1,
+) -> dict[str, Any]:
+    file_id = item.get("market_file_id")
+    if isinstance(file_id, str) and file_id:
+        return item
+    item_id = int(item["item_id"])
+    buffer = await _render_queue.render(
+        priority,
+        user_id=int(item["user_id"]),
+        name="",
+        tag=None,
+        level=int(item["level"]),
+        item_seed=str(item["seed"]),
+        preset=item.get("preset"),
+        avatar=None,
+        salt=BANNER_SALT,
+        show_name=False,
+    )
+    caption = (
+        f"🛍 Баннер для магазина item_id={item_id}\n"
+        f"Уровень: {int(item['level'])}"
+    )
+    if int(item["level"]) == 6:
+        sent = await bot.send_animation(
+            chat_id=BACKUP_CHANNEL_ID,
+            animation=buffer,
+            caption=caption,
+            disable_notification=True,
+        )
+        if sent.animation is None:
+            raise RuntimeError("Telegram принял GIF магазина без данных animation.")
+        new_file_id = sent.animation.file_id
+    else:
+        sent = await bot.send_photo(
+            chat_id=BACKUP_CHANNEL_ID,
+            photo=buffer,
+            caption=caption,
+            disable_notification=True,
+        )
+        if not sent.photo:
+            raise RuntimeError("Telegram принял изображение магазина без данных photo.")
+        new_file_id = sent.photo[-1].file_id
+    await database.set_market_banner_rendering(
+        item_id,
+        file_id=new_file_id,
+        backup_msg_id=sent.message_id,
+    )
+    updated = await database.get_banner_item(item_id)
+    if updated is None:
+        raise RuntimeError(f"Баннер item_id={item_id} исчез после генерации превью.")
+    return updated
+
+
 def make_shame_banner(name: str) -> io.BytesIO:
     image = Image.new("RGB", (800, 420), (118, 118, 118))
     draw = ImageDraw.Draw(image)

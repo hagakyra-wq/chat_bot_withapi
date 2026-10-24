@@ -988,11 +988,11 @@ def scene_for(user_id, preset, salt="yubari", item_seed=None):
 
 
 def make_animated_banner(user_id, name, tag=None, preset=None, salt="yubari", fresh=False, item_seed=None,
-                         avatar=None, frames=30, fps=20, return_info=False):
+                         avatar=None, frames=30, fps=20, return_info=False, show_name=True):
     digest = make_digest(user_id, salt, fresh, item_seed)
     pid = preset if preset in PRESET_BY_ID else pick_preset(digest)
     _, pname, hue, builder = PRESET_BY_ID[pid]
-    P = banner.build_parts(digest, name, tag, 6, avatar, hue=hue)
+    P = banner.build_parts(digest, name, tag, 6, avatar, hue=hue, show_name=show_name)
     acc = P["acc"]
     A = lambda i: acc[i % len(acc)]
 

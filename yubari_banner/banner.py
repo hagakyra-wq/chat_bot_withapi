@@ -298,8 +298,10 @@ def card_flat(box, radius, tint, left=170, mid=150, right=85):
 
 
 # ---------------------------------------------------------------- текст
-def _text_layer(rng, acc, name, tag, level, digest):
+def _text_layer(rng, acc, name, tag, level, digest, show_name=True):
     A = lambda i: acc[i % len(acc)]
+    if not show_name:
+        return Image.new("RGBA", (W, H), (0, 0, 0, 0))
     name = clean_text(name) or "Безымянный"
     tag = clean_text(tag, 20).lower().replace(" ", "_") if tag else None
     lx = PAD + 56
@@ -371,14 +373,14 @@ def _text_layer(rng, acc, name, tag, level, digest):
 
 
 # ---------------------------------------------------------------- сборка частей
-def build_parts(digest, name, tag, level, avatar=None, hue=None):
+def build_parts(digest, name, tag, level, avatar=None, hue=None, show_name=True):
     """Всё, что общее для PNG и GIF: палитра, рамка, текст, центральный элемент."""
     rng = random.Random(int(digest, 16))
     cfg = LEVELS[level]
     bg1, bg2, acc = palette(rng, rng.randint(*cfg["colors"]), hue)
     box = (PAD, PAD, W - PAD, H - PAD)
     frame, fmask = frames.draw_frame(rng, level, box, RADIUS, acc)
-    text = _text_layer(rng, acc, name, tag, level, digest)
+    text = _text_layer(rng, acc, name, tag, level, digest, show_name=show_name)
     rotating, crown = False, None
     if level == 5 or (level == 6 and avatar is not None):
         center = _medallion(rng, acc, avatar, name, EX, EY, ER, level)
@@ -394,16 +396,18 @@ def build_parts(digest, name, tag, level, avatar=None, hue=None):
 
 
 def make_banner(user_id, name, tag=None, level=1, salt="yubari", fresh=False, as_bytes=True,
-                avatar=None, item_seed=None, preset=None, frames_n=30, fps=20):
+                avatar=None, item_seed=None, preset=None, frames_n=30, fps=20,
+                show_name=True):
     """Единая точка входа. level 1-5 -> PNG, level 6 -> анимированный GIF (BytesIO).
     as_bytes=False возвращает PIL.Image (только для уровней 1-5)."""
     level = max(1, min(6, int(level)))
     if level == 6:
         from .banner_anim import make_animated_banner
         return make_animated_banner(user_id, name, tag, preset=preset, salt=salt, fresh=fresh,
-                                    item_seed=item_seed, avatar=avatar, frames=frames_n, fps=fps)
+                                    item_seed=item_seed, avatar=avatar, frames=frames_n, fps=fps,
+                                    show_name=show_name)
     digest = make_digest(user_id, salt, fresh, item_seed)
-    P = build_parts(digest, name, tag, level, avatar)
+    P = build_parts(digest, name, tag, level, avatar, show_name=show_name)
     rng, cfg, acc = P["rng"], P["cfg"], P["acc"]
     img = _background(rng, P["bg1"], P["bg2"], acc, cfg)
     if cfg["pattern"]:

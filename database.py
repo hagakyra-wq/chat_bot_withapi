@@ -456,6 +456,14 @@ async def initialize() -> None:
                 "messages",
                 {"payload_version": "INTEGER NOT NULL DEFAULT 0"},
             )
+            await _ensure_columns(
+                db,
+                "banner_items",
+                {
+                    "market_file_id": "TEXT",
+                    "market_backup_msg_id": "INTEGER",
+                },
+            )
             await _migrate_global_profiles(db)
             await _migrate_message_payloads(db)
             await db.commit()
@@ -2806,7 +2814,12 @@ async def get_user_banner_items(
                        WHERE lot.item_id = item.item_id AND lot.status = 'open'
                    ) AS is_listed
             FROM banner_items item
-            WHERE item.user_id = ? AND (? IS NULL OR item.level = ?)
+            WHERE item.user_id = ?
+              AND (? IS NULL OR item.level = ?)
+              AND NOT EXISTS(
+                  SELECT 1 FROM market_lots lot
+                  WHERE lot.item_id = item.item_id AND lot.status = 'open'
+              )
             ORDER BY {order_by}
             LIMIT ? OFFSET ?
             """,
@@ -2818,8 +2831,15 @@ async def get_user_banner_items(
 async def count_user_banner_items(user_id: int, *, level: int | None = None) -> int:
     async with _connect() as db:
         cursor = await db.execute(
-            "SELECT COUNT(*) AS total FROM banner_items "
-            "WHERE user_id = ? AND (? IS NULL OR level = ?)",
+            """
+            SELECT COUNT(*) AS total FROM banner_items item
+            WHERE item.user_id = ?
+              AND (? IS NULL OR item.level = ?)
+              AND NOT EXISTS(
+                  SELECT 1 FROM market_lots lot
+                  WHERE lot.item_id = item.item_id AND lot.status = 'open'
+              )
+            """,
             (user_id, level, level),
         )
         row = await cursor.fetchone()
@@ -2842,6 +2862,25 @@ async def set_banner_item_rendering(
                 WHERE item_id = ?
                 """,
                 (file_id, backup_msg_id, content_hash, time.time(), item_id),
+            )
+            if cursor.rowcount != 1:
+                raise sqlite3.DatabaseError(f"Баннер item_id={item_id} не найден.")
+            await db.commit()
+        _record_write()
+
+
+async def set_market_banner_rendering(
+    item_id: int,
+    *,
+    file_id: str,
+    backup_msg_id: int,
+) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "UPDATE banner_items SET market_file_id = ?, market_backup_msg_id = ? "
+                "WHERE item_id = ?",
+                (file_id, backup_msg_id, item_id),
             )
             if cursor.rowcount != 1:
                 raise sqlite3.DatabaseError(f"Баннер item_id={item_id} не найден.")
@@ -3109,6 +3148,70 @@ async def recycle_banner_item(user_id: int, item_id: int, payout_cents: int) -> 
     return "recycled"
 
 
+async def recycle_banner_items_by_level(
+    user_id: int,
+    level: int,
+    quantity: int,
+    payout_cents: int,
+) -> tuple[str, list[dict[str, Any]], int | None]:
+    if not 1 <= level <= 6 or quantity <= 0 or payout_cents < 0:
+        raise ValueError("Некорректные параметры переработки.")
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN")
+            cursor = await db.execute(
+                """
+                SELECT item.item_id, item.backup_msg_id, item.market_backup_msg_id
+                FROM banner_items item
+                WHERE item.user_id = ? AND item.level = ?
+                  AND item.source != 'owner' AND item.is_active = 0
+                  AND NOT EXISTS(
+                      SELECT 1 FROM market_lots lot
+                      WHERE lot.item_id = item.item_id AND lot.status = 'open'
+                  )
+                ORDER BY item.obtained_at ASC, item.item_id ASC
+                LIMIT ?
+                """,
+                (user_id, level, quantity),
+            )
+            items = [dict(row) for row in await cursor.fetchall()]
+            if len(items) < quantity:
+                await db.rollback()
+                return "insufficient", items, None
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            player = await cursor.fetchone()
+            if player is None:
+                await db.rollback()
+                return "missing", [], None
+            placeholders = ",".join("?" for _ in items)
+            await db.execute(
+                f"DELETE FROM banner_items WHERE user_id = ? "
+                f"AND item_id IN ({placeholders})",
+                (user_id, *(int(item["item_id"]) for item in items)),
+            )
+            await db.execute(
+                "UPDATE duel_players SET balance_cents = balance_cents + ? WHERE user_id = ?",
+                (payout_cents * quantity, user_id),
+            )
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            balance_row = await cursor.fetchone()
+            if balance_row is None:
+                await db.rollback()
+                raise sqlite3.DatabaseError(
+                    f"Не удалось прочитать баланс user_id={user_id} после переработки."
+                )
+            balance = int(balance_row["balance_cents"])
+            await db.commit()
+        _record_write()
+    return "recycled", items, balance
+
+
 async def create_market_lot(user_id: int, item_id: int, price_cents: int) -> str:
     async with _write_lock:
         async with _connect() as db:
@@ -3154,6 +3257,7 @@ async def get_market_lot(lot_id: int) -> dict[str, Any] | None:
         cursor = await db.execute(
             """
             SELECT lot.*, item.level, item.seed, item.preset, item.file_id,
+                   item.market_file_id, item.market_backup_msg_id,
                    item.content_hash, item.source
             FROM market_lots lot
             JOIN banner_items item ON item.item_id = lot.item_id
@@ -3182,10 +3286,14 @@ async def get_market_lots(
     limit: int = 8,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    sort = "lot.price_cents ASC, lot.created_at DESC" if sort_by == "price" else "lot.created_at DESC"
+    sort = (
+        "lot.price_cents ASC, lot.created_at DESC, lot.lot_id DESC"
+        if sort_by == "price"
+        else "lot.created_at DESC, lot.lot_id DESC"
+    )
     query = f"""
         SELECT lot.lot_id, lot.item_id, lot.seller_id, lot.price_cents, lot.created_at,
-               item.level, item.file_id
+               item.level, item.file_id, item.market_file_id
         FROM market_lots lot
         JOIN banner_items item ON item.item_id = lot.item_id
         WHERE lot.status = 'open' AND (? IS NULL OR item.level = ?)
@@ -3195,6 +3303,18 @@ async def get_market_lots(
     async with _connect() as db:
         cursor = await db.execute(query, (level, level, limit, offset))
         return [dict(row) for row in await cursor.fetchall()]
+
+
+async def count_market_lots(*, level: int | None = None) -> int:
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM market_lots lot "
+            "JOIN banner_items item ON item.item_id = lot.item_id "
+            "WHERE lot.status = 'open' AND (? IS NULL OR item.level = ?)",
+            (level, level),
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
 
 
 async def get_user_market_lots(user_id: int) -> list[dict[str, Any]]:
@@ -3238,7 +3358,8 @@ async def buy_market_lot(
             cursor = await db.execute(
                 """
                 SELECT lot.item_id, lot.seller_id, lot.price_cents, item.level,
-                       item.seed, item.preset, item.source, item.backup_msg_id
+                       item.seed, item.preset, item.source, item.backup_msg_id,
+                       item.market_file_id, item.market_backup_msg_id
                 FROM market_lots lot
                 JOIN banner_items item ON item.item_id = lot.item_id
                 WHERE lot.lot_id = ? AND lot.status = 'open'
@@ -3311,6 +3432,8 @@ async def buy_market_lot(
         "preset": lot["preset"],
         "source": str(lot["source"]),
         "backup_msg_id": lot["backup_msg_id"],
+        "market_file_id": lot["market_file_id"],
+        "market_backup_msg_id": lot["market_backup_msg_id"],
     }
 
 

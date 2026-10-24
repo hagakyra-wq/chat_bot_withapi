@@ -6,13 +6,24 @@ import re
 import secrets
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaAnimation,
+    InputMediaPhoto,
+    Update,
+)
 from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
-from banner_store import ensure_banner_file, get_profile_banner, send_banner
+from banner_store import (
+    ensure_banner_file,
+    ensure_market_banner_file,
+    get_profile_banner,
+    send_banner,
+)
 from config import (
     ADMIN_ID,
     BACKUP_CHANNEL_ID,
@@ -31,7 +42,11 @@ _COIN_PROMO_RE = re.compile(
     r"^/coinpromo(?:@\w+)?\s+(YUBARA-COIN-[A-F0-9]{12})$",
     re.IGNORECASE,
 )
-_PAGE_SIZE = 8
+_RECYCLE_COMMAND_RE = re.compile(
+    r"^(?:/recycle(?:@\w+)?|переработ(?:ка|ай))\s+"
+    r"(?P<rarity>[\w-]+)\s+(?P<quantity>\d+)$",
+    re.IGNORECASE,
+)
 _RARITY = {
     1: "Обычный",
     2: "Необычный",
@@ -39,6 +54,32 @@ _RARITY = {
     4: "Эпический",
     5: "Элитный",
     6: "Легендарный",
+}
+_RARITY_ALIASES = {
+    "обычный": 1,
+    "обычная": 1,
+    "обычные": 1,
+    "common": 1,
+    "необычный": 2,
+    "необычная": 2,
+    "необычные": 2,
+    "uncommon": 2,
+    "редкий": 3,
+    "редкая": 3,
+    "редкие": 3,
+    "rare": 3,
+    "эпический": 4,
+    "эпическая": 4,
+    "эпические": 4,
+    "epic": 4,
+    "элитный": 5,
+    "элитная": 5,
+    "элитные": 5,
+    "elite": 5,
+    "легендарный": 6,
+    "легендарная": 6,
+    "легендарные": 6,
+    "legendary": 6,
 }
 
 
@@ -57,6 +98,10 @@ def _inventory_url(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 def _inventory_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
     return InlineKeyboardButton("🎒 Инвентарь", url=_inventory_url(context))
+
+
+def _menu_button() -> InlineKeyboardButton:
+    return InlineKeyboardButton("↩️ В меню", callback_data="casino:home")
 
 
 def _casino_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
@@ -97,6 +142,7 @@ def _casino_keyboard(
                     callback_data="casino:anim",
                 )
             ],
+            [_menu_button()],
         ]
     )
 
@@ -156,7 +202,13 @@ async def open_casino(
     )
     keyboard = _casino_keyboard(context, skip_animation=skip)
     if edit and update.callback_query and update.callback_query.message:
-        await update.callback_query.message.edit_text(text, reply_markup=keyboard)
+        if update.callback_query.message.caption is not None:
+            await update.callback_query.message.edit_caption(
+                caption=text,
+                reply_markup=keyboard,
+            )
+        else:
+            await update.callback_query.message.edit_text(text, reply_markup=keyboard)
     else:
         await message.reply_text(text, reply_markup=keyboard)
 
@@ -173,6 +225,27 @@ async def open_main_menu(
         "Главное меню Юбары:",
         reply_markup=_main_menu_keyboard(context, private=private),
     )
+
+
+async def _return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or query.message is None or user is None:
+        return
+    keyboard = _main_menu_keyboard(
+        context,
+        private=query.message.chat.type == ChatType.PRIVATE,
+    )
+    if query.message.caption is not None:
+        await query.message.edit_caption(
+            caption="Главное меню Юбары:",
+            reply_markup=keyboard,
+        )
+    else:
+        await query.message.edit_text(
+            "Главное меню Юбары:",
+            reply_markup=keyboard,
+        )
 
 
 def _result_level(values: tuple[int, int, int]) -> int:
@@ -309,43 +382,49 @@ async def _spin(
         return
     results: list[dict[str, Any]] = []
     all_values: list[tuple[int, int, int]] = []
-    current_values: list[int] = []
     try:
-        for index in range(spins * 3):
+        for spin_index in range(spins):
             dice_chat_id = user.id if skip_animation else message.chat_id
-            dice_message = await context.bot.send_dice(
-                chat_id=dice_chat_id,
-                emoji="🎲",
-                disable_notification=skip_animation,
-            )
-            current_values.append(int(dice_message.dice.value))
-            if skip_animation:
-                try:
-                    await context.bot.delete_message(
+            dice_messages = await asyncio.gather(
+                *(
+                    context.bot.send_dice(
                         chat_id=dice_chat_id,
-                        message_id=dice_message.message_id,
+                        emoji="🎲",
+                        disable_notification=skip_animation,
                     )
-                except TelegramError:
-                    logging.exception("Не удалось удалить скрытый кубик.")
-                await asyncio.sleep(1.05)
-            else:
-                await status.edit_text(
-                    f"🎲 Крутка: {index + 1}/{spins * 3}",
-                    reply_markup=_status_keyboard(round_id),
+                    for _ in range(3)
                 )
-                try:
-                    await asyncio.wait_for(
-                        skip_event.wait(),
-                        timeout=DICE_ANIMATION_DELAY_SECONDS,
-                    )
-                except TimeoutError:
-                    pass
-                if skip_event.is_set():
-                    skip_animation = True
-            if len(current_values) == 3:
-                values = (current_values[0], current_values[1], current_values[2])
-                all_values.append(values)
-                current_values = []
+            )
+            values = tuple(int(dice_message.dice.value) for dice_message in dice_messages)
+            all_values.append((values[0], values[1], values[2]))
+            try:
+                await asyncio.wait_for(
+                    skip_event.wait(),
+                    timeout=1.05 if skip_animation else DICE_ANIMATION_DELAY_SECONDS,
+                )
+            except TimeoutError:
+                pass
+            finally:
+                if skip_animation or spins == 10:
+                    for dice_message in dice_messages:
+                        try:
+                            await context.bot.delete_message(
+                                chat_id=dice_chat_id,
+                                message_id=dice_message.message_id,
+                            )
+                        except TelegramError:
+                            logging.exception(
+                                "Не удалось удалить кубик user_id=%s message_id=%s.",
+                                user.id,
+                                dice_message.message_id,
+                            )
+            if not skip_animation and spin_index + 1 < spins:
+                await status.edit_text(
+                    f"🎲 Крутка: {spin_index + 1}/{spins}",
+                    reply_markup=None if skip_animation else _status_keyboard(round_id),
+                )
+            if skip_event.is_set():
+                skip_animation = True
 
         for values in all_values:
             level = _result_level(values)
@@ -375,8 +454,6 @@ async def _spin(
         return
     skip_events.pop(round_id, None)
 
-    top_index = max(range(len(items)), key=lambda index: int(items[index]["level"]))
-    top_item = items[top_index]
     summary_lines = []
     for index, result in enumerate(results, start=1):
         values = " – ".join(str(value) for value in result["values"])
@@ -398,29 +475,32 @@ async def _spin(
     result_keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(
-                    "✅ Сделать активным",
-                    callback_data=f"inv:s:{top_item['item_id']}",
-                ),
-                _inventory_button(context),
+                InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
+                InlineKeyboardButton("🏪 Магазин", callback_data="mkt:p:0:all:date"),
             ],
             [
                 InlineKeyboardButton("🔁 Ещё раз", callback_data="casino:spin"),
                 InlineKeyboardButton("🔁 Ещё ×10", callback_data="casino:spin10"),
             ],
+            [_menu_button()],
         ]
     )
     await status.edit_text(
-        f"🎉 Крутка завершена!\n{summary}\n\n⏳ Баннеры готовятся и сохраняются…",
+        f"🎉 Крутка завершена!\n{summary}\n\n⏳ Готовлю отдельные превью призов…",
         reply_markup=result_keyboard,
     )
     prepared: dict[int, dict[str, Any]] = {}
-    for item in sorted(items, key=lambda entry: int(entry["level"]), reverse=True):
+    for item in items:
         try:
-            prepared[int(item["item_id"])] = await ensure_banner_file(
+            rendered = await ensure_banner_file(
                 context.bot,
                 item,
                 priority=1,
+            )
+            prepared[int(item["item_id"])] = await ensure_market_banner_file(
+                context.bot,
+                rendered,
+                priority=2,
             )
         except Exception:
             logging.exception(
@@ -428,39 +508,49 @@ async def _spin(
                 item["item_id"],
             )
     await status.edit_text(
-        f"🎉 Готово!\n{summary}",
+        f"🎉 Готово!\n{summary}\n\nКаждый приз отправлен отдельным сообщением ниже.",
         reply_markup=result_keyboard,
     )
-    top_item = prepared.get(int(top_item["item_id"]))
-    if top_item is None:
-        await message.reply_text(
-            "Предметы записаны в инвентарь, но не удалось подготовить превью. "
-            "Открой баннер позже — я попробую снова."
-        )
-        return
-    try:
-        await send_banner(
-            context.bot,
-            message.chat_id,
-            str(top_item["file_id"]),
-            animated=int(top_item["level"]) == 6,
-            caption=(
-                f"Баннер: {_RARITY[int(top_item['level'])]}.\n"
-                "💡 Сменить его можно в инвентаре в ЛС."
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                [[
-                    InlineKeyboardButton(
-                        "✅ Сделать активным",
-                        callback_data=f"inv:s:{top_item['item_id']}",
-                    ),
-                    _inventory_button(context),
-                ]]
-            ),
-        )
-    except Exception:
-        logging.exception("Не удалось подготовить превью баннера item_id=%s.", top_item["item_id"])
-        await message.reply_text("Баннер сохранён в инвентаре; превью подготовится при открытии.")
+    for result, item in zip(results, items):
+        prepared_item = prepared.get(int(item["item_id"]))
+        if prepared_item is None:
+            await message.reply_text(
+                f"Приз #{item['item_id']} записан в инвентарь, "
+                "но не удалось подготовить превью."
+            )
+            continue
+        try:
+            await send_banner(
+                context.bot,
+                message.chat_id,
+                str(prepared_item["file_id"]),
+                animated=int(prepared_item["level"]) == 6,
+                caption=(
+                    f"🎁 Приз #{item['item_id']} · "
+                    f"{_RARITY[int(prepared_item['level'])]}\n"
+                    f"🎲 {result['values'][0]} – {result['values'][1]} – {result['values'][2]}"
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "✅ Активировать",
+                                callback_data=f"inv:s:{item['item_id']}",
+                            ),
+                            InlineKeyboardButton(
+                                "🎒 Инвентарь",
+                                callback_data="menu:inv",
+                            ),
+                        ],
+                        [_menu_button()],
+                    ]
+                ),
+            )
+        except Exception:
+            logging.exception("Не удалось показать приз item_id=%s.", item["item_id"])
+            await message.reply_text(
+                f"Приз #{item['item_id']} сохранён. Посмотри его в инвентаре."
+            )
 
 
 async def _show_inventory(
@@ -487,94 +577,120 @@ async def _show_inventory(
         else None
     )
     total = await database.count_user_banner_items(user.id, level=level)
+    query = update.callback_query
     if total == 0:
-        if level is not None:
-            await message.reply_text(
-                f"В инвентаре нет баннеров уровня {level}.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Показать все", callback_data="inv:p:0:all:date")]]
-                ),
-            )
-            return
-        await message.reply_text(
-            "Пока пусто. Попытай удачу в казино.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🎰 Казино", callback_data="casino:menu")]]
-            ),
+        context.user_data["inventory_page"] = 0
+        context.user_data["inventory_filter"] = level_filter
+        context.user_data["inventory_sort"] = sort_by
+        empty_text = (
+            f"В инвентаре нет баннеров уровня {level}."
+            if level is not None
+            else "Пока пусто. Попытай удачу в казино."
         )
+        empty_markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+                    InlineKeyboardButton("🏪 Магазин", callback_data="mkt:p:0:all:date"),
+                ],
+                [_menu_button()],
+            ]
+        )
+        if query is not None and query.message is not None:
+            if query.message.caption is not None:
+                await query.message.edit_caption(caption=empty_text, reply_markup=empty_markup)
+            else:
+                await query.message.edit_text(empty_text, reply_markup=empty_markup)
+        else:
+            await message.reply_text(empty_text, reply_markup=empty_markup)
         return
-    pages = max(1, (total + _PAGE_SIZE - 1) // _PAGE_SIZE)
-    page = min(max(page, 0), pages - 1)
+
+    index = min(max(page, 0), total - 1)
+    context.user_data["inventory_page"] = index
+    context.user_data["inventory_filter"] = level_filter
+    context.user_data["inventory_sort"] = sort_by
     items = await database.get_user_banner_items(
         user.id,
-        limit=_PAGE_SIZE,
-        offset=page * _PAGE_SIZE,
+        limit=1,
+        offset=index,
         level=level,
         sort_by=sort_by,
     )
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"{'✅ ' if item['is_active'] else ''}#{item['item_id']} · "
-                f"{_RARITY[int(item['level'])]}",
-                callback_data=f"inv:i:{item['item_id']}",
-            )
-        ]
-        for item in items
-    ]
+    if not items:
+        await message.reply_text("Не удалось открыть баннер. Обнови инвентарь.")
+        return
+    item = await ensure_banner_file(context.bot, items[0], priority=0)
+    item_id = int(item["item_id"])
+    rarity = int(item["level"])
+    rows: list[list[InlineKeyboardButton]] = []
     navigation: list[InlineKeyboardButton] = []
-    if page > 0:
+    if index > 0:
         navigation.append(
             InlineKeyboardButton(
                 "⬅️",
-                callback_data=f"inv:p:{page - 1}:{level_filter}:{sort_by}",
+                callback_data=f"inv:p:{index - 1}:{level_filter}:{sort_by}",
             )
         )
     navigation.append(
-        InlineKeyboardButton(
-            f"{page + 1}/{pages}",
-            callback_data=f"inv:p:{page}:{level_filter}:{sort_by}",
-        )
+        InlineKeyboardButton(f"{index + 1}/{total}", callback_data="inv:noop")
     )
-    if page + 1 < pages:
+    if index + 1 < total:
         navigation.append(
             InlineKeyboardButton(
                 "➡️",
-                callback_data=f"inv:p:{page + 1}:{level_filter}:{sort_by}",
+                callback_data=f"inv:p:{index + 1}:{level_filter}:{sort_by}",
             )
         )
     rows.append(navigation)
-    level_buttons = [
-        InlineKeyboardButton(
-            "Все" if level_filter == "all" else "Все уровни",
-            callback_data=f"inv:p:0:all:{sort_by}",
-        ),
-        *[
-            InlineKeyboardButton(
-                f"{item_level}{' ✓' if level_filter == str(item_level) else ''}",
-                callback_data=f"inv:p:0:{item_level}:{sort_by}",
-            )
-            for item_level in range(1, 7)
-        ],
-    ]
-    rows.extend([level_buttons[:4], level_buttons[4:]])
+    if not item["is_active"]:
+        rows.append(
+            [InlineKeyboardButton("✅ Сделать активным", callback_data=f"inv:s:{item_id}")]
+        )
     rows.append(
         [
-            InlineKeyboardButton(
-                f"Сортировка: {'уровень' if sort_by == 'level' else 'дата'}",
-                callback_data=f"inv:p:0:{level_filter}:{'date' if sort_by == 'level' else 'level'}",
-            ),
-            InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
-            InlineKeyboardButton("🏪 Площадка", callback_data="mkt:p:0:all:date"),
+            InlineKeyboardButton("♻️ Переработать", callback_data=f"inv:r:{item_id}"),
+            InlineKeyboardButton("🏷 Продать", callback_data=f"mkt:l:{item_id}"),
         ]
     )
-    text = f"🎒 Инвентарь — {total} баннер(ов)"
+    rows.append(
+        [
+            InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+            InlineKeyboardButton("🏪 Магазин", callback_data="mkt:p:0:all:date"),
+        ]
+    )
+    rows.append([_menu_button()])
+    caption = (
+        f"🎒 Инвентарь · баннер #{item_id} · {_RARITY[rarity]}\n"
+        f"{'✅ Активный' if item['is_active'] else 'Не активен'}"
+    )
     markup = InlineKeyboardMarkup(rows)
-    query = update.callback_query
-    if query is not None and query.message is not None and query.message.text is not None:
-        await query.edit_message_text(text, reply_markup=markup)
+    if (
+        query is not None
+        and query.message is not None
+        and (query.message.photo or query.message.animation)
+    ):
+        media = (
+            InputMediaAnimation(media=str(item["file_id"]), caption=caption)
+            if rarity == 6
+            else InputMediaPhoto(media=str(item["file_id"]), caption=caption)
+        )
+        await query.message.edit_media(media=media, reply_markup=markup)
+        context.user_data["inventory_message_id"] = query.message.message_id
     else:
-        await message.reply_text(text, reply_markup=markup)
+        if query is not None and query.message is not None:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except TelegramError:
+                logging.debug("Не удалось очистить старое меню инвентаря.", exc_info=True)
+        sent = await send_banner(
+            context.bot,
+            message.chat_id,
+            str(item["file_id"]),
+            animated=rarity == 6,
+            caption=caption,
+            reply_markup=markup,
+        )
+        context.user_data["inventory_message_id"] = sent.message_id
 
 
 async def _show_item(
@@ -611,7 +727,10 @@ async def _show_item(
             [InlineKeyboardButton("🏷 Выставить на продажу", callback_data=f"mkt:l:{item_id}")]
         )
     buttons.append(
-        [InlineKeyboardButton("↩️ Инвентарь", callback_data="menu:inv")]
+        [
+            InlineKeyboardButton("↩️ Инвентарь", callback_data="menu:inv"),
+            _menu_button(),
+        ]
     )
     await send_banner(
         context.bot,
@@ -630,7 +749,6 @@ async def _show_market(
     level_filter: str,
     sort_by: str,
 ) -> None:
-    del context
     user = update.effective_user
     message = update.effective_message
     if user is None or message is None:
@@ -639,21 +757,77 @@ async def _show_market(
         await message.reply_text("Торговая площадка открывается в ЛС бота.")
         return
     level = int(level_filter) if level_filter.isdigit() and 1 <= int(level_filter) <= 6 else None
+    total = await database.count_market_lots(level=level)
+    page = min(max(page, 0), total - 1) if total else 0
     lots = await database.get_market_lots(
         level=level,
         sort_by=sort_by,
-        limit=_PAGE_SIZE,
-        offset=max(0, page) * _PAGE_SIZE,
+        limit=1,
+        offset=page,
     )
-    rows = [
+    query = update.callback_query
+    if total == 0:
+        context.user_data["market_page"] = 0
+        context.user_data["market_filter"] = level_filter
+        context.user_data["market_sort"] = sort_by
+        text = "🏪 Здесь пока нет баннеров на продаже."
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
+                    InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+                ],
+                [_menu_button()],
+            ]
+        )
+        if query is not None and query.message is not None:
+            if query.message.caption is not None:
+                await query.message.edit_caption(caption=text, reply_markup=markup)
+            else:
+                await query.message.edit_text(text, reply_markup=markup)
+        else:
+            await message.reply_text(text, reply_markup=markup)
+        return
+    if not lots:
+        await message.reply_text("Лоты изменились. Открой площадку заново.")
+        return
+    context.user_data["market_page"] = page
+    context.user_data["market_filter"] = level_filter
+    context.user_data["market_sort"] = sort_by
+    lot = lots[0]
+    item = await database.get_banner_item(int(lot["item_id"]))
+    if item is None:
+        raise RuntimeError(f"Баннер магазина item_id={lot['item_id']} не найден.")
+    item = await ensure_market_banner_file(context.bot, item, priority=0)
+    level = int(item["level"])
+    rows: list[list[InlineKeyboardButton]] = []
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "⬅️",
+                callback_data=f"mkt:p:{page - 1}:{level_filter}:{sort_by}",
+            )
+        )
+    navigation.append(
+        InlineKeyboardButton(f"{page + 1}/{total}", callback_data="mkt:noop")
+    )
+    if page + 1 < total:
+        navigation.append(
+            InlineKeyboardButton(
+                "➡️",
+                callback_data=f"mkt:p:{page + 1}:{level_filter}:{sort_by}",
+            )
+        )
+    rows.append(navigation)
+    rows.append(
         [
             InlineKeyboardButton(
-                f"#{lot['lot_id']} · {_RARITY[int(lot['level'])]} · {_coins(int(lot['price_cents']))}💰",
+                f"🛒 Купить за {_coins(int(lot['price_cents']))}💰",
                 callback_data=f"mkt:b:{lot['lot_id']}",
             )
         ]
-        for lot in lots
-    ]
+    )
     filters_row = [
         InlineKeyboardButton(
             "Все уровни" if level_filter != "all" else "Все ✓",
@@ -678,38 +852,50 @@ async def _show_market(
             InlineKeyboardButton("Мои лоты", callback_data="mkt:mine"),
         ]
     )
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(
-                "⬅️",
-                callback_data=f"mkt:p:{page - 1}:{level_filter}:{sort_by}",
-            )
-        )
-    nav.append(InlineKeyboardButton(f"Стр. {page + 1}", callback_data="mkt:mine"))
-    if len(lots) == _PAGE_SIZE:
-        nav.append(
-            InlineKeyboardButton(
-                "➡️",
-                callback_data=f"mkt:p:{page + 1}:{level_filter}:{sort_by}",
-            )
-        )
-    rows.append(nav)
-    rows.append([InlineKeyboardButton("↩️ Инвентарь", callback_data="menu:inv")])
-    text = "🏪 Торговая площадка. Цена включает комиссию площадки 20%."
+    rows.append(
+        [
+            InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv"),
+            InlineKeyboardButton("🎰 Казино", callback_data="casino:menu"),
+        ]
+    )
+    rows.append([_menu_button()])
+    text = (
+        f"🏪 Лот #{lot['lot_id']} · {_RARITY[level]}\n"
+        f"Цена: {_coins(int(lot['price_cents']))} монет\n"
+        "Цена включает комиссию площадки 20%."
+    )
     markup = InlineKeyboardMarkup(rows)
-    query = update.callback_query
-    if query is not None and query.message is not None and query.message.text is not None:
-        await query.edit_message_text(text, reply_markup=markup)
+    file_id = str(item.get("market_file_id") or "")
+    if not file_id:
+        raise RuntimeError(f"У лота #{lot['lot_id']} нет превью магазина.")
+    if query is not None and query.message is not None and (
+        query.message.photo or query.message.animation
+    ):
+        media = (
+            InputMediaAnimation(media=file_id, caption=text)
+            if level == 6
+            else InputMediaPhoto(media=file_id, caption=text)
+        )
+        await query.message.edit_media(media=media, reply_markup=markup)
     else:
-        await message.reply_text(text, reply_markup=markup)
+        if query is not None and query.message is not None:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except TelegramError:
+                logging.debug("Не удалось очистить старое меню магазина.", exc_info=True)
+        await send_banner(
+            context.bot,
+            message.chat_id,
+            file_id,
+            animated=level == 6,
+            caption=text,
+            reply_markup=markup,
+        )
 
 
 async def _show_my_lots(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    del context
     query = update.callback_query
     user = update.effective_user
     if query is None or user is None or query.message is None:
@@ -719,7 +905,11 @@ async def _show_my_lots(
         await query.message.reply_text(
             "У тебя нет активных лотов.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🏪 Площадка", callback_data="mkt:p:0:all:date")]]
+                [
+                    [InlineKeyboardButton("🏪 Площадка", callback_data="mkt:p:0:all:date")],
+                    [InlineKeyboardButton("🎰 Казино", callback_data="casino:menu")],
+                    [_menu_button()],
+                ]
             ),
         )
         return
@@ -735,7 +925,12 @@ async def _show_my_lots(
     await query.message.reply_text(
         "Твои активные лоты:",
         reply_markup=InlineKeyboardMarkup(
-            rows + [[InlineKeyboardButton("🏪 Площадка", callback_data="mkt:p:0:all:date")]]
+            rows
+            + [
+                [InlineKeyboardButton("🏪 Площадка", callback_data="mkt:p:0:all:date")],
+                [InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv")],
+                [_menu_button()],
+            ]
         ),
     )
 
@@ -907,6 +1102,11 @@ async def on_game_callback(
     if user is None or query.message is None:
         return
     action = query.data or ""
+    if action == "casino:home":
+        await _return_to_main_menu(update, context)
+        return
+    if action in ("inv:noop", "mkt:noop"):
+        return
     if action.startswith(("inv:", "menu:inv", "mkt:")) and (
         query.message.chat.type != ChatType.PRIVATE
         or query.message.chat_id != user.id
@@ -1020,14 +1220,24 @@ async def on_game_callback(
         result = await database.recycle_banner_item(user.id, item_id, payout)
         if result == "recycled":
             await query.message.reply_text(f"Баннер переработан. Получено {_coins(payout)} монет.")
-            if item.get("backup_msg_id"):
-                try:
-                    await context.bot.delete_message(
-                        BACKUP_CHANNEL_ID,
-                        int(item["backup_msg_id"]),
-                    )
-                except TelegramError:
-                    logging.exception("Не удалось удалить переработанный баннер из бэкапа.")
+            for backup_field in ("backup_msg_id", "market_backup_msg_id"):
+                if item.get(backup_field):
+                    try:
+                        await context.bot.delete_message(
+                            BACKUP_CHANNEL_ID,
+                            int(item[backup_field]),
+                        )
+                    except TelegramError:
+                        logging.exception(
+                            "Не удалось удалить копию переработанного баннера из бэкапа."
+                        )
+            await _show_inventory(
+                update,
+                context,
+                page=max(0, int(context.user_data.get("inventory_page", 0)) - 1),
+                level_filter=str(context.user_data.get("inventory_filter", "all")),
+                sort_by=str(context.user_data.get("inventory_sort", "date")),
+            )
         else:
             explanations = {
                 "active": "Активный баннер нельзя переработать, пока баланс не в долгу.",
@@ -1039,7 +1249,7 @@ async def on_game_callback(
         _, _, page_value, level_filter, sort_by = action.split(":")
         await _show_market(update, context, int(page_value), level_filter, sort_by)
     elif action == "mkt:mine":
-        await _show_my_lots(update, context)
+        await _show_my_lots(update)
     elif action.startswith("mkt:l:"):
         item_id = await _parse_callback_int(query, action.split(":")[2])
         if item_id is None:
@@ -1080,6 +1290,13 @@ async def on_game_callback(
             animated=int(item["level"]) == 6,
             caption=f"Куплен баннер · {_RARITY[int(item['level'])]}",
         )
+        await _show_market(
+            update,
+            context,
+            page=int(context.user_data.get("market_page", 0)),
+            level_filter=str(context.user_data.get("market_filter", "all")),
+            sort_by=str(context.user_data.get("market_sort", "date")),
+        )
     elif action.startswith("mkt:c:"):
         lot_id = await _parse_callback_int(query, action.split(":")[2])
         if lot_id is None:
@@ -1088,6 +1305,8 @@ async def on_game_callback(
         await query.message.reply_text(
             "Лот снят с продажи." if removed else "Лот уже снят или недоступен."
         )
+        if removed:
+            await _show_my_lots(update)
     elif action == "bonus:go":
         await _bonus_prompt(update, context)
     elif action == "bonus:chk":
@@ -1117,6 +1336,13 @@ async def _handle_listing_price(
         return True
     item_id = int(context.user_data["market_listing_item"])
     context.user_data.pop("market_listing_item", None)
+    inventory_message_id = context.user_data.pop("inventory_message_id", None)
+    inventory_page = max(
+        0,
+        int(context.user_data.get("inventory_page", 0)) - 1,
+    )
+    inventory_filter = str(context.user_data.get("inventory_filter", "all"))
+    inventory_sort = str(context.user_data.get("inventory_sort", "date"))
     result = await database.create_market_lot(user.id, item_id, cents)
     responses = {
         "listed": "Баннер выставлен на площадку.",
@@ -1125,6 +1351,102 @@ async def _handle_listing_price(
         "forbidden": "Активный баннер и баннер владельца продавать нельзя.",
     }
     await message.reply_text(responses.get(result, "Не удалось выставить баннер."))
+    if result == "listed":
+        if isinstance(inventory_message_id, int):
+            try:
+                await context.bot.delete_message(
+                    chat_id=message.chat_id,
+                    message_id=inventory_message_id,
+                )
+            except TelegramError:
+                logging.exception(
+                    "Не удалось убрать выставленный баннер из инвентаря user_id=%s.",
+                    user.id,
+                )
+        await _show_inventory(
+            update,
+            context,
+            page=inventory_page,
+            level_filter=inventory_filter,
+            sort_by=inventory_sort,
+        )
+    return True
+
+
+async def _handle_recycle_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None or message.text is None:
+        return False
+    match = _RECYCLE_COMMAND_RE.fullmatch(message.text.strip())
+    if match is None:
+        return False
+    level = _RARITY_ALIASES.get(match.group("rarity").casefold())
+    if level is None:
+        await message.reply_text(
+            "Не распознала редкость. Используй обычный, необычный, редкий, "
+            "эпический, элитный или легендарный."
+        )
+        return True
+    quantity = int(match.group("quantity"))
+    if not 1 <= quantity <= 30:
+        await message.reply_text("За одну команду можно переработать от 1 до 30 баннеров.")
+        return True
+    try:
+        await database.ensure_user(
+            user.id,
+            message.chat_id,
+            user.username,
+            user.first_name or user.username,
+        )
+        await database.get_duel_balance(user.id, user.username)
+        payout = CASINO_RECYCLE_PAYOUT_CENTS[level]
+        result, items, balance = await database.recycle_banner_items_by_level(
+            user.id,
+            level,
+            quantity,
+            payout,
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось переработать баннеры user_id=%s level=%s quantity=%s.",
+            user.id,
+            level,
+            quantity,
+        )
+        await message.reply_text("Не удалось переработать баннеры. Попробуй позже.")
+        return True
+    if result == "insufficient":
+        await message.reply_text(
+            f"Не хватает свободных баннеров редкости «{_RARITY[level]}»: "
+            f"нужно {quantity}. Активные и выставленные на продажу не трогаю."
+        )
+        return True
+    if result != "recycled" or balance is None:
+        await message.reply_text("Не удалось найти игровой баланс. Открой казино и попробуй снова.")
+        return True
+    for item in items:
+        for field in ("backup_msg_id", "market_backup_msg_id"):
+            backup_message_id = item.get(field)
+            if backup_message_id is None:
+                continue
+            try:
+                await context.bot.delete_message(
+                    chat_id=BACKUP_CHANNEL_ID,
+                    message_id=int(backup_message_id),
+                )
+            except TelegramError:
+                logging.exception(
+                    "Не удалось удалить резервное изображение переработанного баннера %s.",
+                    item["item_id"],
+                )
+    await message.reply_text(
+        f"♻️ Переработано: {_RARITY[level]} ×{quantity}. "
+        f"Получено {_coins(payout * quantity)} монет. Баланс: {_coins(balance)}."
+    )
     return True
 
 
@@ -1137,6 +1459,8 @@ async def handle_game_message(
     if message is None or user is None or message.text is None:
         return False
     if await _handle_listing_price(update, context):
+        return True
+    if await _handle_recycle_command(update, context):
         return True
     text = message.text.strip().casefold()
     if re.fullmatch(r"/(?:help|adminhelp|helpadmin)(?:@\w+)?", text):
