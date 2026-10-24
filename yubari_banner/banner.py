@@ -240,7 +240,7 @@ def _medallion(rng, acc, avatar, name, cx, cy, R, level):
         l = .05 if i % 3 else .1
         d.line([(sx + math.cos(a) * sR * 1.0, sy + math.sin(a) * sR * 1.0),
                 (sx + math.cos(a) * sR * (1 + l), sy + math.sin(a) * sR * (1 + l))], fill=A(0) + (180,), width=SS)
-    from frames import _gem
+    from .frames import _gem
     for i in range(8):
         a = 2 * math.pi * i / 8 + math.pi / 8
         _gem(d, sx + math.cos(a) * sR * 1.0, sy + math.sin(a) * sR * 1.0, (11 if i % 2 else 8) * SS, A(i + 2))
