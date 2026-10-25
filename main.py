@@ -152,6 +152,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     }
 
     def do_GET(self) -> None:
+        request_path = urlsplit(self.path).path
         if self.path in ("/", "/index.html"):
             page_path = Path(__file__).resolve().parent / "webapp" / "index.html"
             try:
@@ -182,7 +183,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(asset)
             return
-        if urlsplit(self.path).path.startswith("/api/"):
+        if request_path.startswith("/media/banner/"):
+            self._handle_banner_media(request_path)
+            return
+        if request_path.startswith("/api/"):
             self._handle_api_request("GET")
             return
         if self.path != "/health":
@@ -193,6 +197,40 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def _handle_banner_media(self, request_path: str) -> None:
+        try:
+            item_id = int(request_path.removeprefix("/media/banner/"))
+        except ValueError:
+            self.send_error(404)
+            return
+        loop = self.event_loop
+        if loop is None or loop.is_closed():
+            self.send_error(503, "API is unavailable")
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            miniapp_api.get_banner_media(item_id, parse_qs(urlsplit(self.path).query)),
+            loop,
+        )
+        try:
+            status, body, content_type = future.result(timeout=30)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            self.send_error(504, "Image request timed out")
+            return
+        except Exception:
+            logging.exception("Mini App banner image request failed item_id=%s.", item_id)
+            self.send_error(500, "Image request failed")
+            return
+
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if status == 200:
+            self.send_header("Cache-Control", "private, max-age=300")
+            self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self) -> None:
         self._handle_api_request("POST")

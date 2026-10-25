@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import secrets
+import time
 from typing import Any
+from urllib.parse import quote
 
+import httpx
 import database
-from config import ADMIN_ID
+from config import ADMIN_ID, TELEGRAM_TOKEN
 from yubari_banner import PRESET_NAMES
+
+_MEDIA_LINK_LIFETIME_SECONDS = 600
+_MAX_BANNER_MEDIA_SIZE = 20 * 1024 * 1024
 
 
 def _is_admin(user_id: int) -> bool:
@@ -16,6 +24,18 @@ def _is_admin(user_id: int) -> bool:
 
 async def _has_admin_access(user_id: int) -> bool:
     return _is_admin(user_id) or await database.is_admin_user(user_id)
+
+
+def _media_signature(user_id: int, item_id: int, expires: int) -> str:
+    secret = hashlib.sha256(TELEGRAM_TOKEN.encode("utf-8")).digest()
+    message = f"{user_id}:{item_id}:{expires}".encode("ascii")
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _media_url(user_id: int, item_id: int) -> str:
+    expires = int(time.time()) + _MEDIA_LINK_LIFETIME_SECONDS
+    signature = _media_signature(user_id, item_id, expires)
+    return f"/media/banner/{item_id}?user={user_id}&expires={expires}&sig={signature}"
 
 
 async def get_session(user_id: int, first_name: str) -> tuple[int, dict[str, Any]]:
@@ -35,6 +55,7 @@ async def _profile(
     profile = await database.get_global_profile(user_id) or {}
     activity = await database.get_user_message_activity(user_id)
     balance = await database.get_duel_balance(user_id, username)
+    active_banner = await database.get_active_banner_item(user_id)
     return {
         "user_id": user_id,
         "username": profile.get("username") or username,
@@ -45,6 +66,16 @@ async def _profile(
         "notes": profile.get("notes") or "",
         "balance_cents": balance,
         "activity": activity,
+        "active_banner": (
+            {
+                "item_id": int(active_banner["item_id"]),
+                "level": int(active_banner["level"]),
+                "image_url": _media_url(user_id, int(active_banner["item_id"])),
+                "animated": int(active_banner["level"]) == 6,
+            }
+            if active_banner is not None
+            else None
+        ),
     }
 
 
@@ -87,6 +118,14 @@ async def _market(
         )
     my_lots = await database.get_user_market_lots(user_id)
     inventory = await database.get_user_banner_items(user_id, limit=100)
+    lots = [
+        {
+            **lot,
+            "image_url": _media_url(user_id, int(lot["item_id"])),
+            "animated": int(lot["level"]) == 6,
+        }
+        for lot in lots
+    ]
     return {
         "lots": [
             {
@@ -97,6 +136,8 @@ async def _market(
                 "level": int(lot["level"]),
                 "price_cents": int(lot["price_cents"]),
                 "created_at": str(lot["created_at"]),
+                "image_url": str(lot["image_url"]),
+                "animated": bool(lot["animated"]),
             }
             for lot in lots
         ],
@@ -108,6 +149,7 @@ async def _market(
                 "level": int(lot["level"]),
                 "price_cents": int(lot["price_cents"]),
                 "created_at": str(lot["created_at"]),
+                "image_url": _media_url(user_id, int(lot["item_id"])),
             }
             for lot in my_lots
         ],
@@ -118,6 +160,8 @@ async def _market(
                 "is_active": bool(item["is_active"]),
                 "is_transfer_pending": bool(item["is_transfer_pending"]),
                 "source": str(item["source"]),
+                "image_url": _media_url(user_id, int(item["item_id"])),
+                "animated": int(item["level"]) == 6,
             }
             for item in inventory
         ],
@@ -145,6 +189,75 @@ async def _admin_dashboard() -> dict[str, Any]:
         ),
         "market_fee_cents": market_fee,
     }
+
+
+async def get_banner_media(
+    item_id: int,
+    query: dict[str, list[str]],
+) -> tuple[int, bytes, str]:
+    try:
+        user_id = int(query.get("user", [""])[0])
+        expires = int(query.get("expires", [""])[0])
+        signature = query.get("sig", [""])[0]
+    except ValueError:
+        return 400, b"Invalid media signature.", "text/plain; charset=utf-8"
+
+    now = int(time.time())
+    if expires < now or expires > now + _MEDIA_LINK_LIFETIME_SECONDS + 30:
+        return 403, b"Media link expired.", "text/plain; charset=utf-8"
+    expected = _media_signature(user_id, item_id, expires)
+    if not hmac.compare_digest(signature, expected):
+        return 403, b"Invalid media signature.", "text/plain; charset=utf-8"
+
+    item = await database.get_banner_item(item_id)
+    if item is None:
+        return 404, b"Banner not found.", "text/plain; charset=utf-8"
+
+    lot = await database.get_market_lot_for_item(item_id)
+    is_public_listing = lot is not None
+    if not is_public_listing and int(item["user_id"]) != user_id:
+        return 404, b"Banner not found.", "text/plain; charset=utf-8"
+
+    file_id = (
+        item.get("market_file_id") or item.get("file_id")
+        if is_public_listing
+        else item.get("file_id")
+    )
+    if not isinstance(file_id, str) or not file_id:
+        return 404, b"Banner image not available.", "text/plain; charset=utf-8"
+
+    api_base = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=8)) as client:
+            file_response = await client.get(
+                f"{api_base}/getFile",
+                params={"file_id": file_id},
+            )
+            file_response.raise_for_status()
+            file_data = file_response.json()
+            file_path = file_data.get("result", {}).get("file_path")
+            if not file_data.get("ok") or not isinstance(file_path, str):
+                return 502, b"Telegram could not provide this image.", "text/plain; charset=utf-8"
+
+            media_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{quote(file_path, safe='/')}"
+            async with client.stream("GET", media_url) as media_response:
+                media_response.raise_for_status()
+                content_type = media_response.headers.get("Content-Type", "").split(";", 1)[0]
+                if not content_type.startswith("image/"):
+                    return 502, b"Telegram returned a non-image file.", "text/plain; charset=utf-8"
+                content_length = media_response.headers.get("Content-Length")
+                if content_length and int(content_length) > _MAX_BANNER_MEDIA_SIZE:
+                    return 413, b"Image is too large.", "text/plain; charset=utf-8"
+                chunks: list[bytes] = []
+                total_size = 0
+                async for chunk in media_response.aiter_bytes():
+                    total_size += len(chunk)
+                    if total_size > _MAX_BANNER_MEDIA_SIZE:
+                        return 413, b"Image is too large.", "text/plain; charset=utf-8"
+                    chunks.append(chunk)
+        return 200, b"".join(chunks), content_type
+    except (httpx.HTTPError, ValueError):
+        return 502, b"Could not retrieve banner image from Telegram.", "text/plain; charset=utf-8"
 
 
 async def _create_access_key(

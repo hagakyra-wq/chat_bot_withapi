@@ -49,6 +49,20 @@ function buildLotCard(lot) {
   card.className = `listing-card rarity-${lot.level}`;
   const art = document.createElement("div");
   art.className = "listing-art";
+  if (lot.image_url) {
+    art.classList.add("has-image");
+    const image = document.createElement("img");
+    image.className = "listing-image";
+    image.src = lot.image_url;
+    image.alt = lot.animated ? `Анимированный баннер ${titleFromLot(lot)}` : `Баннер ${titleFromLot(lot)}`;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      image.remove();
+      art.classList.add("image-unavailable");
+    }, { once: true });
+    art.append(image);
+  }
   const mark = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
   use.setAttribute("href", "/assets/icons.svg#mark");
@@ -96,6 +110,10 @@ function buildLotCard(lot) {
   content.append(title, meta, buy);
   card.append(art, content);
   return card;
+}
+
+function titleFromLot(lot) {
+  return lot.title || `${rarityNames[lot.level] || "Баннер"} #${lot.item_id}`;
 }
 
 function renderMarket(result) {

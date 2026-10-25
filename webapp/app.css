@@ -253,7 +253,11 @@ svg { display: block; }
 .listing-art { position: relative; display: grid; min-height: 112px; place-items: center; overflow: hidden; background: radial-gradient(ellipse at 50% 120%, rgb(165 138 250 / 18%), transparent 66%), linear-gradient(145deg, #252033, #191a25); }
 .listing-art::before, .listing-art::after { position: absolute; width: 112px; height: 112px; border: 1px solid rgb(224 205 242 / 11%); border-radius: 50%; content: ""; }
 .listing-art::after { width: 76px; height: 76px; border-color: rgb(224 205 242 / 17%); }
-.listing-art svg { z-index: 1; width: 39px; height: 39px; color: var(--violet-bright); filter: drop-shadow(0 0 12px rgb(194 164 255 / 30%)); }
+.listing-art > svg { z-index: 1; width: 39px; height: 39px; color: var(--violet-bright); filter: drop-shadow(0 0 12px rgb(194 164 255 / 30%)); opacity: .62; }
+.listing-image { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+.listing-art.has-image::before, .listing-art.has-image::after { z-index: 1; pointer-events: none; }
+.listing-art.has-image > svg { z-index: 2; width: 23px; height: 23px; opacity: .8; }
+.listing-art.image-unavailable .listing-image { display: none; }
 .rarity-1 .listing-art { background: radial-gradient(ellipse at 50% 120%, rgb(154 166 184 / 16%), transparent 70%), #1c1d27; }
 .rarity-2 .listing-art { background: radial-gradient(ellipse at 50% 120%, rgb(100 183 151 / 19%), transparent 70%), #1b2226; }
 .rarity-3 .listing-art { background: radial-gradient(ellipse at 50% 120%, rgb(108 151 220 / 22%), transparent 70%), #1b202b; }
