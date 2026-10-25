@@ -190,6 +190,7 @@ def _profile_keyboard(
                 )
             ],
             [InlineKeyboardButton("🎨 Переделать баннер", callback_data="profile:banner")],
+            [InlineKeyboardButton("↩️ Главное меню", callback_data="casino:home")],
         ]
     )
 
