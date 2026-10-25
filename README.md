@@ -103,10 +103,16 @@ cancel - Отменить текущий ввод или диалог
 создаёт asyncio event loop перед запуском polling для совместимости с
 средами Python, в которых loop больше не создаётся автоматически.
 
-В Environment добавьте `TELEGRAM_TOKEN`, `GROQ_API_KEY`, `HISTORY_ENCRYPTION_KEY`,
-`ADMIN_ID`, `BACKUP_CHANNEL_ID` и `LOGS_CHAT`. Для саммари дополнительно задайте
-`GEMINI_API_KEY` из Google AI Studio: саммари групп выполняются моделью
-`gemini-2.5-flash`, обычные ответы остаются на Groq.
+В Environment добавьте `TELEGRAM_TOKEN`, `GROQ_API_KEY`, `HISTORY_ENCRYPTION_KEY`
+и `ADMIN_ID`. Каналы `BACKUP_CHANNEL_ID` и `LOGS_CHAT` необязательны: без них бот
+запустится и будет работать, но резервные копии и пересылка логов в Telegram
+будут отключены. Для саммари можно задать `GEMINI_API_KEY` из Google AI Studio.
+Сначала бот попробует модели из `SUMMARY_GEMINI_MODELS`, затем модели Groq из
+`SUMMARY_GROQ_MODELS`; по умолчанию это `gemini-2.5-flash`,
+`gemini-2.0-flash`, а затем `openai/gpt-oss-120b`, `llama-3.3-70b-versatile`
+и `llama-3.1-8b-instant`. Списки задаются через запятую и могут быть изменены
+в Environment; доступность моделей и лимиты зависят от ключа и провайдера.
+Если Gemini не настроен или все модели недоступны, бот всё равно попробует Groq.
 `HISTORY_ENCRYPTION_KEY` — постоянный ключ Fernet, необходимый для шифрования
 истории в SQLite, DB-бэкапах и зашифрованных файлах истории в Telegram. Создайте его
 один раз командой `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`

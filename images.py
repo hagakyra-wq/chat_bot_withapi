@@ -848,14 +848,15 @@ class ImageGenerationManager:
     ) -> None:
         image_file = io.BytesIO(image)
         image_file.name = "yubara.png" if mime_type == "image/png" else "yubara.jpg"
-        try:
-            await context.bot.send_photo(
-                chat_id=BACKUP_CHANNEL_ID,
-                photo=image_file,
-                caption=f"Yubara | {model_name}\n{job.prompt}"[:1024],
-            )
-        except TelegramError:
-            logging.exception("Не удалось опубликовать генерацию в канале BACKUP_CHANNEL_ID.")
+        if BACKUP_CHANNEL_ID is not None:
+            try:
+                await context.bot.send_photo(
+                    chat_id=BACKUP_CHANNEL_ID,
+                    photo=image_file,
+                    caption=f"Yubara | {model_name}\n{job.prompt}"[:1024],
+                )
+            except TelegramError:
+                logging.exception("Не удалось опубликовать генерацию в канале BACKUP_CHANNEL_ID.")
 
         image_file.seek(0)
         try:

@@ -90,6 +90,8 @@ async def _recover_banner_from_backup(
     animated: bool,
     label: str,
 ) -> tuple[str, int] | None:
+    if BACKUP_CHANNEL_ID is None:
+        return None
     try:
         backup_copy = await bot.forward_message(
             chat_id=BACKUP_CHANNEL_ID,
@@ -132,7 +134,7 @@ async def _recover_banner_from_backup(
 
 
 async def _delete_replaced_backup(bot: Any, backup_msg_id: int | None, label: str) -> None:
-    if not backup_msg_id:
+    if not backup_msg_id or BACKUP_CHANNEL_ID is None:
         return
     try:
         await bot.delete_message(BACKUP_CHANNEL_ID, int(backup_msg_id))
@@ -222,6 +224,10 @@ async def _render_and_backup(
         and time.time() - rendered_at < _ACTIVE_REFRESH_SECONDS
     ):
         return item
+    if BACKUP_CHANNEL_ID is None:
+        raise RuntimeError(
+            "Для создания или обновления баннера настройте BACKUP_CHANNEL_ID."
+        )
 
     buffer = await _render_queue.render(
         priority,
@@ -327,6 +333,10 @@ async def ensure_market_banner_file(
                     f"Баннер item_id={item_id} исчез после восстановления превью."
                 )
             return updated
+    if BACKUP_CHANNEL_ID is None:
+        raise RuntimeError(
+            "Для создания превью баннера настройте BACKUP_CHANNEL_ID."
+        )
     buffer = await _render_queue.render(
         priority,
         user_id=int(item["user_id"]),
@@ -487,6 +497,10 @@ async def get_group_owner_banner(
             )
             return recovered_file_id, True
 
+    if BACKUP_CHANNEL_ID is None:
+        raise RuntimeError(
+            "Для создания группового баннера настройте BACKUP_CHANNEL_ID."
+        )
     buffer = await _render_queue.render(
         1,
         user_id=owner_user_id,

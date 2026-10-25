@@ -1941,17 +1941,18 @@ async def on_game_callback(
         result = await database.recycle_banner_item(user.id, item_id, payout)
         if result == "recycled":
             await query.message.reply_text(f"Баннер переработан. Получено {_coins(payout)} монет.")
-            for backup_field in ("backup_msg_id", "market_backup_msg_id"):
-                if item.get(backup_field):
-                    try:
-                        await context.bot.delete_message(
-                            BACKUP_CHANNEL_ID,
-                            int(item[backup_field]),
-                        )
-                    except TelegramError:
-                        logging.exception(
-                            "Не удалось удалить копию переработанного баннера из бэкапа."
-                        )
+            if BACKUP_CHANNEL_ID is not None:
+                for backup_field in ("backup_msg_id", "market_backup_msg_id"):
+                    if item.get(backup_field):
+                        try:
+                            await context.bot.delete_message(
+                                BACKUP_CHANNEL_ID,
+                                int(item[backup_field]),
+                            )
+                        except TelegramError:
+                            logging.exception(
+                                "Не удалось удалить копию переработанного баннера из бэкапа."
+                            )
             await _show_inventory(
                 update,
                 context,
@@ -2286,21 +2287,22 @@ async def _handle_recycle_command(
     if result != "recycled" or balance is None:
         await message.reply_text("Не удалось найти игровой баланс. Открой казино и попробуй снова.")
         return True
-    for item in items:
-        for field in ("backup_msg_id", "market_backup_msg_id"):
-            backup_message_id = item.get(field)
-            if backup_message_id is None:
-                continue
-            try:
-                await context.bot.delete_message(
-                    chat_id=BACKUP_CHANNEL_ID,
-                    message_id=int(backup_message_id),
-                )
-            except TelegramError:
-                logging.exception(
-                    "Не удалось удалить резервное изображение переработанного баннера %s.",
-                    item["item_id"],
-                )
+    if BACKUP_CHANNEL_ID is not None:
+        for item in items:
+            for field in ("backup_msg_id", "market_backup_msg_id"):
+                backup_message_id = item.get(field)
+                if backup_message_id is None:
+                    continue
+                try:
+                    await context.bot.delete_message(
+                        chat_id=BACKUP_CHANNEL_ID,
+                        message_id=int(backup_message_id),
+                    )
+                except TelegramError:
+                    logging.exception(
+                        "Не удалось удалить резервное изображение переработанного баннера %s.",
+                        item["item_id"],
+                    )
     await message.reply_text(
         f"♻️ Переработано: {_RARITY[level]} ×{quantity}. "
         f"Получено {_coins(payout * quantity)} монет. Баланс: {_coins(balance)}."

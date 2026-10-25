@@ -25,6 +25,8 @@ def _safe_message(text: str) -> str:
 
 
 async def send_channel_event(bot: Bot, text: str) -> None:
+    if LOGS_CHAT is None:
+        return
     try:
         await bot.send_message(
             chat_id=LOGS_CHAT,

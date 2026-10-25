@@ -47,6 +47,7 @@ from config import (
     DATABASE_BACKUP_PATH,
     DATABASE_PATH,
     HISTORY_ENCRYPTION_KEY,
+    LOGS_CHAT,
     MOSCOW_TIMEZONE,
     PORT,
     TELEGRAM_TOKEN,
@@ -131,6 +132,8 @@ class PerUserUpdateProcessor(BaseUpdateProcessor):
 
 
 async def _restore_from_telegram(bot: object) -> tuple[str, int] | None:
+    if BACKUP_CHANNEL_ID is None:
+        return None
     temporary_path = DATABASE_PATH.with_name("database_restore_download.tmp")
     try:
         chat = await bot.get_chat(BACKUP_CHANNEL_ID)
@@ -299,8 +302,18 @@ async def _install_staged_archives(staged: list[tuple[Path, Path]]) -> None:
 
 
 async def _post_init(application: Application) -> None:
-    log_handler = install_channel_log_handler(application.bot)
-    application.bot_data["channel_log_handler"] = log_handler
+    if LOGS_CHAT is None:
+        logging.warning(
+            "LOGS_CHAT не задан; пересылка предупреждений и ошибок в Telegram отключена."
+        )
+    else:
+        log_handler = install_channel_log_handler(application.bot)
+        application.bot_data["channel_log_handler"] = log_handler
+    if BACKUP_CHANNEL_ID is None:
+        logging.warning(
+            "BACKUP_CHANNEL_ID не задан; восстановление и резервное копирование "
+            "в Telegram отключены."
+        )
     await send_channel_event(
         application.bot,
         f"▶️ Юбара запускается. HTTP healthcheck: порт {PORT}; проверяю инициализацию базы данных.",
@@ -353,6 +366,8 @@ async def _post_init(application: Application) -> None:
 
 
 async def _perform_backup(bot: object) -> None:
+    if BACKUP_CHANNEL_ID is None:
+        return
     try:
         caption = "📅 Дата и время: " + datetime.now(
             MOSCOW_TIMEZONE

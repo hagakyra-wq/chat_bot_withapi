@@ -893,9 +893,12 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             metadata = None
         except Exception:
-            logging.exception("Gemini не смог подготовить саммари для группы %s.", group_id)
+            logging.exception(
+                "Ни одна настроенная модель не смогла подготовить саммари для группы %s.",
+                group_id,
+            )
             await message.reply_text(
-                "Не удалось подготовить саммари. Проверь настройки Gemini и попробуй позже."
+                "Не удалось подготовить саммари. Проверь ключи, список моделей и попробуй позже."
             )
             return
     else:

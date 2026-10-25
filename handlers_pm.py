@@ -1567,6 +1567,12 @@ async def delete_all_data_callback(
 
     try:
         backup_message_ids = await database.get_known_backup_message_ids()
+        if BACKUP_CHANNEL_ID is None and backup_message_ids:
+            await query.edit_message_text(
+                "Не могу завершить полный сброс: в базе есть документы канала бэкапов, "
+                "но BACKUP_CHANNEL_ID не настроен. Укажи канал и повтори команду."
+            )
+            return ConversationHandler.END
         session_manifest = await database.get_telegram_session_backup_manifest()
         session_user_ids = set(personal_account.session_user_ids())
         session_user_ids.update(session_manifest)
