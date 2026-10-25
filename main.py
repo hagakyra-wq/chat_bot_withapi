@@ -148,8 +148,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         "/assets/market.js": ("market.js", "text/javascript; charset=utf-8"),
         "/assets/activation.js": ("activation.js", "text/javascript; charset=utf-8"),
         "/assets/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
+        "/assets/wheel.js": ("wheel.js", "text/javascript; charset=utf-8"),
         "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
     }
+    bot: Any | None = None
 
     def do_GET(self) -> None:
         request_path = urlsplit(self.path).path
@@ -285,6 +287,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 first_name,
                 username,
                 payload,
+                bot=self.bot,
             )
         loop = self.event_loop
         if loop is None or loop.is_closed():
@@ -1256,6 +1259,8 @@ def main() -> None:
     http_server: ThreadingHTTPServer | None = None
     http_thread: threading.Thread | None = None
     try:
+        application = build_application()
+        HealthCheckHandler.bot = application.bot
         try:
             http_server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
         except OSError:
@@ -1269,9 +1274,10 @@ def main() -> None:
         )
         http_thread.start()
         logging.info("HTTP healthcheck запущен на порту %s.", PORT)
-        build_application().run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
         HealthCheckHandler.event_loop = None
+        HealthCheckHandler.bot = None
         if not event_loop.is_closed():
             event_loop.close()
         asyncio.set_event_loop(None)

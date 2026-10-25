@@ -20,6 +20,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+from casino_rules import RARITY_NAMES, RARITY_WEIGHTS, generate_result
 from banner_store import (
     ensure_banner_file,
     ensure_market_banner_file,
@@ -60,14 +61,7 @@ _RECYCLE_COMMAND_RE = re.compile(
     r"(?P<rarity>[\w-]+)\s+(?P<quantity>\d+)$",
     re.IGNORECASE,
 )
-_RARITY = {
-    1: "Обычный",
-    2: "Необычный",
-    3: "Редкий",
-    4: "Эпический",
-    5: "Элитный",
-    6: "Легендарный",
-}
+_RARITY = RARITY_NAMES
 _RARITY_ALIASES = {
     "обычный": 1,
     "обычная": 1,
@@ -329,16 +323,6 @@ async def _return_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
-def _result_level(values: tuple[int, int, int]) -> int:
-    if values == (6, 6, 6):
-        return 6
-    if len(set(values)) == 1:
-        return 5
-    if len(set(values)) == 2:
-        return 4 if secrets.randbelow(10) < 3 else 3
-    return 2 if secrets.randbelow(10) < 3 else 1
-
-
 async def _delete_dice_messages(
     bot: Any,
     chat_id: int,
@@ -585,21 +569,7 @@ async def _spin(
                 skip_animation = True
 
         for values in all_values:
-            level = _result_level(values)
-            seed = secrets.token_hex(16)
-            preset = (
-                pick_preset(make_digest(user.id, item_seed=seed))
-                if level == 6
-                else None
-            )
-            results.append(
-                {
-                    "values": values,
-                    "level": level,
-                    "seed": seed,
-                    "preset": preset,
-                }
-            )
+            results.append(generate_result(user.id, values))
         items = await database.complete_casino_round(round_id, results)
     except Exception:
         logging.exception("Ошибка крутки казино user_id=%s.", user.id)
@@ -1746,10 +1716,14 @@ async def on_game_callback(
             logging.exception("Не удалось получить баланс user_id=%s.", user.id)
             await query.message.reply_text("Не удалось получить баланс. Попробуй позже.")
     elif action == "casino:odds":
+        total_weight = sum(RARITY_WEIGHTS.values())
+        odds = ", ".join(
+            f"{RARITY_NAMES[level]} — "
+            f"{weight / total_weight * 100:.2f}%"
+            for level, weight in RARITY_WEIGHTS.items()
+        )
         await query.message.reply_text(
-            "Шансы за одну крутку:\n"
-            "Обычный — 38,9%; необычный — 16,7%; редкий — 29,2%; "
-            "эпический — 12,5%; элитный — 2,3%; легендарный — 0,46%."
+            f"Шансы за одну крутку:\n{odds}."
         )
     elif action == "casino:anim":
         current = await _skip_animation(user.id)

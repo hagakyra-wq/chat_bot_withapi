@@ -20,6 +20,7 @@
       <nav class="rail-nav" aria-label="Основная навигация">
         <button class="nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Главная</span></button>
         <button class="nav-item" type="button" data-page="profile"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Профиль</span></button>
+        <button class="nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
         <button class="nav-item" type="button" data-page="market"><svg><use href="/assets/icons.svg#market"></use></svg><span>Площадка</span></button>
         <button class="nav-item" type="button" data-page="activation"><svg><use href="/assets/icons.svg#key"></use></svg><span>Активация</span></button>
         <button class="nav-item admin-nav" type="button" data-page="admin" hidden><svg><use href="/assets/icons.svg#settings"></use></svg><span>Управление</span></button>
@@ -59,6 +60,9 @@
           <button class="feature-card feature-market" type="button" data-page="market">
             <span class="feature-icon"><svg><use href="/assets/icons.svg#market"></use></svg></span><span class="feature-title">Площадка</span><span class="feature-description">Баннеры и сделки</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
+          <button class="feature-card feature-wheel" type="button" data-page="wheel">
+            <span class="feature-icon"><svg><use href="/assets/icons.svg#fortune"></use></svg></span><span class="feature-title">Колесо удачи</span><span class="feature-description">Испытай удачу и открой баннер</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
+          </button>
           <button class="feature-card feature-activation" type="button" data-page="activation">
             <span class="feature-icon"><svg><use href="/assets/icons.svg#key"></use></svg></span><span class="feature-title">Активировать код</span><span class="feature-description">Открой подарок или доступ</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
@@ -67,6 +71,40 @@
           </button>
         </div>
         <p class="subtle-note">Бот и его команды остаются доступны в чате.</p>
+      </section>
+
+      <section class="page" id="page-wheel" aria-labelledby="wheel-title" hidden>
+        <div class="page-intro"><span class="eyebrow">ИСПЫТАНИЕ УДАЧИ</span><h2 id="wheel-title">Колесо удачи</h2><p>Каждая крутка открывает новый баннер. Результат определяется сервером и сразу сохраняется в инвентарь.</p></div>
+        <div class="wheel-layout">
+          <article class="panel wheel-machine" id="wheel-machine">
+            <div class="wheel-frame" id="wheel-frame">
+              <div class="wheel-indicator" aria-hidden="true"><svg><use href="/assets/icons.svg#arrow"></use></svg></div>
+              <div class="wheel-disc" id="wheel-disc" role="img" aria-label="Колесо с секторами редкости баннеров">
+                <div class="wheel-center"><svg aria-hidden="true"><use href="/assets/icons.svg#fortune"></use></svg></div>
+              </div>
+            </div>
+            <p class="wheel-status" id="wheel-status" aria-live="polite">Загружаем колесо…</p>
+          </article>
+          <div class="wheel-side">
+            <article class="panel wheel-controls">
+              <div class="wheel-balance"><span class="eyebrow">ТВОЙ БАЛАНС</span><strong id="wheel-balance">—</strong><span>монет</span></div>
+              <div class="wheel-spin-options" role="group" aria-label="Количество круток">
+                <button class="wheel-option is-selected" type="button" data-spins="1">Одна крутка<span id="wheel-single-cost">—</span></button>
+                <button class="wheel-option" type="button" data-spins="10">Пакет ×10<span id="wheel-ten-cost">—</span></button>
+              </div>
+              <button class="button button-primary wheel-spin-button" id="wheel-spin" type="button" disabled>Крутить</button>
+              <button class="button button-quiet wheel-inventory-link" type="button" data-page="profile">Открыть инвентарь</button>
+            </article>
+            <article class="panel wheel-odds">
+              <div class="section-head"><div><span class="eyebrow">ЧЕСТНЫЕ ШАНСЫ</span><h3>Редкость приза</h3></div></div>
+              <div class="wheel-odds-list" id="wheel-odds-list"></div>
+            </article>
+          </div>
+        </div>
+        <section class="wheel-results-section" aria-live="polite">
+          <div class="section-head"><div><span class="eyebrow">ПОСЛЕДНИЙ РЕЗУЛЬТАТ</span><h2>Твои призы</h2></div></div>
+          <div class="wheel-results" id="wheel-results"><div class="panel wheel-empty">Крути колесо, чтобы получить первый баннер.</div></div>
+        </section>
       </section>
 
       <section class="page" id="page-profile" aria-labelledby="profile-title" hidden>
@@ -161,6 +199,7 @@
   <nav class="mobile-nav" aria-label="Основная навигация">
     <button class="mobile-nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Главная</span></button>
     <button class="mobile-nav-item" type="button" data-page="profile"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Профиль</span></button>
+    <button class="mobile-nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
     <button class="mobile-nav-item" type="button" data-page="market"><svg><use href="/assets/icons.svg#market"></use></svg><span>Площадка</span></button>
     <button class="mobile-nav-item" type="button" data-page="activation"><svg><use href="/assets/icons.svg#key"></use></svg><span>Код</span></button>
     <button class="mobile-nav-item admin-nav" type="button" data-page="admin" hidden><svg><use href="/assets/icons.svg#settings"></use></svg><span>Админ</span></button>

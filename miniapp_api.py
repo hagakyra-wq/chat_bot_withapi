@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from typing import Any
@@ -11,11 +13,13 @@ from urllib.parse import quote
 
 import httpx
 import database
-from config import ADMIN_ID, TELEGRAM_TOKEN
+from casino_rules import RARITY_NAMES, RARITY_WEIGHTS, generate_result
+from config import ADMIN_ID, CASINO_SPIN_COST_CENTS, TELEGRAM_TOKEN
 from yubari_banner import PRESET_NAMES
 
 _MEDIA_LINK_LIFETIME_SECONDS = 600
 _MAX_BANNER_MEDIA_SIZE = 20 * 1024 * 1024
+_CASINO_BANNER_TASKS: set[asyncio.Task[None]] = set()
 
 
 def _is_admin(user_id: int) -> bool:
@@ -88,6 +92,119 @@ async def _profile(
                 "animated": int(item["level"]) == 6,
             }
             for item in inventory
+        ],
+    }
+
+
+async def _prepare_casino_reward_art(bot: Any, items: list[dict[str, Any]]) -> None:
+    from banner_store import ensure_banner_file
+
+    for item in items:
+        try:
+            banner = await database.get_banner_item(int(item["item_id"]))
+            if banner is None:
+                raise RuntimeError(f"Casino reward {item['item_id']} was not found.")
+            await ensure_banner_file(bot, banner, priority=1)
+        except Exception:
+            logging.exception(
+                "Не удалось подготовить баннер награды казино item_id=%s.",
+                item.get("item_id"),
+            )
+
+
+def _queue_casino_reward_art(bot: Any, items: list[dict[str, Any]]) -> None:
+    task = asyncio.create_task(_prepare_casino_reward_art(bot, items))
+    _CASINO_BANNER_TASKS.add(task)
+    task.add_done_callback(_CASINO_BANNER_TASKS.discard)
+
+
+async def _casino_dashboard(user_id: int, username: str | None) -> dict[str, Any]:
+    balance = await database.get_duel_balance(user_id, username)
+    total_weight = sum(RARITY_WEIGHTS.values())
+    return {
+        "balance_cents": balance,
+        "spin_cost_cents": CASINO_SPIN_COST_CENTS,
+        "rarities": [
+            {
+                "level": level,
+                "name": RARITY_NAMES[level],
+                "weight": weight,
+                "percentage": round(weight / total_weight * 100, 2),
+            }
+            for level, weight in RARITY_WEIGHTS.items()
+        ],
+    }
+
+
+async def _spin_casino(
+    user_id: int,
+    username: str | None,
+    spins: int,
+    bot: Any | None,
+) -> tuple[int, dict[str, Any]]:
+    round_id = secrets.token_hex(12)
+    cost = CASINO_SPIN_COST_CENTS * spins
+    try:
+        await database.get_duel_balance(user_id, username)
+        await database.begin_casino_round(round_id, user_id, username, cost)
+    except database.InsufficientCasinoBalanceError:
+        return 409, {"error": "Недостаточно монет для выбранного числа круток."}
+    except database.ActiveCasinoRoundError:
+        return 409, {"error": "У тебя уже идёт крутка. Дождись её завершения."}
+    except Exception:
+        logging.exception("Не удалось начать Mini App крутку user_id=%s.", user_id)
+        return 503, {"error": "Не удалось начать крутку. Попробуй позже."}
+
+    try:
+        generated = [
+            generate_result(
+                user_id,
+                (
+                    secrets.randbelow(6) + 1,
+                    secrets.randbelow(6) + 1,
+                    secrets.randbelow(6) + 1,
+                ),
+            )
+            for _ in range(spins)
+        ]
+        items = await database.complete_casino_round(round_id, generated)
+    except Exception:
+        logging.exception("Не удалось завершить Mini App крутку user_id=%s.", user_id)
+        try:
+            refunded = await database.fail_casino_round(round_id)
+        except Exception:
+            logging.exception("Не удалось вернуть монеты за Mini App крутку.")
+            refunded = False
+        if refunded:
+            return 500, {
+                "error": "Крутка не завершилась; списанные монеты возвращены."
+            }
+        logging.error(
+            "Не удалось подтвердить возврат или завершение Mini App крутки "
+            "round_id=%s user_id=%s.",
+            round_id,
+            user_id,
+        )
+        return 500, {
+            "error": "Крутка не завершилась. Проверь баланс и инвентарь перед повторной попыткой."
+        }
+
+    if bot is not None:
+        _queue_casino_reward_art(bot, items)
+    balance = await database.get_duel_balance(user_id, username)
+    return 200, {
+        "balance_cents": balance,
+        "cost_cents": cost,
+        "results": [
+            {
+                "item_id": int(item["item_id"]),
+                "level": int(result["level"]),
+                "rarity": RARITY_NAMES[int(result["level"])],
+                "values": [int(value) for value in result["values"]],
+                "image_url": _media_url(user_id, int(item["item_id"])),
+                "animated": int(result["level"]) == 6,
+            }
+            for item, result in zip(items, generated, strict=True)
         ],
     }
 
@@ -370,9 +487,17 @@ async def dispatch(
     first_name: str,
     username: str | None,
     payload: dict[str, Any],
+    bot: Any | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if path == "/api/v1/profile" and method == "GET":
         return 200, await _profile(user_id, first_name, username)
+    if path == "/api/v1/casino" and method == "GET":
+        return 200, await _casino_dashboard(user_id, username)
+    if path == "/api/v1/casino/spin" and method == "POST":
+        spins = payload.get("spins", 1)
+        if type(spins) is not int or spins not in (1, 10):
+            return 400, {"error": "Можно выполнить одну крутку или пакет ×10."}
+        return await _spin_casino(user_id, username, spins, bot)
     if path == "/api/v1/market" and method == "GET":
         return 200, await _market(query, user_id)
     if path == "/api/v1/market/buy" and method == "POST":

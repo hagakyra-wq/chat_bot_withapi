@@ -22,8 +22,16 @@ with access to the backup channel.
   and performed server-side, including protection against activating a listed lot.
 - Existing Telegram inventory and activation commands remain available.
 
+## Completed: fortune wheel
+
+- Added single and ×10 spins to the Mini App, using the existing cost, rarity
+  rules, server-side random rolls, and casino-round debit/refund transactions.
+- The wheel sectors and displayed odds use the same shared rarity weights as the
+  Telegram bot. Results are stored as banner inventory items before animation.
+- Added a multi-turn wheel animation, result cards, balance display, and
+  reduced-motion support. Reward artwork is prepared in the background and
+  preparation failures are logged without losing the saved prize.
+
 ## Next
 
-1. Bring the existing fortune-wheel rules into Mini App and add a polished,
-   reduced-motion-aware animation.
-2. Continue migrating other bot tools while keeping Telegram commands available.
+1. Continue migrating other bot tools while keeping Telegram commands available.

@@ -3,11 +3,13 @@ import { initActivation } from "./activation.js";
 import { initAdmin, loadAdmin } from "./admin.js";
 import { initMarket, loadMarket } from "./market.js";
 import { loadProfile } from "./profile.js";
+import { initWheel, loadWheel } from "./wheel.js";
 
 const webApp = window.Telegram?.WebApp;
 const pageTitles = {
   home: "Главная",
   profile: "Профиль",
+  wheel: "Колесо удачи",
   market: "Площадка",
   activation: "Активация",
   admin: "Управление",
@@ -16,6 +18,7 @@ const pageTitles = {
 let isAdmin = false;
 let activePage = "home";
 let marketInitialized = false;
+let wheelInitialized = false;
 let activationInitialized = false;
 let adminInitialized = false;
 
@@ -41,6 +44,7 @@ function showPage(pageName) {
 
   const loaders = {
     profile: loadProfile,
+    wheel: loadWheel,
     market: loadMarket,
     admin: loadAdmin,
   };
@@ -90,6 +94,10 @@ function initNavigation() {
         initMarket();
         marketInitialized = true;
       }
+      if (pageName === "wheel" && !wheelInitialized) {
+        initWheel();
+        wheelInitialized = true;
+      }
       if (pageName === "activation" && !activationInitialized) {
         initActivation();
         activationInitialized = true;
@@ -106,5 +114,8 @@ webApp?.expand();
 initNavigation();
 connectTelegram();
 window.addEventListener("miniapp:market-updated", () => {
+  if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
+});
+window.addEventListener("miniapp:casino-updated", () => {
   if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
 });
