@@ -2850,6 +2850,49 @@ async def get_duel_leaderboard(limit: int = 10) -> list[dict[str, Any]]:
         return [dict(row) for row in await cursor.fetchall()]
 
 
+async def get_group_coin_leaderboard(
+    group_id: int,
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    await mine_duel_coins_daily()
+    safe_limit = min(max(1, limit), 50)
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT
+                duel_players.user_id,
+                duel_players.username,
+                COALESCE(
+                    NULLIF(group_users.callsign, ''),
+                    NULLIF(global_profiles.callsign, ''),
+                    NULLIF(global_profiles.display_name, ''),
+                    CASE
+                        WHEN NULLIF(duel_players.username, '') IS NOT NULL
+                        THEN '@' || duel_players.username
+                    END,
+                    'Игрок ' || duel_players.user_id
+                ) AS display_name,
+                duel_players.balance_cents
+            FROM user_group_memberships AS memberships
+            JOIN duel_players
+              ON duel_players.user_id = memberships.user_id
+            LEFT JOIN users AS group_users
+              ON group_users.user_id = memberships.user_id
+             AND group_users.group_id = memberships.group_id
+            LEFT JOIN global_profiles
+              ON global_profiles.user_id = duel_players.user_id
+            WHERE memberships.group_id = ?
+              AND duel_players.is_bot = 0
+              AND COALESCE(group_users.is_bot, 0) = 0
+            ORDER BY duel_players.balance_cents DESC, duel_players.user_id ASC
+            LIMIT ?
+            """,
+            (group_id, safe_limit),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
 def _message_archive_paths() -> list[Path]:
     return sorted(DATABASE_ARCHIVE_DIR.glob("messages_*.db")) if DATABASE_ARCHIVE_DIR.exists() else []
 

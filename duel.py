@@ -15,6 +15,7 @@ from telegram.ext import ContextTypes
 import database
 from bot_message_history import record_bot_message
 from config import DICE_ANIMATION_DELAY_SECONDS
+from group_stats import leaderboard_keyboard, render_leaderboard_banner
 
 _DUEL_CHALLENGE_PATTERNS = (
     re.compile(r"\b(?:я\s+)?вызываю\b.{0,40}\bна\s+бат{1,2}л\b", re.IGNORECASE),
@@ -51,6 +52,10 @@ def is_duel_challenge(text: str) -> bool:
 
 def is_balance_request(text: str) -> bool:
     return _BALANCE_REQUEST_RE.search(text) is not None
+
+
+def is_coin_leaderboard_request(text: str) -> bool:
+    return _COIN_LEADERBOARD_REQUEST_RE.search(text) is not None
 
 
 def _format_coins(balance_cents: int) -> str:
@@ -546,23 +551,54 @@ async def handle_coin_leaderboard_request(
         return True
 
     try:
-        players = await database.get_duel_leaderboard(limit=10)
+        players = await database.get_group_coin_leaderboard(message.chat_id, limit=9)
     except Exception:
-        logging.exception("Не удалось загрузить топ игроков по монетам.")
+        logging.exception(
+            "Не удалось загрузить топ монет группы %s.",
+            message.chat_id,
+        )
         await message.reply_text("Не удалось загрузить рейтинг. Попробуй позже.")
         return True
 
-    lines = ["🏆 ТОП-10 ПО МОНЕТАМ", "━━━━━━━━━━━━━━"]
-    medals = ("🥇", "🥈", "🥉")
-    for rank, player in enumerate(players, start=1):
-        medal = medals[rank - 1] if rank <= len(medals) else f"{rank}."
-        name = str(player["display_name"])
-        balance = _format_coins(int(player["balance_cents"]))
-        lines.append(f"{medal} {name} — {balance} 🪙")
+    result = "\n".join(
+        ["💰 Топ монет этой группы"]
+        + [
+            f"{rank}. {' '.join(str(player['display_name']).split())} — "
+            f"{_format_coins(int(player['balance_cents']))} монет"
+            for rank, player in enumerate(players, start=1)
+        ]
+    )
     if not players:
-        lines.append("Пока нет игроков. Запусти батл, чтобы попасть в рейтинг.")
-
-    result = "\n".join(lines)
-    sent = await message.reply_text(result)
-    await record_bot_message(sent, result)
+        result += "\nПока нет участников с балансом монет."
+    keyboard = leaderboard_keyboard(message.chat_id, mode="c")
+    try:
+        banner = await render_leaderboard_banner(
+            context.bot,
+            [{**player, "value": int(player["balance_cents"])} for player in players],
+            mode="c",
+            group_title=message.chat.title or "",
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось создать баннер топа монет группы %s.",
+            message.chat_id,
+        )
+        await message.reply_text(result[:1000], reply_markup=keyboard)
+        return True
+    try:
+        sent = await message.reply_photo(photo=banner, caption=result[:1000], reply_markup=keyboard)
+    except TelegramError:
+        logging.exception(
+            "Не удалось отправить баннер топа монет группы %s.",
+            message.chat_id,
+        )
+        await message.reply_text(result[:1000], reply_markup=keyboard)
+        return True
+    try:
+        await record_bot_message(sent, result)
+    except Exception:
+        logging.exception(
+            "Не удалось записать топ монет группы %s в историю сообщений.",
+            message.chat_id,
+        )
     return True

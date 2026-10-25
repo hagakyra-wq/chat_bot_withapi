@@ -69,6 +69,7 @@ from handlers_group import (
     on_group_profile_stats_callback,
     on_welcome_callback,
 )
+from group_stats import on_group_stats_callback
 from handlers_pm import (
     break_command,
     build_admin_conversation_handler,
@@ -730,6 +731,12 @@ def build_application() -> Application:
         CallbackQueryHandler(
             on_group_profile_stats_callback,
             pattern=r"^profile:groupstats:",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            on_group_stats_callback,
+            pattern=r"^gstats:",
         )
     )
     application.add_handler(

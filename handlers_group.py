@@ -38,6 +38,12 @@ from duel import (
     handle_balance_request,
     handle_coin_leaderboard_request,
     handle_duel_challenge,
+    is_coin_leaderboard_request,
+)
+from group_stats import (
+    leaderboard_caption,
+    leaderboard_keyboard,
+    render_leaderboard_banner,
 )
 from images import create_profile_card, extract_image_request, image_manager, is_image_command
 from llm import (
@@ -78,27 +84,29 @@ _GROUP_PROMO_COMMAND_RE = re.compile(
 )
 _TOP_COMMAND_RE = re.compile(r"^/top(?:@\w+)?(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _TOP_TEXT_RE = re.compile(
-    r"^топ(?:\s+сообщений)?(?:\s+(?:за\s+)?(\S+))?$",
+    r"^(?:топ(?:\s+(?:сообщений|активности))?|статистика\s+активности)"
+    r"(?:\s+(?:за\s+)?(\S+))?$",
     re.IGNORECASE,
 )
 _TOP_PERIODS = {
     "d": "d",
+    "д": "d",
     "day": "d",
     "today": "d",
     "день": "d",
     "сегодня": "d",
     "w": "w",
+    "n": "w",
+    "н": "w",
     "week": "w",
     "неделя": "w",
     "неделю": "w",
     "m": "m",
+    "м": "m",
     "month": "m",
     "месяц": "m",
     "месяце": "m",
 }
-_TOP_PERIOD_LABELS = {"d": "за день", "w": "за неделю", "m": "за месяц"}
-
-
 def _user_name(user: object | None) -> str:
     if user is None:
         return "Кто-то"
@@ -129,6 +137,8 @@ def _command_name(text: str) -> str | None:
 
 
 def _parse_message_top_request(text: str) -> tuple[bool, str | None]:
+    if is_coin_leaderboard_request(text):
+        return False, None
     match = _TOP_COMMAND_RE.fullmatch(text.strip())
     if match is None:
         match = _TOP_TEXT_RE.fullmatch(text.strip())
@@ -153,7 +163,10 @@ async def on_group_activity(
         or not (message.text or message.caption or message.effective_attachment)
     ):
         return
-    if message.text and _parse_message_top_request(message.text)[0]:
+    if message.text and (
+        _parse_message_top_request(message.text)[0]
+        or is_coin_leaderboard_request(message.text)
+    ):
         return
     try:
         if await database.is_group_allowed(message.chat_id):
@@ -168,12 +181,14 @@ async def on_group_activity(
 
 async def _send_message_leaderboard(
     message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
     period: str,
 ) -> None:
     try:
         leaderboard = await database.get_group_message_leaderboard(
             message.chat_id,
             period,
+            limit=9,
         )
     except Exception:
         logging.exception(
@@ -183,19 +198,55 @@ async def _send_message_leaderboard(
         )
         await message.reply_text("Не удалось загрузить топ сообщений. Попробуй позже.")
         return
-    title = _TOP_PERIOD_LABELS[period]
-    lines = [f"🏆 Топ сообщений {title}"]
-    if leaderboard:
-        for rank, member in enumerate(leaderboard, start=1):
-            name = re.sub(r"\s+", " ", str(member.get("display_name") or "Участник")).strip()
-            username = str(member.get("username") or "").strip().lstrip("@")
-            if username and username.casefold() not in name.casefold():
-                name = f"{name} (@{username})"
-            lines.append(f"{rank}. {name[:80]} — {int(member['message_count'])}")
-    else:
-        lines.append("За этот период пока нет сообщений.")
-    lines.append("\nПериод: текущий день, неделя или месяц по Москве.")
-    await message.reply_text("\n".join(lines))
+    entries = [
+        {**member, "value": int(member["message_count"])}
+        for member in leaderboard
+    ]
+    keyboard = leaderboard_keyboard(
+        message.chat_id,
+        mode="a",
+        period=period,
+    )
+    caption = leaderboard_caption(entries, mode="a", period=period)
+    try:
+        banner = await render_leaderboard_banner(
+            context.bot,
+            entries,
+            mode="a",
+            period=period,
+            group_title=message.chat.title or "",
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось создать баннер активности группы %s period=%s.",
+            message.chat_id,
+            period,
+        )
+        await message.reply_text(caption, reply_markup=keyboard)
+        return
+    try:
+        sent = await message.reply_photo(photo=banner, caption=caption, reply_markup=keyboard)
+    except TelegramError:
+        logging.exception(
+            "Не удалось отправить баннер активности группы %s period=%s.",
+            message.chat_id,
+            period,
+        )
+        await message.reply_text(caption, reply_markup=keyboard)
+        return
+    try:
+        await database.save_message(
+            message.chat_id,
+            context.bot.id,
+            sent.message_id,
+            "Юбара",
+            sent.caption or "Статистика активности группы",
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось сохранить историю баннера активности группы %s.",
+            message.chat_id,
+        )
 
 
 def _format_person_profile(
@@ -589,9 +640,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if is_top_request:
         if top_period is None:
-            await message.reply_text("Период не распознан. Используй /top d, /top w или /top m.")
+            await message.reply_text("Период не распознан. Используй /top d, /top n или /top m.")
             return
-        await _send_message_leaderboard(message, top_period)
+        await _send_message_leaderboard(message, context, top_period)
         return
 
     if await image_manager.consume_setting_input(update, context):
