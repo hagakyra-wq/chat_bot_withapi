@@ -583,6 +583,7 @@ async def initialize() -> None:
                 db,
                 "banner_items",
                 {
+                    "design_user_id": "INTEGER",
                     "market_file_id": "TEXT",
                     "market_backup_msg_id": "INTEGER",
                 },
@@ -3446,6 +3447,11 @@ async def request_banner_transfer(
             if cursor.rowcount != 1:
                 await db.rollback()
                 return "already_pending"
+            await db.execute(
+                "UPDATE banner_items SET design_user_id = COALESCE(design_user_id, user_id) "
+                "WHERE item_id = ?",
+                (item_id,),
+            )
             await db.commit()
         _record_write()
     return "pending"
@@ -3676,16 +3682,25 @@ async def set_banner_item_rendering(
     file_id: str,
     backup_msg_id: int,
     content_hash: str,
+    design_user_id: int,
 ) -> None:
     async with _write_lock:
         async with _connect() as db:
             cursor = await db.execute(
                 """
                 UPDATE banner_items
-                SET file_id = ?, backup_msg_id = ?, content_hash = ?, rendered_at = ?
+                SET file_id = ?, backup_msg_id = ?, content_hash = ?, rendered_at = ?,
+                    design_user_id = COALESCE(design_user_id, ?)
                 WHERE item_id = ?
                 """,
-                (file_id, backup_msg_id, content_hash, time.time(), item_id),
+                (
+                    file_id,
+                    backup_msg_id,
+                    content_hash,
+                    time.time(),
+                    design_user_id,
+                    item_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise sqlite3.DatabaseError(f"Баннер item_id={item_id} не найден.")

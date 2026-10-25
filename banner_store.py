@@ -158,6 +158,7 @@ async def _render_and_backup(
     force: bool = False,
 ) -> dict[str, Any]:
     user_id = int(item["user_id"])
+    design_user_id = int(item.get("design_user_id") or user_id)
     profile = await database.get_global_profile(user_id)
     if profile is None:
         raise RuntimeError(f"Не найден профиль владельца баннера user_id={user_id}.")
@@ -169,7 +170,7 @@ async def _render_and_backup(
     avatar_id: str | None = None
     if int(item["level"]) >= 5:
         try:
-            avatar, avatar_id = await _avatar_for_user(bot, user_id)
+            avatar, avatar_id = await _avatar_for_user(bot, design_user_id)
         except Exception:
             logging.warning(
                 "Не удалось получить аватар для баннера item_id=%s; будет использован инициал.",
@@ -200,6 +201,7 @@ async def _render_and_backup(
                 file_id=recovered_file_id,
                 backup_msg_id=recovered_backup_id,
                 content_hash=digest,
+                design_user_id=design_user_id,
             )
             await _delete_replaced_backup(
                 bot,
@@ -223,7 +225,7 @@ async def _render_and_backup(
 
     buffer = await _render_queue.render(
         priority,
-        user_id=user_id,
+        user_id=design_user_id,
         name=name,
         tag=tag,
         level=int(item["level"]),
@@ -262,6 +264,7 @@ async def _render_and_backup(
         file_id=new_file_id,
         backup_msg_id=sent.message_id,
         content_hash=digest,
+        design_user_id=design_user_id,
     )
     await _delete_replaced_backup(
         bot,
