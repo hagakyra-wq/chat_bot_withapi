@@ -833,9 +833,6 @@ async def _handle_backup_merge(
         or message.reply_to_message is None
     ):
         return
-    if message.from_user is not None and message.from_user.id != ADMIN_ID:
-        return
-
     command_tokens = {
         token.strip(".,!?;:()[]{}").casefold()
         for token in (message.text or "").split()
@@ -846,6 +843,20 @@ async def _handle_backup_merge(
         None,
     )
     if action is None:
+        return
+    sender_is_owner = message.from_user is not None and message.from_user.id == ADMIN_ID
+    sender_is_channel_admin = (
+        message.sender_chat is not None
+        and message.sender_chat.id == BACKUP_CHANNEL_ID
+    )
+    if not (sender_is_owner or sender_is_channel_admin):
+        logging.warning(
+            "Игнорирую команду склейки в канале от неавторизованного отправителя "
+            "(chat_id=%s, user_id=%s, sender_chat_id=%s).",
+            message.chat_id,
+            message.from_user.id if message.from_user is not None else None,
+            message.sender_chat.id if message.sender_chat is not None else None,
+        )
         return
     source_message = message.reply_to_message
     document = source_message.document
