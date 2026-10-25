@@ -11,6 +11,13 @@ const rarityNames = {
 
 let inventoryItems = [];
 let inventoryIndex = 0;
+let inventoryBalanceCents = 0;
+
+function confirmRecycle(message) {
+  const webApp = window.Telegram?.WebApp;
+  if (!webApp?.showConfirm) return Promise.resolve(window.confirm(message));
+  return new Promise((resolve) => webApp.showConfirm(message, resolve));
+}
 
 function formatBannerCount(count) {
   const lastTwo = count % 100;
@@ -32,6 +39,8 @@ function renderInventory() {
   const description = document.getElementById("inventory-description");
   const position = document.getElementById("inventory-position");
   const activate = document.getElementById("inventory-activate");
+  const recycle = document.getElementById("inventory-recycle");
+  const recycleLabel = document.getElementById("inventory-recycle-label");
   const previous = document.getElementById("inventory-prev");
   const next = document.getElementById("inventory-next");
   const count = document.getElementById("inventory-count");
@@ -50,6 +59,8 @@ function renderInventory() {
     previous.disabled = true;
     next.disabled = true;
     activate.disabled = true;
+    recycle.disabled = true;
+    recycleLabel.textContent = "Переработать";
     return;
   }
 
@@ -76,6 +87,11 @@ function renderInventory() {
   next.disabled = inventoryIndex === inventoryItems.length - 1;
   activate.disabled = item.is_active || item.is_transfer_pending;
   activate.textContent = item.is_active ? "Уже активен" : "Сделать активным";
+  recycleLabel.textContent =
+    `Переработать · ${formatCoinAmount(item.recycle_value_cents)}`;
+  recycle.disabled = item.source === "owner"
+    || item.is_transfer_pending
+    || (item.is_active && inventoryBalanceCents >= 0);
 }
 
 function addDetail(container, label, value) {
@@ -93,6 +109,7 @@ export async function loadProfile() {
   const profile = await apiRequest("/api/v1/profile");
   const previousItemId = inventoryItems[inventoryIndex]?.item_id;
   inventoryItems = profile.inventory || [];
+  inventoryBalanceCents = profile.balance_cents;
   const previousIndex = inventoryItems.findIndex((item) => item.item_id === previousItemId);
   inventoryIndex = previousIndex >= 0
     ? previousIndex
@@ -158,6 +175,28 @@ function initInventory() {
         body: { item_id: item.item_id },
       });
       showToast(result.message || "Баннер установлен.");
+      await loadProfile();
+    } catch (error) {
+      showToast(error.message, true);
+      button.disabled = false;
+    }
+  });
+  document.getElementById("inventory-recycle").addEventListener("click", async (event) => {
+    const item = inventoryItems[inventoryIndex];
+    if (!item || item.source === "owner" || item.is_transfer_pending) return;
+    if (item.is_active && inventoryBalanceCents >= 0) return;
+    const accepted = await confirmRecycle(
+      `Переработать баннер #${item.item_id} за ${formatCoinAmount(item.recycle_value_cents)} монет? Это действие необратимо.`,
+    );
+    if (!accepted) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await apiRequest("/api/v1/inventory/recycle", {
+        method: "POST",
+        body: { item_id: item.item_id },
+      });
+      showToast(result.message || "Баннер переработан.");
       await loadProfile();
     } catch (error) {
       showToast(error.message, true);

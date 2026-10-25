@@ -32,6 +32,17 @@ with access to the backup channel.
   reduced-motion support. Reward artwork is prepared in the background and
   preparation failures are logged without losing the saved prize.
 
+## Completed: inventory recycling
+
+- Added an irreversible recycle action with a confirmation prompt and the
+  configured coin payout shown beside each eligible banner.
+- The server derives the payout from banner rarity and executes the existing
+  transactional recycle operation; active, owner, listed, pending, and
+  unowned banners cannot be recycled.
+- Backup-channel copies are removed after successful recycling when the bot
+  has channel access.
+
 ## Next
 
-1. Continue migrating other bot tools while keeping Telegram commands available.
+1. Add banner transfer requests and recipient-side acceptance.
+2. Continue migrating other bot tools while keeping Telegram commands available.

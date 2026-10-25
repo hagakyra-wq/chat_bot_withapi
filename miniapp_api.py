@@ -14,7 +14,14 @@ from urllib.parse import quote
 import httpx
 import database
 from casino_rules import RARITY_NAMES, RARITY_WEIGHTS, generate_result
-from config import ADMIN_ID, CASINO_SPIN_COST_CENTS, TELEGRAM_TOKEN
+from config import (
+    ADMIN_ID,
+    BACKUP_CHANNEL_ID,
+    CASINO_RECYCLE_PAYOUT_CENTS,
+    CASINO_SPIN_COST_CENTS,
+    TELEGRAM_TOKEN,
+)
+from telegram.error import TelegramError
 from yubari_banner import PRESET_NAMES
 
 _MEDIA_LINK_LIFETIME_SECONDS = 600
@@ -88,6 +95,9 @@ async def _profile(
                 "is_active": bool(item["is_active"]),
                 "is_transfer_pending": bool(item["is_transfer_pending"]),
                 "source": str(item["source"]),
+                "recycle_value_cents": CASINO_RECYCLE_PAYOUT_CENTS[
+                    int(item["level"])
+                ],
                 "image_url": _media_url(user_id, int(item["item_id"])),
                 "animated": int(item["level"]) == 6,
             }
@@ -207,6 +217,31 @@ async def _spin_casino(
             for item, result in zip(items, generated, strict=True)
         ],
     }
+
+
+async def _delete_recycled_banner_backups(
+    bot: Any | None,
+    item: dict[str, Any],
+) -> None:
+    if bot is None or BACKUP_CHANNEL_ID is None:
+        return
+    message_ids = {
+        int(item[field])
+        for field in ("backup_msg_id", "market_backup_msg_id")
+        if item.get(field)
+    }
+    for message_id in message_ids:
+        try:
+            await bot.delete_message(
+                chat_id=BACKUP_CHANNEL_ID,
+                message_id=message_id,
+            )
+        except TelegramError:
+            logging.exception(
+                "Не удалось удалить копию переработанного баннера из бэкапа "
+                "message_id=%s.",
+                message_id,
+            )
 
 
 async def _market(
@@ -557,6 +592,31 @@ async def dispatch(
         if not await database.activate_banner_item(user_id, item_id):
             return 404, {"error": "Баннер не найден или сейчас недоступен."}
         return 200, {"status": "activated", "message": "Баннер установлен."}
+    if path == "/api/v1/inventory/recycle" and method == "POST":
+        item_id = payload.get("item_id")
+        if type(item_id) is not int or item_id <= 0:
+            return 400, {"error": "Выбери баннер из своего инвентаря."}
+        item = await database.get_banner_item(item_id)
+        if item is None or int(item["user_id"]) != user_id:
+            return 404, {"error": "Баннер не найден в твоём инвентаре."}
+        payout = CASINO_RECYCLE_PAYOUT_CENTS[int(item["level"])]
+        await database.get_duel_balance(user_id, username)
+        result = await database.recycle_banner_item(user_id, item_id, payout)
+        if result == "recycled":
+            await _delete_recycled_banner_backups(bot, item)
+            balance = await database.get_duel_balance(user_id, username)
+            return 200, {
+                "status": result,
+                "payout_cents": payout,
+                "balance_cents": balance,
+                "message": f"Баннер переработан. Получено {payout / 100:g} монет.",
+            }
+        messages = {
+            "active": "Активный баннер нельзя переработать, пока баланс не в минусе.",
+            "forbidden": "Этот баннер нельзя переработать.",
+            "pending": "Баннер ожидает передачи и пока недоступен.",
+        }
+        return 409, {"error": messages.get(result, "Баннер уже недоступен.")}
     if path == "/api/v1/activation" and method == "POST":
         return await _activate_code(user_id, username, payload)
     if path == "/api/v1/admin":

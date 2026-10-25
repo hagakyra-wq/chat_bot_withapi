@@ -131,7 +131,10 @@
             <p class="muted" id="inventory-description"></p>
             <div class="inventory-controls">
               <div class="carousel-navigation"><button class="button button-quiet carousel-button" id="inventory-prev" type="button" aria-label="Предыдущий баннер"><svg><use href="/assets/icons.svg#arrow"></use></svg></button><span id="inventory-position" aria-live="polite">—</span><button class="button button-quiet carousel-button" id="inventory-next" type="button" aria-label="Следующий баннер"><svg><use href="/assets/icons.svg#arrow"></use></svg></button></div>
-              <button class="button button-primary" id="inventory-activate" type="button" disabled>Сделать активным</button>
+              <div class="inventory-action-buttons">
+                <button class="button button-primary" id="inventory-activate" type="button" disabled>Сделать активным</button>
+                <button class="button button-quiet inventory-recycle" id="inventory-recycle" type="button" disabled><svg aria-hidden="true"><use href="/assets/icons.svg#recycle"></use></svg><span id="inventory-recycle-label">Переработать</span></button>
+              </div>
             </div>
           </div>
         </section>
