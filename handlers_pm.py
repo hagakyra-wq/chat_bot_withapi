@@ -3545,6 +3545,7 @@ def build_admin_conversation_handler() -> ConversationHandler:
                     "helpadmin",
                     "activate",
                     "coinpromo",
+                    "fortuna",
                     "casino",
                     "slots",
                     "inventory",

@@ -361,7 +361,8 @@ async def _show_admin_help(
     sections = [
         "👤 Помощь пользователю\n"
         "• /start — открыть inline-меню; /help — эта справка.\n"
-        "• /casino — колесо удачи; /inventory — инвентарь баннеров.\n"
+        "• /fortuna — колесо удачи; /casino — прежняя команда-алиас; "
+        "/inventory — инвентарь баннеров.\n"
         "• «баланс» — посмотреть монеты; «топ монет» — рейтинг.\n"
         "• Нажми «🔑 Активировать код» в меню и отправь код сообщением; "
         "/activate КОД и /coinpromo КОД тоже доступны.\n"
@@ -2177,7 +2178,7 @@ async def handle_game_message(
     if start_match:
         await open_main_menu(update, context)
         return True
-    if re.fullmatch(r"/(?:casino|slots)(?:@\w+)?", text) or text in {
+    if re.fullmatch(r"/(?:fortuna|casino|slots)(?:@\w+)?", text) or text in {
         "казино",
         "колесо удачи",
         "казик",
