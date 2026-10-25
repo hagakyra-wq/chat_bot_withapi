@@ -473,13 +473,22 @@ async def on_profile_callback(
         progress = await query.message.reply_text("⏳ Переделываю баннер профиля…")
         try:
             active_item = await database.get_active_banner_item(user.id)
-            if active_item is None:
-                received_item = await database.get_latest_received_banner_item(user.id)
-                if received_item is not None and await database.activate_banner_item(
-                    user.id,
-                    int(received_item["item_id"]),
+            received_item = await database.get_latest_received_banner_item(user.id)
+            if (
+                received_item is not None
+                and (
+                    active_item is None
+                    or int(active_item["item_id"]) != int(received_item["item_id"])
+                )
+            ):
+                if not await database.activate_banner_item(
+                    user.id, int(received_item["item_id"])
                 ):
-                    active_item = received_item
+                    raise RuntimeError(
+                        "Не удалось активировать последний полученный баннер "
+                        f"item_id={received_item['item_id']}."
+                    )
+                active_item = received_item
             if active_item is not None:
                 status, _ = await reroll_active_banner(
                     context.bot,

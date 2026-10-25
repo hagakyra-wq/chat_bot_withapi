@@ -4070,7 +4070,6 @@ async def get_latest_received_banner_item(user_id: int) -> dict[str, Any] | None
             SELECT item.*
             FROM banner_items item
             WHERE item.user_id = ?
-              AND item.is_active = 0
               AND item.design_user_id IS NOT NULL
               AND item.design_user_id != item.user_id
               AND item.source != 'owner'
