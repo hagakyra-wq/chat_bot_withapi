@@ -3989,10 +3989,15 @@ async def accept_banner_transfer(
             if await cursor.fetchone() is not None:
                 await db.rollback()
                 return "listed", sender_id
+            await db.execute(
+                "UPDATE banner_items SET is_active = 0 "
+                "WHERE user_id = ? AND is_active = 1",
+                (recipient_id,),
+            )
             cursor = await db.execute(
                 """
                 UPDATE banner_items
-                SET user_id = ?, is_active = 0,
+                SET user_id = ?, is_active = 1,
                     obtained_at = datetime('now', '+3 hours')
                 WHERE item_id = ? AND user_id = ?
                 """,
@@ -4053,6 +4058,34 @@ async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:
               )
             """,
             (user_id, _OWNER_BANNER_USER_ID_META_KEY),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def get_latest_received_banner_item(user_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT item.*
+            FROM banner_items item
+            WHERE item.user_id = ?
+              AND item.is_active = 0
+              AND item.design_user_id IS NOT NULL
+              AND item.design_user_id != item.user_id
+              AND item.source != 'owner'
+              AND NOT EXISTS(
+                  SELECT 1 FROM pending_banner_transfers transfer
+                  WHERE transfer.item_id = item.item_id
+              )
+              AND NOT EXISTS(
+                  SELECT 1 FROM market_lots lot
+                  WHERE lot.item_id = item.item_id AND lot.status = 'open'
+              )
+            ORDER BY item.obtained_at DESC, item.item_id DESC
+            LIMIT 1
+            """,
+            (user_id,),
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
@@ -4182,7 +4215,7 @@ async def set_banner_item_rendering(
                     UPDATE banner_items
                     SET seed = ?, preset = ?, file_id = ?, backup_msg_id = ?,
                         content_hash = ?, rendered_at = ?,
-                        design_user_id = COALESCE(design_user_id, ?)
+                        design_user_id = ?
                     WHERE item_id = ? AND user_id = ? AND is_active = 1
                       AND source != 'owner'
                       AND NOT EXISTS (

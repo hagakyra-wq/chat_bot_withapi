@@ -334,6 +334,7 @@ async def reroll_active_banner(
         **item,
         "seed": seed,
         "preset": preset,
+        "design_user_id": user_id,
         "file_id": None,
         "content_hash": None,
     }

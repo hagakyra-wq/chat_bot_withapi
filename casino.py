@@ -1597,13 +1597,21 @@ async def on_game_callback(
             if result == "transferred" and sender_id is not None:
                 await query.answer("Передача принята.")
                 accepted_text = (
-                    f"✅ Ты принял баннер #{item_id}. Он добавлен в твой инвентарь."
+                    f"✅ Ты принял баннер #{item_id}. Он стал твоим активным баннером. "
+                    "Нажми «Переделать баннер» в профиле, чтобы создать оформление "
+                    "с твоей аватаркой."
                 )
                 if query.message.chat.type == ChatType.PRIVATE:
                     await query.message.edit_text(
                         accepted_text,
                         reply_markup=InlineKeyboardMarkup(
                             [
+                                [
+                                    InlineKeyboardButton(
+                                        "👤 Открыть профиль",
+                                        callback_data="profile:show",
+                                    )
+                                ],
                                 [
                                     InlineKeyboardButton(
                                         "🎒 Открыть инвентарь",
@@ -1884,7 +1892,8 @@ async def on_game_callback(
         await query.message.reply_text(
             f"Кому передать баннер #{item_id}? Отправь @username или Telegram ID. "
             "Получатель должен хотя бы раз взаимодействовать с Юбарой. "
-            "При передаче активного баннера он станет неактивным. "
+            "После принятия баннер станет активным у получателя, заменив его текущий. "
+            "Получатель сможет перерисовать его кнопкой в профиле. "
             "Для отмены нажми кнопку или отправь /cancel.",
             reply_markup=InlineKeyboardMarkup(
                 [
