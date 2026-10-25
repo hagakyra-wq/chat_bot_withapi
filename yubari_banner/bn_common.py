@@ -23,6 +23,18 @@ BOLD = ["DejaVuSans-Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"]
 SYMBOLS = "NotoSansSymbols2-Regular.ttf"
 EMOJI = "NotoColorEmoji.ttf"
 EMOJI_FONT_SIZE = 109
+_FALLBACK_FONTS = {
+    "math": "NotoSansMath-Regular.ttf",
+    "egyptian": "NotoSansEgyptianHieroglyphs-Regular.ttf",
+    "gothic": "NotoSansGothic-Regular.ttf",
+    "old_italic": "NotoSansOldItalic-Regular.ttf",
+    "japanese": "NotoSansJP-Variable.ttf",
+    "kannada": "NotoSansKannada-Variable.ttf",
+    "khmer": "NotoSansKhmer-Variable.ttf",
+    "tagalog": "NotoSansTagalog-Regular.ttf",
+    "tibetan": "NotoSerifTibetan-Regular.ttf",
+    "tifinagh": "NotoSansTifinagh-Regular.ttf",
+}
 _warned = False
 
 
@@ -30,14 +42,16 @@ _warned = False
 def font(kind, size):
     """Load a bundled font; Noto Color Emoji uses its single supported bitmap size."""
     global _warned
-    if kind == "s":
-        path = os.path.join(HERE, "fonts", SYMBOLS)
+    fallback_name = {
+        "s": SYMBOLS,
+        "e": EMOJI,
+        **_FALLBACK_FONTS,
+    }.get(kind)
+    if fallback_name:
+        path = os.path.join(HERE, "fonts", fallback_name)
         if os.path.exists(path):
-            return ImageFont.truetype(path, size)
-    if kind == "e":
-        path = os.path.join(HERE, "fonts", EMOJI)
-        if os.path.exists(path):
-            return ImageFont.truetype(path, EMOJI_FONT_SIZE)
+            fallback_size = EMOJI_FONT_SIZE if kind == "e" else size
+            return ImageFont.truetype(path, fallback_size)
     for d in FONT_DIRS:
         names = BOLD if kind == "b" else REG
         for n in names:
@@ -173,15 +187,31 @@ def _is_emoji_base(char):
     )
 
 
+def _render_text_unit(unit):
+    return unit.replace("\ufe0e", "").replace("\ufe0f", "")
+
+
 def _text_units(text):
     units = []
     for char in text:
         codepoint = ord(char)
         category = unicodedata.category(char)
+        previous_kind = _fallback_kind_for_char(units[-1][-1]) if units else None
+        current_kind = _fallback_kind_for_char(char)
         if (
             units
             and (
-                category.startswith("M")
+                (
+                    category.startswith("M")
+                    and (
+                        previous_kind == current_kind
+                        or (
+                            units[-1][-1] == "\u2661"
+                            and char == "\u3099"
+                        )
+                    )
+                )
+                or char in ("\ufe0e", "\ufe0f")
                 or char == "\u200d"
                 or units[-1].endswith("\u200d")
                 or 0x1F3FB <= codepoint <= 0x1F3FF
@@ -198,22 +228,69 @@ def _text_units(text):
     return units
 
 
-def _unit_font(unit, base_font):
-    if any(_is_emoji_base(char) for char in unit):
-        emoji_font = font("e", EMOJI_FONT_SIZE)
-        if _emoji_glyph_exists(unit, emoji_font):
-            return emoji_font, True
-    if any(
-        unicodedata.category(char).startswith("S")
-        or 0x1D000 <= ord(char) <= 0x1D7FF
-        for char in unit
+def _fallback_kind_for_char(char):
+    codepoint = ord(char)
+    if 0x1D000 <= codepoint <= 0x1D7FF:
+        return "math"
+    if 0x13000 <= codepoint <= 0x1345F:
+        return "egyptian"
+    if 0x10300 <= codepoint <= 0x1032F:
+        return "old_italic"
+    if 0x10330 <= codepoint <= 0x1034F:
+        return "gothic"
+    if 0x0C80 <= codepoint <= 0x0CFF:
+        return "kannada"
+    if 0x1700 <= codepoint <= 0x171F:
+        return "tagalog"
+    if 0x1780 <= codepoint <= 0x17FF:
+        return "khmer"
+    if 0x0F00 <= codepoint <= 0x0FFF:
+        return "tibetan"
+    if 0x2D30 <= codepoint <= 0x2D7F:
+        return "tifinagh"
+    if (
+        0x2E80 <= codepoint <= 0xA4CF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x3134F
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0x31F0 <= codepoint <= 0x31FF
     ):
-        return font("s", int(getattr(base_font, "size", 20))), False
+        return "japanese"
+    if unicodedata.category(char).startswith("S"):
+        return "s"
+    return None
+
+
+def _unit_font(unit, base_font):
+    render_unit = _render_text_unit(unit)
+    if "\ufe0e" not in unit and any(_is_emoji_base(char) for char in unit):
+        emoji_font = font("e", EMOJI_FONT_SIZE)
+        if _emoji_glyph_exists(render_unit, emoji_font):
+            return emoji_font, True
+    size = int(getattr(base_font, "size", 20))
+    kinds = [
+        _fallback_kind_for_char(char)
+        for char in render_unit
+        if _fallback_kind_for_char(char) is not None
+    ]
+    candidates = [font(kind, size) for kind in dict.fromkeys(kinds)]
+    candidates.extend((base_font, font("s", size)))
+    for candidate in candidates:
+        if all(_font_has_glyph(candidate, char) for char in render_unit):
+            return candidate, False
     return base_font, False
+
+
+@lru_cache(maxsize=4096)
+def _font_has_glyph(selected_font, char):
+    mask = selected_font.getmask(char)
+    missing = selected_font.getmask("\U0010ffff")
+    return mask.size != missing.size or bytes(mask) != bytes(missing)
 
 
 @lru_cache(maxsize=512)
 def _emoji_glyph_exists(unit, emoji_font):
+    unit = _render_text_unit(unit)
     bounds = emoji_font.getbbox(unit)
     width = max(1, bounds[2] - bounds[0])
     height = max(1, bounds[3] - bounds[1])
@@ -230,10 +307,11 @@ def _emoji_glyph_exists(unit, emoji_font):
 
 def _unit_width(draw, unit, base_font):
     selected_font, is_emoji = _unit_font(unit, base_font)
+    render_unit = _render_text_unit(unit)
     if is_emoji:
         size = int(getattr(base_font, "size", 20))
-        return selected_font.getlength(unit) * size / EMOJI_FONT_SIZE
-    return draw.textlength(unit, font=selected_font)
+        return selected_font.getlength(render_unit) * size / EMOJI_FONT_SIZE
+    return draw.textlength(render_unit, font=selected_font)
 
 
 def put_text(out, xy, text, f, col, spacing=0):
@@ -249,8 +327,9 @@ def put_text(out, xy, text, f, col, spacing=0):
     cx = 4.0
     for unit in units:
         selected_font, is_emoji = _unit_font(unit, f)
+        render_unit = _render_text_unit(unit)
         if is_emoji:
-            bounds = selected_font.getbbox(unit)
+            bounds = selected_font.getbbox(render_unit)
             emoji_image = Image.new(
                 "RGBA",
                 (max(1, bounds[2] - bounds[0]), max(1, bounds[3] - bounds[1])),
@@ -258,7 +337,7 @@ def put_text(out, xy, text, f, col, spacing=0):
             )
             ImageDraw.Draw(emoji_image).text(
                 (-bounds[0], -bounds[1]),
-                unit,
+                render_unit,
                 font=selected_font,
                 fill=(255, 255, 255, 255),
                 embedded_color=True,
@@ -275,8 +354,8 @@ def put_text(out, xy, text, f, col, spacing=0):
             m.paste(emoji, (round(cx), 2))
             cx += emoji.width + spacing
         else:
-            md.text((cx, 2), unit, font=selected_font, fill=255)
-            cx += md.textlength(unit, font=selected_font) + spacing
+            md.text((cx, 2), render_unit, font=selected_font, fill=255)
+            cx += md.textlength(render_unit, font=selected_font) + spacing
     a = col[3] if len(col) > 3 else 255
     if a < 255:
         m = m.point(lambda v: v * a // 255)

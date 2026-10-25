@@ -96,8 +96,10 @@ cancel - Отменить текущий ввод или диалог
 `/deletealldata` и `/resetall` доступны только владельцу бота и требуют
 подтверждения; действие необратимо.
 
-Для рендеринга баннеров в `yubari_banner/fonts/` включены DejaVuSans и Noto
-Fonts (Noto Sans Symbols 2 и Noto Color Emoji); лицензии шрифтов находятся
+Для баннеров и рейтингов в `yubari_banner/fonts/` включены DejaVuSans и
+лицензированные Noto Fonts: Symbols 2, Color Emoji, Math, Japanese, Tibetan,
+Egyptian Hieroglyphs, Old Italic, Gothic, Kannada, Khmer, Tagalog и Tifinagh.
+Они нужны для отображения Unicode-имён и символов; лицензии шрифтов находятся
 рядом с файлами.
 
 ## Локальный запуск

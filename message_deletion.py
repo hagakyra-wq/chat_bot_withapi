@@ -5,7 +5,7 @@ import re
 
 from telegram import Message, Update
 from telegram.constants import ChatType
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 import database
@@ -49,6 +49,22 @@ async def handle_delete_replied_message(
     try:
         await replied.delete()
         target_deleted = True
+    except BadRequest as exc:
+        if "message can't be deleted" in str(exc).casefold():
+            logging.warning(
+                "Telegram отклонил удаление сообщения по команде «дэл»: "
+                "chat_id=%s message_id=%s error=%s.",
+                message.chat_id,
+                replied.message_id,
+                exc,
+            )
+        else:
+            logging.exception(
+                "Не удалось удалить сообщение по команде «дэл» "
+                "chat_id=%s message_id=%s.",
+                message.chat_id,
+                replied.message_id,
+            )
     except TelegramError:
         logging.exception(
             "Не удалось удалить сообщение по команде «дэл» "
@@ -61,6 +77,21 @@ async def handle_delete_replied_message(
     try:
         await message.delete()
         command_deleted = True
+    except BadRequest as exc:
+        if "message can't be deleted" in str(exc).casefold():
+            logging.warning(
+                "Telegram отклонил удаление команды «дэл»: "
+                "chat_id=%s message_id=%s error=%s.",
+                message.chat_id,
+                message.message_id,
+                exc,
+            )
+        else:
+            logging.exception(
+                "Не удалось удалить команду «дэл» chat_id=%s message_id=%s.",
+                message.chat_id,
+                message.message_id,
+            )
     except TelegramError:
         logging.exception(
             "Не удалось удалить команду «дэл» chat_id=%s message_id=%s.",

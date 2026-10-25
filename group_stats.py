@@ -15,6 +15,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 import database
+from yubari_banner.bn_common import clean_text, put_text, text_length
 
 _PERIOD_LABELS = {
     "d": ("ДЕНЬ", "за день"),
@@ -99,6 +100,41 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def _draw_fitted_text(
+    image: Image.Image,
+    text: str,
+    *,
+    center_x: int,
+    y: int,
+    max_width: float,
+    size: int,
+    fill: tuple[int, int, int, int],
+    bold: bool = False,
+) -> None:
+    text = clean_text(text, 256)
+    if not text:
+        return
+    current_size = size
+    selected_font = _font(current_size, bold=bold)
+    while text_length(text, selected_font) > max_width and current_size > 11:
+        current_size -= 1
+        selected_font = _font(current_size, bold=bold)
+    if text_length(text, selected_font) > max_width:
+        low, high = 1, len(text)
+        best = "…"
+        while low <= high:
+            limit = (low + high) // 2
+            candidate = clean_text(text, limit)
+            if text_length(candidate, selected_font) <= max_width:
+                best = candidate
+                low = limit + 1
+            else:
+                high = limit - 1
+        text = best
+    width = text_length(text, selected_font)
+    put_text(image, (center_x - width / 2, y), text, selected_font, fill)
+
+
 def _avatar_color(avatar: Image.Image | None, index: int) -> tuple[int, int, int]:
     if avatar is None:
         return _FALLBACK_COLORS[index % len(_FALLBACK_COLORS)]
@@ -177,7 +213,7 @@ def _make_banner(
             for y in range(height)
         ]
     )
-    image = gradient.resize((width, height))
+    image = gradient.resize((width, height)).convert("RGBA")
     draw = ImageDraw.Draw(image, "RGBA")
     for index in range(65):
         x = (index * 197 + 61) % width
@@ -190,24 +226,29 @@ def _make_banner(
     if coin_mode:
         for index in range(8):
             x = 70 + index * 157
-            draw.ellipse((x, 590, x + 42, 602), fill=(226, 173, 63, 170), outline=(255, 220, 126, 210), width=2)
+            draw.ellipse(
+                (x, 651, x + 42, 663),
+                fill=(226, 173, 63, 170),
+                outline=(255, 220, 126, 210),
+                width=2,
+            )
     else:
         for x in (48, 1152):
             draw.arc((x - 80, 90, x + 80, 250), 190, 350, fill=(*accent, 100), width=4)
 
     title_font = _font(44, bold=True)
     subtitle_font = _font(23)
-    name_font = _font(18, bold=True)
-    value_font = _font(19, bold=True)
     mode_title = "КОРОЛЕВСКАЯ СОКРОВИЩНИЦА" if coin_mode else "АКТИВНОСТЬ ПРИДВОРНЫХ"
     draw.text((width // 2, 34), mode_title, anchor="mt", font=title_font, fill=(255, 239, 202, 255) if coin_mode else (235, 255, 246, 255))
-    period_text = "БАЛАНСЫ" if coin_mode else _PERIOD_LABELS.get(period, _PERIOD_LABELS["d"])[0]
+    period_text = "БАЛАНСЫ · МОНЕТЫ" if coin_mode else _PERIOD_LABELS.get(period, _PERIOD_LABELS["d"])[0]
     title = re.sub(r"\s+", " ", group_title).strip()[:48] or "ГРУППА"
-    draw.text(
-        (width // 2, 91),
+    _draw_fitted_text(
+        image,
         f"{title} · {period_text}",
-        anchor="mt",
-        font=subtitle_font,
+        center_x=width // 2,
+        y=91,
+        max_width=width - 80,
+        size=23,
         fill=(221, 213, 237, 255),
     )
     if not entries:
@@ -268,18 +309,52 @@ def _make_banner(
             if rank < 3:
                 _draw_crown(draw, x, avatar_y - 18, _CROWN_COLORS[rank])
             medal_color = _CROWN_COLORS[rank] if rank < 3 else (240, 239, 248)
-            draw.text((x, top + 18), f"#{rank + 1}", anchor="mt", font=value_font, fill=(*medal_color, 255))
-            name = re.sub(r"\s+", " ", str(entry.get("display_name") or "Участник")).strip()[:14]
-            draw.text((x, baseline + 12), name or "Участник", anchor="mt", font=name_font, fill=(248, 243, 255, 255))
+            draw.text(
+                (x, top + 18),
+                f"#{rank + 1}",
+                anchor="mt",
+                font=_font(19, bold=True),
+                fill=(*medal_color, 255),
+            )
+            name = re.sub(
+                r"\s+",
+                " ",
+                str(entry.get("display_name") or "Участник"),
+            ).strip()
+            _draw_fitted_text(
+                image,
+                name or "Участник",
+                center_x=x,
+                y=baseline + 12,
+                max_width=spacing * 0.88,
+                size=18,
+                fill=(248, 243, 255, 255),
+                bold=True,
+            )
             value_text = (
-                _format_coin_value(raw_values[rank])
+                _format_coin_value(raw_values[rank]).removesuffix(" монет")
                 if coin_mode
                 else f"{value:,}".replace(",", " ")
             )
-            draw.text((x, baseline + 37), value_text, anchor="mt", font=value_font, fill=(*accent, 255))
+            _draw_fitted_text(
+                image,
+                value_text,
+                center_x=x,
+                y=baseline + 37,
+                max_width=spacing * 0.88,
+                size=19,
+                fill=(*accent, 255),
+                bold=True,
+            )
 
     footer = "Юбара хранит счёт каждого двора отдельно" if coin_mode else "Каждое сообщение добавляет высоты башне"
-    draw.text((width // 2, 682), footer, anchor="mm", font=subtitle_font, fill=(231, 220, 242, 240))
+    draw.text(
+        (width // 2, 693 if coin_mode else 682),
+        footer,
+        anchor="mm",
+        font=subtitle_font,
+        fill=(231, 220, 242, 240),
+    )
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     output.name = "group_treasury.png" if coin_mode else "group_activity.png"
