@@ -1,6 +1,7 @@
 """Точка входа: восстановление данных, Render healthcheck и polling."""
 
 import asyncio
+import concurrent.futures
 import hashlib
 import hmac
 import io
@@ -16,7 +17,7 @@ from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, parse_qs, urlsplit
 
 from cryptography.fernet import Fernet
 from telegram import MessageReactionUpdated, Update
@@ -85,9 +86,10 @@ from handlers_pm import (
 )
 from images import create_profile_card, on_image_callback, stop_image_jobs
 from banner_store import stop_banner_render_queue
+import miniapp_api
 
 
-def _validate_web_app_init_data(init_data: str) -> tuple[int, str]:
+def _validate_web_app_init_data(init_data: str) -> tuple[int, str, str | None]:
     if not init_data or len(init_data) > 4096:
         raise ValueError("Invalid Telegram initData.")
 
@@ -130,10 +132,25 @@ def _validate_web_app_init_data(init_data: str) -> tuple[int, str]:
     first_name = user.get("first_name", "")
     if not isinstance(first_name, str):
         first_name = ""
-    return user["id"], first_name
+    username = user.get("username")
+    if not isinstance(username, str):
+        username = None
+    return user["id"], first_name, username
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    event_loop: asyncio.AbstractEventLoop | None = None
+    _static_assets = {
+        "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
+        "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+        "/assets/api.js": ("api.js", "text/javascript; charset=utf-8"),
+        "/assets/profile.js": ("profile.js", "text/javascript; charset=utf-8"),
+        "/assets/market.js": ("market.js", "text/javascript; charset=utf-8"),
+        "/assets/activation.js": ("activation.js", "text/javascript; charset=utf-8"),
+        "/assets/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
+        "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
+    }
+
     def do_GET(self) -> None:
         if self.path in ("/", "/index.html"):
             page_path = Path(__file__).resolve().parent / "webapp" / "index.html"
@@ -149,6 +166,25 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(page)
             return
+        if self.path in self._static_assets:
+            asset_name, content_type = self._static_assets[self.path]
+            asset_path = Path(__file__).resolve().parent / "webapp" / asset_name
+            try:
+                asset = asset_path.read_bytes()
+            except OSError:
+                logging.exception("Не удалось прочитать Mini App asset %s.", asset_path)
+                self.send_error(500, "Mini App asset unavailable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(asset)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(asset)
+            return
+        if urlsplit(self.path).path.startswith("/api/"):
+            self._handle_api_request("GET")
+            return
         if self.path != "/health":
             self.send_error(404)
             return
@@ -159,51 +195,87 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
 
     def do_POST(self) -> None:
-        if self.path != "/api/session":
-            self.send_error(404)
-            return
-        if self.headers.get_content_type() != "application/json":
-            self.send_error(415, "Expected application/json")
+        self._handle_api_request("POST")
+
+    def _handle_api_request(self, method: str) -> None:
+        if self.headers.get_content_type() not in ("application/json", "text/plain"):
+            self.send_error(415, "Unsupported request content type")
             return
 
-        content_length = self.headers.get("Content-Length")
-        try:
-            body_length = int(content_length or "")
-        except ValueError:
-            self.send_error(400, "Invalid Content-Length")
-            return
-        if not 1 <= body_length <= 8192:
-            self.send_error(413, "Invalid request size")
-            return
+        payload: dict[str, Any] = {}
+        if method == "POST":
+            content_length = self.headers.get("Content-Length")
+            try:
+                body_length = int(content_length or "")
+            except ValueError:
+                self.send_error(400, "Invalid Content-Length")
+                return
+            if not 1 <= body_length <= 8192:
+                self.send_error(413, "Invalid request size")
+                return
+            try:
+                parsed = json.loads(self.rfile.read(body_length))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.send_error(400, "Invalid JSON")
+                return
+            if not isinstance(parsed, dict):
+                self.send_error(400, "Expected a JSON object")
+                return
+            payload = parsed
 
-        try:
-            payload = json.loads(self.rfile.read(body_length))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self.send_error(400, "Invalid JSON")
+        init_data = self.headers.get("X-Telegram-Init-Data", "")
+        if self.path == "/api/session" and method == "POST":
+            init_data = payload.get("initData", "")
+        if not isinstance(init_data, str) or len(init_data) > 4096:
+            self.send_error(401, "Telegram identity could not be verified")
             return
-        if not isinstance(payload, dict) or not isinstance(payload.get("initData"), str):
-            self.send_error(400, "Missing Telegram initData")
-            return
-
         try:
-            user_id, first_name = _validate_web_app_init_data(payload["initData"])
+            user_id, first_name, username = _validate_web_app_init_data(init_data)
         except ValueError:
             self.send_error(401, "Telegram identity could not be verified")
             return
 
-        response = json.dumps(
-            {
-                "role": "admin" if user_id == ADMIN_ID else "user",
-                "first_name": first_name,
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        self.send_response(200)
+        parsed_url = urlsplit(self.path)
+        if parsed_url.path == "/api/session" and method == "POST":
+            coroutine = miniapp_api.get_session(user_id, first_name)
+        else:
+            coroutine = miniapp_api.dispatch(
+                method,
+                parsed_url.path,
+                parse_qs(parsed_url.query),
+                user_id,
+                first_name,
+                username,
+                payload,
+            )
+        loop = self.event_loop
+        if loop is None or loop.is_closed():
+            self.send_error(503, "API is unavailable")
+            return
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        try:
+            status, response = future.result(timeout=30)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            self.send_error(504, "API request timed out")
+            return
+        except Exception:
+            logging.exception(
+                "Mini App API request failed method=%s path=%s user_id=%s.",
+                method,
+                parsed_url.path,
+                user_id,
+            )
+            self.send_error(500, "API request failed")
+            return
+
+        body = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(response)
+        self.wfile.write(body)
 
     def log_message(self, _format: str, *_args: object) -> None:
         del _format, _args
@@ -1141,31 +1213,36 @@ def _validate_telegram_session(path: Path) -> bool:
 
 def main() -> None:
     logging.info("Запуск Telegram-бота Юбары.")
-    try:
-        http_server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
-    except OSError:
-        logging.exception("Не удалось запустить HTTP healthcheck на порту %s.", PORT)
-        raise
-    http_thread = threading.Thread(
-        target=http_server.serve_forever,
-        name="render-healthcheck",
-        daemon=True,
-    )
-    http_thread.start()
-    logging.info("HTTP healthcheck запущен на порту %s.", PORT)
-
     event_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(event_loop)
+    http_server: ThreadingHTTPServer | None = None
+    http_thread: threading.Thread | None = None
     try:
+        try:
+            http_server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
+        except OSError:
+            logging.exception("Не удалось запустить HTTP healthcheck на порту %s.", PORT)
+            raise
+        HealthCheckHandler.event_loop = event_loop
+        http_thread = threading.Thread(
+            target=http_server.serve_forever,
+            name="render-healthcheck",
+            daemon=True,
+        )
+        http_thread.start()
+        logging.info("HTTP healthcheck запущен на порту %s.", PORT)
         build_application().run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
+        HealthCheckHandler.event_loop = None
         if not event_loop.is_closed():
             event_loop.close()
         asyncio.set_event_loop(None)
-        http_server.shutdown()
-        http_server.server_close()
-        http_thread.join(timeout=5)
-        logging.info("HTTP healthcheck остановлен.")
+        if http_server is not None:
+            http_server.shutdown()
+            http_server.server_close()
+        if http_thread is not None:
+            http_thread.join(timeout=5)
+            logging.info("HTTP healthcheck остановлен.")
 
 
 if __name__ == "__main__":

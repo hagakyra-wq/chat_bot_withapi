@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="mark" viewBox="0 0 48 48">
+    <path d="M30.8 5.7a17.8 17.8 0 1 0 11.5 31.7A19.6 19.6 0 1 1 30.8 5.7Z" fill="currentColor"/>
+    <path d="m35.5 8.4 1.2 3.3 3.3 1.2-3.3 1.1-1.2 3.4-1.1-3.4-3.4-1.1 3.4-1.2 1.1-3.3Z" fill="#e4c395"/>
+    <path d="m10.1 7.7.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" fill="#d9b2d4"/>
+    <circle cx="12" cy="26" r="1.1" fill="#e4c395"/>
+    <circle cx="29.5" cy="40" r=".9" fill="#d9b2d4"/>
+  </symbol>
+  <symbol id="home" viewBox="0 0 24 24">
+    <path d="m3.5 10.6 8.5-7 8.5 7v9.1a1.8 1.8 0 0 1-1.8 1.8h-13a1.8 1.8 0 0 1-1.8-1.8v-9.1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M9 21.2v-7.5h6v7.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="profile" viewBox="0 0 24 24">
+    <circle cx="12" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    <path d="M4.8 20c.6-3.3 3.4-5.5 7.2-5.5s6.6 2.2 7.2 5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="market" viewBox="0 0 24 24">
+    <path d="M5 8.5h14l1.1 11.2H3.9L5 8.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M8.3 9V6.8a3.7 3.7 0 0 1 7.4 0V9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M8.1 13.1c.7.6 1.4.9 2.1.9s1.4-.3 2.1-.9 1.4-.9 2.1-.9 1.4.3 2.1.9" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="key" viewBox="0 0 24 24">
+    <circle cx="8.2" cy="14.8" r="4.2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    <path d="m11.3 11.8 8.2-8.2 2.1 2.1-2 2 1.6 1.6-2.2 2.2-1.6-1.6-3.1 3.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <circle cx="8.2" cy="14.8" r="1.15" fill="currentColor"/>
+  </symbol>
+  <symbol id="settings" viewBox="0 0 24 24">
+    <path d="m10 3.4.5-1h3l.5 1a2 2 0 0 0 2.5 1l1-.4 2.1 2.1-.4 1a2 2 0 0 0 1 2.5l1 .5v3l-1 .5a2 2 0 0 0-1 2.5l.4 1-2.1 2.1-1-.4a2 2 0 0 0-2.5 1l-.5 1h-3l-.5-1a2 2 0 0 0-2.5-1l-1 .4-2.1-2.1.4-1a2 2 0 0 0-1-2.5l-1-.5v-3l1-.5a2 2 0 0 0 1-2.5l-.4-1 2.1-2.1 1 .4a2 2 0 0 0 2.5-1Z" transform="translate(1 1) scale(.91)" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/>
+    <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+  </symbol>
+  <symbol id="arrow" viewBox="0 0 24 24">
+    <path d="M4.5 12h14m-5.5-5.5 5.5 5.5-5.5 5.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="moon-art" viewBox="0 0 220 220">
+    <defs>
+      <linearGradient id="moon-fill" x1="38" y1="38" x2="177" y2="177" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#f1d6dc"/>
+        <stop offset=".5" stop-color="#c9a8d7"/>
+        <stop offset="1" stop-color="#8f80bd"/>
+      </linearGradient>
+      <linearGradient id="moon-line" x1="41" y1="42" x2="166" y2="175" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#fff3e2"/>
+        <stop offset="1" stop-color="#bd9bda"/>
+      </linearGradient>
+    </defs>
+    <circle cx="110" cy="110" r="86" fill="none" stroke="url(#moon-line)" stroke-opacity=".18"/>
+    <circle cx="110" cy="110" r="72" fill="none" stroke="url(#moon-line)" stroke-opacity=".12" stroke-dasharray="2 7"/>
+    <path d="M139.1 35.8a72 72 0 1 0 48.1 122.7A79 79 0 1 1 139.1 35.8Z" fill="url(#moon-fill)" fill-opacity=".92"/>
+    <path d="m155.8 45.1 3.5 9.5 9.5 3.5-9.5 3.5-3.5 9.5-3.5-9.5-9.5-3.5 9.5-3.5 3.5-9.5Z" fill="#f1d8c0"/>
+    <path d="m57.5 53 2.2 6 6 2.2-6 2.2-2.2 6-2.2-6-6-2.2 6-2.2 2.2-6Z" fill="#e0bedb"/>
+    <path d="m52.1 137.2 1.6 4.4 4.4 1.6-4.4 1.6-1.6 4.4-1.6-4.4-4.4-1.6 4.4-1.6 1.6-4.4Z" fill="#ecc9be"/>
+    <circle cx="177" cy="113" r="2" fill="#f1d8c0"/>
+    <circle cx="86" cy="174" r="1.7" fill="#e0bedb"/>
+    <circle cx="94" cy="31" r="1.5" fill="#f1d8c0"/>
+    <path d="M128 85c-9 4-14 12-14 21m-20 25c5 8 13 13 23 14" fill="none" stroke="#f4e6ed" stroke-opacity=".25" stroke-width="1.5" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="spark" viewBox="0 0 100 100">
+    <path d="M50 4c5 26 16 37 46 46-30 9-41 20-46 46C44 70 33 59 4 50 33 41 44 30 50 4Z" fill="currentColor"/>
+    <path d="M81 7c2 9 5 13 15 16-10 3-13 7-15 16-2-9-5-13-15-16 10-3 13-7 15-16Z" fill="currentColor" opacity=".55"/>
+  </symbol>
+  <symbol id="search" viewBox="0 0 24 24">
+    <circle cx="10.8" cy="10.8" r="6.7" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    <path d="m16 16 4.4 4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="shield" viewBox="0 0 24 24">
+    <path d="M12 2.8 20 6v5.7c0 5-3.4 8.3-8 9.8-4.6-1.5-8-4.8-8-9.8V6l8-3.2Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="m8.5 12.1 2.3 2.3 4.8-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="refresh" viewBox="0 0 24 24">
+    <path d="M19.1 9A7.5 7.5 0 0 0 5.5 6.1L3.8 8M4 4v4h4M4.9 15a7.5 7.5 0 0 0 13.6 2.9l1.7-1.9M20 20v-4h-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+</svg>
