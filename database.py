@@ -774,6 +774,415 @@ def _decrypt_message_payload(token: str) -> dict[str, Any]:
     return payload
 
 
+def _message_identity(chat_id: int, user_id: int, message_id: int) -> tuple[int, int, int]:
+    return chat_id, user_id, message_id
+
+
+async def _existing_message_identities() -> set[tuple[int, int, int]]:
+    identities: set[tuple[int, int, int]] = set()
+    for message_path in (DATABASE_PATH, *_message_archive_paths()):
+        if not message_path.is_file():
+            continue
+        async with aiosqlite.connect(message_path) as source:
+            cursor = await source.execute(
+                "SELECT chat_id, user_id, message_id FROM messages"
+            )
+            identities.update(
+                _message_identity(int(chat_id), int(user_id), int(message_id))
+                for chat_id, user_id, message_id in await cursor.fetchall()
+            )
+    return identities
+
+
+async def _merge_attached_messages(
+    db: aiosqlite.Connection,
+    identities: set[tuple[int, int, int]],
+) -> int:
+    source_columns = {
+        str(row["name"])
+        for row in await (await db.execute("PRAGMA incoming.table_info(messages)")).fetchall()
+    }
+    required_columns = {
+        "chat_id", "user_id", "message_id", "sender_name", "text", "created_at"
+    }
+    if not required_columns <= source_columns:
+        raise sqlite3.DatabaseError("Архив не содержит ожидаемых полей таблицы messages.")
+
+    cursor = await db.execute("SELECT * FROM incoming.messages")
+    rows = await cursor.fetchall()
+    imported = 0
+    for row in rows:
+        chat_id = int(row["chat_id"])
+        user_id = int(row["user_id"])
+        message_id = int(row["message_id"])
+        identity = _message_identity(chat_id, user_id, message_id)
+        if identity in identities:
+            continue
+        sender_name = str(row["sender_name"])
+        text = str(row["text"])
+        payload_version = int(row["payload_version"]) if "payload_version" in source_columns else 0
+        if payload_version == 1:
+            _decrypt_message_payload(text)
+        else:
+            text = _encrypt_message_payload(sender_name, text)
+            sender_name = "[encrypted]"
+            payload_version = 1
+        await db.execute(
+            """
+            INSERT INTO messages(
+                chat_id, user_id, message_id, sender_name, text, created_at, payload_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                user_id,
+                message_id,
+                sender_name,
+                text,
+                str(row["created_at"]),
+                payload_version,
+            ),
+        )
+        identities.add(identity)
+        imported += 1
+    return imported
+
+
+async def _attach_merge_source(
+    db: aiosqlite.Connection,
+    source_path: str | Path,
+) -> None:
+    await db.execute("ATTACH DATABASE ? AS incoming", (str(source_path),))
+    cursor = await db.execute(
+        "SELECT 1 FROM incoming.sqlite_master WHERE type = 'table' AND name = 'messages'"
+    )
+    if await cursor.fetchone() is None:
+        raise sqlite3.DatabaseError("Файл не содержит таблицу истории messages.")
+
+
+def _source_table_columns(
+    db: aiosqlite.Connection,
+    schema: str,
+    table_name: str,
+) -> Any:
+    return db.execute(f'PRAGMA {schema}.table_info("{table_name}")')
+
+
+async def merge_backup_database(
+    source_path: str | Path,
+    source_digest: str,
+) -> dict[str, int]:
+    """Union a backup into the live database without replacing current state."""
+    global _dirty_generation
+    source_file = Path(source_path)
+    if not await asyncio.to_thread(validate_sqlite, source_file):
+        raise sqlite3.DatabaseError("Файл бэкапа не прошёл проверку SQLite.")
+    result = {"messages": 0, "inventory": 0, "balances": 0, "other_rows": 0}
+    async with _write_lock:
+        identities = await _existing_message_identities()
+        async with _connect() as db:
+            await _attach_merge_source(db, source_file)
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                merge_key = f"merge_applied:database:{source_digest}"
+                cursor = await db.execute("SELECT 1 FROM meta WHERE key = ?", (merge_key,))
+                if await cursor.fetchone() is not None:
+                    await db.rollback()
+                    return {"already_applied": 1}
+
+                result["messages"] = await _merge_attached_messages(db, identities)
+                for table_name in (
+                    "users",
+                    "global_profiles",
+                    "message_activity",
+                    "allowed_groups",
+                    "user_group_memberships",
+                    "group_promo_codes",
+                    "coin_promo_codes",
+                    "coin_penalty_codes",
+                    "access_keys",
+                    "authorized_users",
+                    "user_features",
+                    "image_settings",
+                    "casino_rounds",
+                    "group_owner_banners",
+                    "bonus_claims",
+                ):
+                    cursor = await db.execute(
+                        "SELECT 1 FROM incoming.sqlite_master "
+                        "WHERE type = 'table' AND name = ?",
+                        (table_name,),
+                    )
+                    if await cursor.fetchone() is None:
+                        continue
+                    live_columns = {
+                        str(row["name"])
+                        for row in await (
+                            await _source_table_columns(db, "main", table_name)
+                        ).fetchall()
+                    }
+                    old_columns = {
+                        str(row["name"])
+                        for row in await (
+                            await _source_table_columns(db, "incoming", table_name)
+                        ).fetchall()
+                    }
+                    common_columns = sorted(live_columns & old_columns)
+                    if not common_columns:
+                        continue
+                    columns_sql = ", ".join(f'"{column}"' for column in common_columns)
+                    cursor = await db.execute(
+                        f'INSERT OR IGNORE INTO main."{table_name}" ({columns_sql}) '
+                        f'SELECT {columns_sql} FROM incoming."{table_name}"'
+                    )
+                    result["other_rows"] += max(cursor.rowcount, 0)
+
+                source_duel_players = {
+                    str(row["name"])
+                    for row in await (
+                        await db.execute(
+                            "SELECT name FROM incoming.sqlite_master WHERE type = 'table'"
+                        )
+                    ).fetchall()
+                }
+                duel_rows = (
+                    await (await db.execute("SELECT * FROM incoming.duel_players")).fetchall()
+                    if "duel_players" in source_duel_players
+                    else []
+                )
+                for row in duel_rows:
+                    user_id = row["user_id"]
+                    cursor = await db.execute(
+                        "SELECT 1 FROM duel_players WHERE user_id = ?", (user_id,)
+                    )
+                    if await cursor.fetchone() is None:
+                        await db.execute(
+                            """
+                            INSERT INTO duel_players(user_id, username, balance_cents, last_mined_on, is_bot)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                row["user_id"],
+                                row["username"],
+                                row["balance_cents"],
+                                row["last_mined_on"],
+                                row["is_bot"],
+                            ),
+                        )
+                    else:
+                        await db.execute(
+                            """
+                            UPDATE duel_players SET
+                                balance_cents = balance_cents + ?,
+                                last_mined_on = MAX(last_mined_on, ?),
+                                username = COALESCE(username, ?)
+                            WHERE user_id = ?
+                            """,
+                            (
+                                row["balance_cents"],
+                                row["last_mined_on"],
+                                row["username"],
+                                row["user_id"],
+                            ),
+                        )
+                    result["balances"] += 1
+
+                item_id_map: dict[int, int] = {}
+                source_tables = {
+                    str(row["name"])
+                    for row in await (
+                        await db.execute(
+                            "SELECT name FROM incoming.sqlite_master WHERE type = 'table'"
+                        )
+                    ).fetchall()
+                }
+                active_users = {
+                    int(row["user_id"])
+                    for row in await (
+                        await db.execute("SELECT user_id FROM banner_items WHERE is_active = 1")
+                    ).fetchall()
+                }
+                if "banner_items" in source_tables:
+                    source_items = await (
+                        await db.execute("SELECT * FROM incoming.banner_items")
+                    ).fetchall()
+                    existing_items = await (
+                        await db.execute(
+                            "SELECT item_id, user_id, level, seed, preset, source, obtained_at "
+                            "FROM banner_items"
+                        )
+                    ).fetchall()
+                    existing_fingerprints = {
+                        (
+                            int(row["user_id"]),
+                            int(row["level"]),
+                            str(row["seed"]),
+                            row["preset"],
+                            str(row["source"]),
+                            str(row["obtained_at"]),
+                        ): int(row["item_id"])
+                        for row in existing_items
+                    }
+                    live_columns = {
+                        str(row["name"])
+                        for row in await (
+                            await _source_table_columns(db, "main", "banner_items")
+                        ).fetchall()
+                    }
+                    old_columns = {
+                        str(row["name"])
+                        for row in await (
+                            await _source_table_columns(db, "incoming", "banner_items")
+                        ).fetchall()
+                    }
+                    for item in source_items:
+                        old_id = int(item["item_id"])
+                        fingerprint = (
+                            int(item["user_id"]),
+                            int(item["level"]),
+                            str(item["seed"]),
+                            item["preset"],
+                            str(item["source"]),
+                            str(item["obtained_at"]),
+                        )
+                        existing_id = existing_fingerprints.get(fingerprint)
+                        if existing_id is not None:
+                            item_id_map[old_id] = existing_id
+                            continue
+                        columns = sorted(live_columns & old_columns)
+                        values = {column: item[column] for column in columns}
+                        values.pop("item_id", None)
+                        for media_column in (
+                            "file_id",
+                            "backup_msg_id",
+                            "market_file_id",
+                            "market_backup_msg_id",
+                            "content_hash",
+                            "rendered_at",
+                        ):
+                            if media_column in values:
+                                values[media_column] = None
+                        if "is_active" in values and (
+                            int(item["user_id"]) in active_users
+                        ):
+                            values["is_active"] = 0
+                        insert_columns = list(values)
+                        cursor = await db.execute(
+                            "INSERT INTO banner_items ("
+                            + ", ".join(f'"{column}"' for column in insert_columns)
+                            + ") VALUES ("
+                            + ", ".join("?" for _ in insert_columns)
+                            + ")",
+                            tuple(values[column] for column in insert_columns),
+                        )
+                        new_id = int(cursor.lastrowid)
+                        item_id_map[old_id] = new_id
+                        fingerprint_id = new_id
+                        existing_fingerprints[fingerprint] = fingerprint_id
+                        if bool(values.get("is_active")):
+                            active_users.add(int(item["user_id"]))
+                        result["inventory"] += 1
+
+                if "market_lots" in source_tables:
+                    source_lots = await (
+                        await db.execute("SELECT * FROM incoming.market_lots")
+                    ).fetchall()
+                    live_lot_columns = {
+                        str(row["name"])
+                        for row in await (
+                            await _source_table_columns(db, "main", "market_lots")
+                        ).fetchall()
+                    }
+                    old_lot_columns = {
+                        str(row["name"])
+                        for row in await (
+                            await _source_table_columns(db, "incoming", "market_lots")
+                        ).fetchall()
+                    }
+                    for lot in source_lots:
+                        mapped_item_id = item_id_map.get(int(lot["item_id"]))
+                        if mapped_item_id is None:
+                            continue
+                        cursor = await db.execute(
+                            "SELECT 1 FROM market_lots WHERE item_id = ?",
+                            (mapped_item_id,),
+                        )
+                        if await cursor.fetchone() is not None:
+                            continue
+                        values = {
+                            column: lot[column]
+                            for column in live_lot_columns & old_lot_columns
+                            if column not in {"lot_id", "item_id"}
+                        }
+                        columns = ["item_id", *values]
+                        await db.execute(
+                            "INSERT INTO market_lots ("
+                            + ", ".join(f'"{column}"' for column in columns)
+                            + ") VALUES ("
+                            + ", ".join("?" for _ in columns)
+                            + ")",
+                            (mapped_item_id, *(values[column] for column in values)),
+                        )
+
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, '1')",
+                    (merge_key,),
+                )
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES ('dirty', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            finally:
+                await db.execute("DETACH DATABASE incoming")
+        _record_write()
+    await rotate_messages_if_needed()
+    return result
+
+
+async def merge_message_archive(
+    source_path: str | Path,
+    source_digest: str,
+) -> dict[str, int]:
+    """Import an encrypted SQLite message archive, keeping existing messages."""
+    global _dirty_generation
+    source_file = Path(source_path)
+    if not await asyncio.to_thread(validate_sqlite, source_file):
+        raise sqlite3.DatabaseError("Архив истории не прошёл проверку SQLite.")
+    async with _write_lock:
+        identities = await _existing_message_identities()
+        async with _connect() as db:
+            await _attach_merge_source(db, source_file)
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                merge_key = f"merge_applied:history:{source_digest}"
+                cursor = await db.execute("SELECT 1 FROM meta WHERE key = ?", (merge_key,))
+                if await cursor.fetchone() is not None:
+                    await db.rollback()
+                    return {"already_applied": 1}
+                imported = await _merge_attached_messages(db, identities)
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, '1')",
+                    (merge_key,),
+                )
+                await db.execute(
+                    "INSERT INTO meta(key, value) VALUES ('dirty', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            finally:
+                await db.execute("DETACH DATABASE incoming")
+        _record_write()
+    await rotate_messages_if_needed()
+    return {"messages": imported}
+
+
 async def _migrate_message_payloads(db: aiosqlite.Connection) -> None:
     migrated = await _encrypt_legacy_messages(db)
     for archive_path in _message_archive_paths():

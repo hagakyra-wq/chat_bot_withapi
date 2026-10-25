@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from collections.abc import Awaitable
@@ -39,6 +40,7 @@ from channel_log import (
     send_channel_event,
 )
 from config import (
+    ADMIN_ID,
     BACKUP_CHANNEL_ID,
     BACKUP_INTERVAL_SECONDS,
     BACKUP_MAX_DOWNLOAD_SIZE,
@@ -778,6 +780,12 @@ def build_application() -> Application:
     )
     application.add_handler(
         MessageHandler(
+            filters.UpdateType.CHANNEL_POST & filters.TEXT,
+            _handle_backup_merge,
+        )
+    )
+    application.add_handler(
+        MessageHandler(
             filters.UpdateType.CHANNEL_POST & filters.StatusUpdate.PINNED_MESSAGE,
             _delete_channel_pin_notification,
         )
@@ -811,6 +819,192 @@ async def _delete_channel_pin_notification(
             "Не удалось удалить служебное уведомление о закреплении в канале (message_id=%s).",
             message.message_id,
         )
+
+
+async def _handle_backup_merge(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.channel_post
+    if (
+        message is None
+        or BACKUP_CHANNEL_ID is None
+        or message.chat_id != BACKUP_CHANNEL_ID
+        or message.reply_to_message is None
+    ):
+        return
+    if message.from_user is not None and message.from_user.id != ADMIN_ID:
+        return
+
+    command_tokens = {
+        token.strip(".,!?;:()[]{}").casefold()
+        for token in (message.text or "").split()
+    }
+    requested_actions = {"#бэкап": "бэкап", "#histori": "histori", "#sessia": "sessia"}
+    action = next(
+        (requested_actions[token] for token in requested_actions if token in command_tokens),
+        None,
+    )
+    if action is None:
+        return
+    source_message = message.reply_to_message
+    document = source_message.document
+    if document is None or not document.file_name:
+        await message.reply_text("Ответь на сообщение с файлом нужного бэкапа.")
+        return
+
+    filename = Path(document.file_name).name
+    if action == "бэкап" and filename != "database_backup.db":
+        await message.reply_text("Для #бэкап нужен файл database_backup.db.")
+        return
+    if action == "histori" and re.fullmatch(r"messages_\d+\.db", filename) is None:
+        await message.reply_text(
+            "Для #histori нужен архив сообщений messages_XXXX.db. "
+            "Зашифрованный экспорт history_<id>.txt.enc нельзя объединить "
+            "в исходную историю: в нём нет Telegram ID сообщений и участников."
+        )
+        return
+    if action == "sessia" and re.fullmatch(
+        r"telegram_session_(\d+)\.session",
+        filename,
+    ) is None:
+        await message.reply_text(
+            "Для #sessia нужен файл telegram_session_<user_id>.session."
+        )
+        return
+    if document.file_size and document.file_size > BACKUP_MAX_DOWNLOAD_SIZE:
+        await message.reply_text("Файл превышает лимит скачивания Telegram (20 МБ).")
+        return
+
+    temporary_path = DATABASE_PATH.with_name(
+        f"merge_{message.message_id}_{source_message.message_id}.tmp"
+    )
+    staged_session: Path | None = None
+    try:
+        telegram_file = await context.bot.get_file(document.file_id)
+        await telegram_file.download_to_drive(custom_path=str(temporary_path))
+        if temporary_path.stat().st_size > BACKUP_MAX_DOWNLOAD_SIZE:
+            raise ValueError("Файл превышает лимит скачивания Telegram (20 МБ).")
+
+        if action == "sessia":
+            match = re.fullmatch(r"telegram_session_(\d+)\.session", filename)
+            if match is None:
+                raise ValueError("Не удалось определить владельца Telegram-сессии.")
+            user_id = int(match.group(1))
+            if user_id <= 0:
+                raise ValueError("Некорректный user_id в имени файла Telegram-сессии.")
+            if not await asyncio.to_thread(_validate_telegram_session, temporary_path):
+                raise sqlite3.DatabaseError("Файл Telegram-сессии повреждён или пуст.")
+            session_path = personal_account.session_file_path(user_id)
+            if session_path.exists():
+                await message.reply_text(
+                    "Сессию нельзя объединить с уже установленной. "
+                    "Текущий файл сохранён без изменений; импорт старого пропущен."
+                )
+                return
+            session_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            personal_account.set_enabled(False, user_id)
+            staged_session = session_path.with_name(
+                f"{session_path.name}.{message.message_id}.restore.tmp"
+            )
+            await asyncio.to_thread(os.replace, temporary_path, staged_session)
+            await asyncio.to_thread(os.replace, staged_session, session_path)
+            await message.reply_text(
+                f"Сессия пользователя {user_id} восстановлена. "
+                "Она оставлена выключенной; включи её отдельно после проверки."
+            )
+            logging.warning(
+                "Восстановлена Telegram user-сессия user_id=%s из сообщения бэкапа %s; "
+                "сессия оставлена выключенной.",
+                user_id,
+                source_message.message_id,
+            )
+            return
+
+        source_digest = await asyncio.to_thread(_file_sha256, temporary_path)
+        if action == "бэкап":
+            result = await database.merge_backup_database(
+                temporary_path,
+                source_digest,
+            )
+            if result.get("already_applied"):
+                await message.reply_text("Этот файл бэкапа уже объединялся; повторно не применяю.")
+            else:
+                await message.reply_text(
+                    "Склейка базы завершена. "
+                    f"Балансов объединено: {result.get('balances', 0)}; "
+                    f"баннеров добавлено: {result.get('inventory', 0)}; "
+                    f"сообщений истории добавлено: {result.get('messages', 0)}. "
+                    "Текущие настройки и существующие профили сохранены."
+                )
+        else:
+            result = await database.merge_message_archive(
+                temporary_path,
+                source_digest,
+            )
+            if result.get("already_applied"):
+                await message.reply_text("Этот архив истории уже объединялся.")
+            else:
+                await message.reply_text(
+                    f"Архив истории объединён: добавлено сообщений "
+                    f"{result.get('messages', 0)}."
+                )
+    except Exception:
+        logging.exception(
+            "Не удалось обработать # %s по файлу %s.",
+            action,
+            filename,
+        )
+        await message.reply_text(
+            "Не удалось выполнить склейку. Проверь журнал, файл и ключ шифрования."
+        )
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            logging.exception(
+                "Не удалось удалить временный файл склейки %s.",
+                temporary_path,
+            )
+        if staged_session is not None:
+            try:
+                staged_session.unlink(missing_ok=True)
+            except OSError:
+                logging.exception(
+                    "Не удалось удалить временный файл Telegram-сессии %s.",
+                    staged_session,
+                )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as backup_file:
+        for chunk in iter(lambda: backup_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_telegram_session(path: Path) -> bool:
+    if not database.validate_sqlite(path):
+        return False
+    try:
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(sessions)")
+            }
+            if not {"dc_id", "auth_key"} <= columns:
+                return False
+            row = connection.execute(
+                "SELECT 1 FROM sessions WHERE auth_key IS NOT NULL LIMIT 1"
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        logging.exception("Не удалось проверить Telegram user-сессию %s.", path.name)
+        return False
 
 
 def main() -> None:
