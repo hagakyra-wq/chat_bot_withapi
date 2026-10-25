@@ -63,6 +63,7 @@ _MOSCOW_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "group_owner_banners": ("created_at",),
     "casino_rounds": ("created_at",),
     "market_lots": ("created_at",),
+    "pending_banner_transfers": ("created_at",),
     "bonus_claims": ("claimed_at", "penalized_at"),
 }
 
@@ -292,6 +293,14 @@ async def initialize() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_lots_open
                     ON market_lots(status, created_at DESC);
+                CREATE TABLE IF NOT EXISTS pending_banner_transfers (
+                    item_id INTEGER PRIMARY KEY,
+                    sender_id INTEGER NOT NULL,
+                    recipient_id INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_pending_banner_transfers_recipient
+                    ON pending_banner_transfers(recipient_id, created_at);
                 CREATE TABLE IF NOT EXISTS bonus_claims (
                     claim_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -333,6 +342,16 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_market_lots_update
                 AFTER UPDATE ON market_lots BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_pending_banner_transfers_insert
+                AFTER INSERT ON pending_banner_transfers BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_pending_banner_transfers_delete
+                AFTER DELETE ON pending_banner_transfers BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -3377,7 +3396,7 @@ async def get_banner_item(item_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-async def transfer_banner_item(
+async def request_banner_transfer(
     sender_id: int,
     recipient_id: int,
     item_id: int,
@@ -3399,6 +3418,13 @@ async def transfer_banner_item(
                 await db.rollback()
                 return "owner_item"
             cursor = await db.execute(
+                "SELECT 1 FROM pending_banner_transfers WHERE item_id = ?",
+                (item_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await db.rollback()
+                return "already_pending"
+            cursor = await db.execute(
                 "SELECT 1 FROM market_lots WHERE item_id = ? AND status = 'open'",
                 (item_id,),
             )
@@ -3413,6 +3439,99 @@ async def transfer_banner_item(
                 await db.rollback()
                 return "recipient_not_found"
             cursor = await db.execute(
+                "INSERT INTO pending_banner_transfers(item_id, sender_id, recipient_id) "
+                "VALUES (?, ?, ?)",
+                (item_id, sender_id, recipient_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "already_pending"
+            await db.commit()
+        _record_write()
+    return "pending"
+
+
+async def get_pending_banner_transfer(item_id: int) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT item_id, sender_id, recipient_id, created_at
+            FROM pending_banner_transfers
+            WHERE item_id = ?
+            """,
+            (item_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def cancel_banner_transfer(item_id: int, sender_id: int) -> tuple[str, int | None]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT sender_id, recipient_id FROM pending_banner_transfers "
+                "WHERE item_id = ?",
+                (item_id,),
+            )
+            transfer = await cursor.fetchone()
+            if transfer is None:
+                await db.rollback()
+                return "missing", None
+            if int(transfer["sender_id"]) != sender_id:
+                await db.rollback()
+                return "not_sender", None
+            recipient_id = int(transfer["recipient_id"])
+            await db.execute(
+                "DELETE FROM pending_banner_transfers WHERE item_id = ?",
+                (item_id,),
+            )
+            await db.commit()
+        _record_write()
+    return "cancelled", recipient_id
+
+
+async def accept_banner_transfer(
+    item_id: int,
+    recipient_id: int,
+) -> tuple[str, int | None]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT sender_id, recipient_id FROM pending_banner_transfers "
+                "WHERE item_id = ?",
+                (item_id,),
+            )
+            transfer = await cursor.fetchone()
+            if transfer is None:
+                await db.rollback()
+                return "missing", None
+            if int(transfer["recipient_id"]) != recipient_id:
+                await db.rollback()
+                return "not_recipient", None
+            sender_id = int(transfer["sender_id"])
+            cursor = await db.execute(
+                "SELECT source FROM banner_items WHERE item_id = ? AND user_id = ?",
+                (item_id, sender_id),
+            )
+            item = await cursor.fetchone()
+            if item is None or item["source"] == "owner":
+                await db.execute(
+                    "DELETE FROM pending_banner_transfers WHERE item_id = ?",
+                    (item_id,),
+                )
+                await db.commit()
+                _record_write()
+                return "missing", sender_id
+            cursor = await db.execute(
+                "SELECT 1 FROM market_lots WHERE item_id = ? AND status = 'open'",
+                (item_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await db.rollback()
+                return "listed", sender_id
+            cursor = await db.execute(
                 """
                 UPDATE banner_items
                 SET user_id = ?, is_active = 0,
@@ -3423,10 +3542,43 @@ async def transfer_banner_item(
             )
             if cursor.rowcount != 1:
                 await db.rollback()
-                return "missing"
+                return "missing", sender_id
+            await db.execute(
+                "DELETE FROM pending_banner_transfers WHERE item_id = ?",
+                (item_id,),
+            )
             await db.commit()
         _record_write()
-    return "transferred"
+    return "transferred", sender_id
+
+
+async def return_banner_transfer(
+    item_id: int,
+    recipient_id: int,
+) -> tuple[str, int | None]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT sender_id, recipient_id FROM pending_banner_transfers "
+                "WHERE item_id = ?",
+                (item_id,),
+            )
+            transfer = await cursor.fetchone()
+            if transfer is None:
+                await db.rollback()
+                return "missing", None
+            if int(transfer["recipient_id"]) != recipient_id:
+                await db.rollback()
+                return "not_recipient", None
+            sender_id = int(transfer["sender_id"])
+            await db.execute(
+                "DELETE FROM pending_banner_transfers WHERE item_id = ?",
+                (item_id,),
+            )
+            await db.commit()
+        _record_write()
+    return "returned", sender_id
 
 
 async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:
@@ -3468,7 +3620,11 @@ async def get_user_banner_items(
                    EXISTS(
                        SELECT 1 FROM market_lots lot
                        WHERE lot.item_id = item.item_id AND lot.status = 'open'
-                   ) AS is_listed
+                   ) AS is_listed,
+                   EXISTS(
+                       SELECT 1 FROM pending_banner_transfers transfer
+                       WHERE transfer.item_id = item.item_id
+                   ) AS is_transfer_pending
             FROM banner_items item
             WHERE item.user_id = ?
               AND (
@@ -3564,6 +3720,10 @@ async def activate_banner_item(user_id: int, item_id: int) -> bool:
                 """
                 SELECT 1 FROM banner_items
                 WHERE item_id = ? AND user_id = ?
+                  AND NOT EXISTS(
+                      SELECT 1 FROM pending_banner_transfers transfer
+                      WHERE transfer.item_id = banner_items.item_id
+                  )
                   AND (
                       source != 'owner'
                       OR user_id = CAST(
@@ -3842,6 +4002,10 @@ async def recycle_banner_item(user_id: int, item_id: int, payout_cents: int) -> 
                            SELECT 1 FROM market_lots lot
                            WHERE lot.item_id = item.item_id AND lot.status = 'open'
                        ) AS is_listed,
+                       EXISTS(
+                           SELECT 1 FROM pending_banner_transfers transfer
+                           WHERE transfer.item_id = item.item_id
+                       ) AS is_transfer_pending,
                        player.balance_cents
                 FROM banner_items item
                 JOIN duel_players player ON player.user_id = item.user_id
@@ -3856,6 +4020,9 @@ async def recycle_banner_item(user_id: int, item_id: int, payout_cents: int) -> 
             if row["source"] == "owner" or row["is_listed"]:
                 await db.rollback()
                 return "forbidden"
+            if row["is_transfer_pending"]:
+                await db.rollback()
+                return "pending"
             in_debt = int(row["balance_cents"]) < 0
             if row["is_active"] and not in_debt:
                 await db.rollback()
@@ -3897,6 +4064,10 @@ async def recycle_banner_items_by_level(
                   AND NOT EXISTS(
                       SELECT 1 FROM market_lots lot
                       WHERE lot.item_id = item.item_id AND lot.status = 'open'
+                  )
+                  AND NOT EXISTS(
+                      SELECT 1 FROM pending_banner_transfers transfer
+                      WHERE transfer.item_id = item.item_id
                   )
                 ORDER BY item.obtained_at ASC, item.item_id ASC
                 LIMIT ?
@@ -3976,6 +4147,13 @@ async def create_market_lot(
             if item["source"] == "owner" or item["is_active"]:
                 await db.rollback()
                 return "forbidden"
+            cursor = await db.execute(
+                "SELECT 1 FROM pending_banner_transfers WHERE item_id = ?",
+                (item_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await db.rollback()
+                return "pending"
             cursor = await db.execute(
                 "SELECT 1 FROM market_lots WHERE item_id = ? AND status = 'open'",
                 (item_id,),

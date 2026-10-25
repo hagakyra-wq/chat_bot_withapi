@@ -52,6 +52,7 @@ _COIN_PROMO_RE = re.compile(
 )
 _ACTIVATE_CODE_RE = re.compile(r"^/activate(?:@\w+)?(?:\s+(.+))?$", re.IGNORECASE)
 _ACTIVATION_INPUT_TTL_SECONDS = 5 * 60
+_ERROR_REPORT_INPUT_TTL_SECONDS = 10 * 60
 _TRANSFER_RECIPIENT_RE = re.compile(r"^@?([a-z0-9_]{5,32})$", re.IGNORECASE)
 _TRANSFER_USER_ID_RE = re.compile(r"^\d{1,20}$")
 _RECYCLE_COMMAND_RE = re.compile(
@@ -122,6 +123,49 @@ def _inventory_url(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 def _inventory_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
     return InlineKeyboardButton("🎒 Инвентарь", url=_inventory_url(context))
+
+
+_INVENTORY_PAGE_SIZE = 8
+
+
+def _inventory_filter_rows(
+    level_filter: str,
+    sort_by: str,
+    view_mode: str,
+) -> list[list[InlineKeyboardButton]]:
+    filters = [
+        ("all", "Все"),
+        ("1", "Обыч."),
+        ("2", "Необыч."),
+        ("3", "Редкий"),
+        ("4", "Эпич."),
+        ("5", "Элит."),
+        ("6", "Легенд."),
+    ]
+    buttons = [
+        InlineKeyboardButton(
+            f"{'● ' if value == level_filter else ''}{label}",
+            callback_data=f"inv:f:{value}:{sort_by}:{view_mode}",
+        )
+        for value, label in filters
+    ]
+    rows = [buttons[:3], buttons[3:6], buttons[6:]]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "↕️ Сортировка: по уровню" if sort_by == "date" else "↕️ Сортировка: новые",
+                callback_data=(
+                    f"inv:f:{level_filter}:"
+                    f"{'level' if sort_by == 'date' else 'date'}:{view_mode}"
+                ),
+            ),
+            InlineKeyboardButton(
+                "📃 Списком" if view_mode == "carousel" else "🖼 Карусель",
+                callback_data=f"inv:v:{'list' if view_mode == 'carousel' else 'carousel'}:{level_filter}:{sort_by}:0",
+            ),
+        ]
+    )
+    return rows
 
 
 def _menu_button() -> InlineKeyboardButton:
@@ -394,7 +438,17 @@ async def _show_admin_help(
             )
     await message.reply_text(
         "\n\n".join(sections),
-        reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🐞 Сообщить об ошибке",
+                        callback_data="menu:report",
+                    )
+                ],
+                [_menu_button()],
+            ]
+        ),
     )
 
 
@@ -665,6 +719,7 @@ async def _show_inventory(
     page: int = 0,
     level_filter: str = "all",
     sort_by: str = "date",
+    view_mode: str | None = None,
 ) -> None:
     user = update.effective_user
     message = update.effective_message
@@ -676,23 +731,32 @@ async def _show_inventory(
             reply_markup=InlineKeyboardMarkup([[_inventory_button(context)]]),
         )
         return
-    level = (
-        int(level_filter)
-        if level_filter.isdigit() and 1 <= int(level_filter) <= 6
-        else None
-    )
+    if level_filter != "all" and not (
+        level_filter.isdigit() and 1 <= int(level_filter) <= 6
+    ):
+        level_filter = "all"
+    if sort_by not in ("date", "level"):
+        sort_by = "date"
+    if view_mode not in ("carousel", "list"):
+        view_mode = str(context.user_data.get("inventory_view", "carousel"))
+    if view_mode not in ("carousel", "list"):
+        view_mode = "carousel"
+    context.user_data["inventory_view"] = view_mode
+    level = int(level_filter) if level_filter != "all" else None
     total = await database.count_user_banner_items(user.id, level=level)
     query = update.callback_query
     if total == 0:
         context.user_data["inventory_page"] = 0
         context.user_data["inventory_filter"] = level_filter
         context.user_data["inventory_sort"] = sort_by
+        context.user_data["inventory_list_page"] = 0
         empty_text = (
             f"В инвентаре нет баннеров уровня {level}."
             if level is not None
             else "Пока пусто. Попытай удачу в Колесе удачи."
         )
-        empty_markup = InlineKeyboardMarkup(
+        empty_rows = _inventory_filter_rows(level_filter, sort_by, view_mode)
+        empty_rows.extend(
             [
                 [
                     InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
@@ -701,19 +765,137 @@ async def _show_inventory(
                 [_menu_button()],
             ]
         )
+        empty_markup = InlineKeyboardMarkup(empty_rows)
         if query is not None and query.message is not None:
-            if query.message.caption is not None:
+            if view_mode == "list" and (
+                query.message.photo or query.message.animation
+            ):
+                try:
+                    await query.message.delete()
+                except TelegramError:
+                    logging.warning(
+                        "Не удалось заменить пустую карусель инвентаря списком user_id=%s.",
+                        user.id,
+                        exc_info=True,
+                    )
+                sent = await context.bot.send_message(
+                    chat_id=user.id,
+                    text=empty_text,
+                    reply_markup=empty_markup,
+                )
+                context.user_data["inventory_message_id"] = sent.message_id
+            elif query.message.caption is not None:
                 await query.message.edit_caption(caption=empty_text, reply_markup=empty_markup)
+                context.user_data["inventory_message_id"] = query.message.message_id
             else:
                 await query.message.edit_text(empty_text, reply_markup=empty_markup)
+                context.user_data["inventory_message_id"] = query.message.message_id
         else:
-            await message.reply_text(empty_text, reply_markup=empty_markup)
+            sent = await message.reply_text(empty_text, reply_markup=empty_markup)
+            context.user_data["inventory_message_id"] = sent.message_id
+        return
+
+    context.user_data["inventory_filter"] = level_filter
+    context.user_data["inventory_sort"] = sort_by
+    if view_mode == "list":
+        page_count = (total + _INVENTORY_PAGE_SIZE - 1) // _INVENTORY_PAGE_SIZE
+        list_page = min(max(page, 0), page_count - 1)
+        context.user_data["inventory_list_page"] = list_page
+        context.user_data["inventory_page"] = list_page * _INVENTORY_PAGE_SIZE
+        items = await database.get_user_banner_items(
+            user.id,
+            limit=_INVENTORY_PAGE_SIZE,
+            offset=list_page * _INVENTORY_PAGE_SIZE,
+            level=level,
+            sort_by=sort_by,
+        )
+        rows = _inventory_filter_rows(level_filter, sort_by, view_mode)
+        rows.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"{'⏳ ' if item['is_transfer_pending'] else '✅ ' if item['is_active'] else ''}"
+                        f"#{item['item_id']} · "
+                        f"{_RARITY[int(item['level'])]}",
+                        callback_data=f"inv:i:{item['item_id']}",
+                    )
+                ]
+                for item in items
+            ]
+        )
+        navigation: list[InlineKeyboardButton] = []
+        if list_page > 0:
+            navigation.append(
+                InlineKeyboardButton(
+                    "⬅️",
+                    callback_data=f"inv:lp:{list_page - 1}:{level_filter}:{sort_by}",
+                )
+            )
+        navigation.append(
+            InlineKeyboardButton(
+                f"{list_page + 1}/{page_count}",
+                callback_data="inv:noop",
+            )
+        )
+        if list_page + 1 < page_count:
+            navigation.append(
+                InlineKeyboardButton(
+                    "➡️",
+                    callback_data=f"inv:lp:{list_page + 1}:{level_filter}:{sort_by}",
+                )
+            )
+        if navigation:
+            rows.append(navigation)
+        rows.extend(
+            [
+                [
+                    InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
+                    InlineKeyboardButton("🏪 Магазин", callback_data="mkt:p:0:all:date"),
+                ],
+                [_menu_button()],
+            ]
+        )
+        text = (
+            f"🎒 Инвентарь · {total} баннер(ов)\n"
+            f"Фильтр: {_RARITY[int(level_filter)] if level_filter != 'all' else 'все редкости'}\n"
+            "Нажми на баннер, чтобы открыть его действия."
+        )
+        markup = InlineKeyboardMarkup(rows)
+        if query is not None and query.message is not None:
+            if query.message.photo or query.message.animation:
+                try:
+                    await query.message.delete()
+                except TelegramError:
+                    logging.warning(
+                        "Не удалось заменить карусель инвентаря списком user_id=%s.",
+                        user.id,
+                        exc_info=True,
+                    )
+                    await query.message.edit_reply_markup(reply_markup=None)
+                    sent = await context.bot.send_message(
+                        chat_id=user.id,
+                        text=text,
+                        reply_markup=markup,
+                    )
+                    context.user_data["inventory_message_id"] = sent.message_id
+                    return
+                sent = await context.bot.send_message(
+                    chat_id=user.id,
+                    text=text,
+                    reply_markup=markup,
+                )
+                context.user_data["inventory_message_id"] = sent.message_id
+            else:
+                await query.message.edit_text(text, reply_markup=markup)
+                context.user_data["inventory_message_id"] = query.message.message_id
+        else:
+            sent = await message.reply_text(text, reply_markup=markup)
+            context.user_data["inventory_message_id"] = sent.message_id
         return
 
     index = min(max(page, 0), total - 1)
     context.user_data["inventory_page"] = index
-    context.user_data["inventory_filter"] = level_filter
-    context.user_data["inventory_sort"] = sort_by
+    context.user_data["inventory_list_page"] = index // _INVENTORY_PAGE_SIZE
     items = await database.get_user_banner_items(
         user.id,
         limit=1,
@@ -742,21 +924,21 @@ async def _show_inventory(
     rarity = int(item["level"])
     rows: list[list[InlineKeyboardButton]] = []
     navigation: list[InlineKeyboardButton] = []
-    if index > 0:
+    if total > 1:
         navigation.append(
             InlineKeyboardButton(
                 "⬅️",
-                callback_data=f"inv:p:{index - 1}:{level_filter}:{sort_by}",
+                callback_data=f"inv:p:{(index - 1) % total}:{level_filter}:{sort_by}:carousel",
             )
         )
     navigation.append(
         InlineKeyboardButton(f"{index + 1}/{total}", callback_data="inv:noop")
     )
-    if index + 1 < total:
+    if total > 1:
         navigation.append(
             InlineKeyboardButton(
                 "➡️",
-                callback_data=f"inv:p:{index + 1}:{level_filter}:{sort_by}",
+                callback_data=f"inv:p:{(index + 1) % total}:{level_filter}:{sort_by}:carousel",
             )
         )
     rows.append(navigation)
@@ -773,6 +955,7 @@ async def _show_inventory(
     rows.append(
         [InlineKeyboardButton("🎁 Передать", callback_data=f"inv:t:{item_id}")]
     )
+    rows.extend(_inventory_filter_rows(level_filter, sort_by, view_mode))
     rows.append(
         [
             InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu"),
@@ -800,9 +983,9 @@ async def _show_inventory(
     else:
         if query is not None and query.message is not None:
             try:
-                await query.message.edit_reply_markup(reply_markup=None)
+                await query.message.delete()
             except TelegramError:
-                logging.debug("Не удалось очистить старое меню инвентаря.", exc_info=True)
+                logging.warning("Не удалось заменить список каруселью.", exc_info=True)
         sent = await send_banner(
             context.bot,
             message.chat_id,
@@ -831,6 +1014,8 @@ async def _show_item(
         await query.message.reply_text("Откройте инвентарь заново.")
         return
     item = await ensure_banner_file(context.bot, item, priority=0, force=True)
+    if await _handle_pending_transfer_item(update, context, item):
+        return
     level = int(item["level"])
     is_listed = bool(
         await database.get_market_lot_for_item(item_id)
@@ -846,6 +1031,10 @@ async def _show_item(
     if not is_listed:
         buttons.append(
             [InlineKeyboardButton("🏷 Выставить на продажу", callback_data=f"mkt:l:{item_id}")]
+        )
+    if not is_listed and item["source"] != "owner":
+        buttons.append(
+            [InlineKeyboardButton("🎁 Передать", callback_data=f"inv:t:{item_id}")]
         )
     buttons.append(
         [
@@ -1283,10 +1472,12 @@ async def on_game_callback(
     user = update.effective_user
     if query is None:
         return
-    await query.answer()
+    action = query.data or ""
+    is_transfer_action = action.startswith(("inv:ta:", "inv:tr:", "inv:tx:"))
+    if not is_transfer_action:
+        await query.answer()
     if user is None or query.message is None:
         return
-    action = query.data or ""
     if action in ("casino:home", "menu:home", "casino:cancel"):
         for key in (
             "market_search_waiting",
@@ -1302,6 +1493,36 @@ async def on_game_callback(
         return
     if action == "menu:help":
         await _show_admin_help(update, context)
+        return
+    if action == "menu:report":
+        if query.message.chat.type != ChatType.PRIVATE or query.message.chat_id != user.id:
+            await query.message.reply_text("Чтобы сообщить об ошибке, открой справку в ЛС с ботом.")
+            return
+        context.user_data["error_report_waiting_until"] = (
+            time.monotonic() + _ERROR_REPORT_INPUT_TTL_SECONDS
+        )
+        await query.message.reply_text(
+            "Опиши ошибку одним сообщением (до 3000 символов). "
+            "Я отправлю обращение владельцу бота. Не присылай пароли и коды доступа.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "❌ Отмена",
+                            callback_data="menu:report_cancel",
+                        )
+                    ],
+                    [_menu_button()],
+                ]
+            ),
+        )
+        return
+    if action == "menu:report_cancel":
+        context.user_data.pop("error_report_waiting_until", None)
+        await query.message.reply_text(
+            "Отправка сообщения об ошибке отменена.",
+            reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+        )
         return
     if action == "menu:activate":
         context.user_data["activation_code_waiting_until"] = (
@@ -1350,6 +1571,151 @@ async def on_game_callback(
             ),
         )
         return
+    if action.startswith(("inv:ta:", "inv:tr:", "inv:tx:")):
+        item_id = await _parse_callback_int(query, action.rsplit(":", 1)[1])
+        if item_id is None:
+            await query.answer("Некорректный запрос.", show_alert=True)
+            return
+        if action.startswith("inv:tx:") and (
+            query.message.chat.type != ChatType.PRIVATE
+            or query.message.chat_id != user.id
+        ):
+            await query.answer("Отменить передачу можно в своём ЛС.", show_alert=True)
+            return
+        if action.startswith("inv:ta:"):
+            pending = await database.get_pending_banner_transfer(item_id)
+            if (
+                pending is None
+                or int(pending["recipient_id"]) != user.id
+            ):
+                await query.answer(
+                    "Запрос уже закрыт или предназначен другому пользователю.",
+                    show_alert=True,
+                )
+                return
+            result, sender_id = await database.accept_banner_transfer(item_id, user.id)
+            if result == "transferred" and sender_id is not None:
+                await query.answer("Передача принята.")
+                accepted_text = (
+                    f"✅ Ты принял баннер #{item_id}. Он добавлен в твой инвентарь."
+                )
+                if query.message.chat.type == ChatType.PRIVATE:
+                    await query.message.edit_text(
+                        accepted_text,
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "🎒 Открыть инвентарь",
+                                        callback_data="menu:inv",
+                                    )
+                                ],
+                                [_menu_button()],
+                            ]
+                        ),
+                    )
+                else:
+                    await query.message.edit_text(accepted_text, reply_markup=None)
+                logging.info(
+                    "Передача принята item_id=%s sender_id=%s recipient_id=%s.",
+                    item_id,
+                    sender_id,
+                    user.id,
+                )
+                await _notify_transfer_resolution(
+                    context,
+                    sender_id=sender_id,
+                    recipient_id=user.id,
+                    item_id=item_id,
+                    accepted=True,
+                )
+            else:
+                await query.answer(
+                    "Не удалось принять передачу.",
+                    show_alert=True,
+                )
+                explanations = {
+                    "missing": "Запрос уже закрыт или баннер больше недоступен.",
+                    "not_recipient": "Этот запрос предназначен другому пользователю.",
+                    "listed": "Баннер выставлен на площадку; передача отменена.",
+                }
+                await query.message.edit_text(
+                    explanations.get(result, "Не удалось принять передачу.")
+                )
+            return
+        if action.startswith("inv:tr:"):
+            pending = await database.get_pending_banner_transfer(item_id)
+            if (
+                pending is None
+                or int(pending["recipient_id"]) != user.id
+            ):
+                await query.answer(
+                    "Запрос уже закрыт или предназначен другому пользователю.",
+                    show_alert=True,
+                )
+                return
+            result, sender_id = await database.return_banner_transfer(item_id, user.id)
+            if result == "returned" and sender_id is not None:
+                await query.answer("Запрос возвращён.")
+                returned_text = (
+                    f"↩️ Запрос на баннер #{item_id} возвращён. "
+                    "Баннер остался у отправителя."
+                )
+                await query.message.edit_text(
+                    returned_text,
+                    reply_markup=(
+                        InlineKeyboardMarkup([[_menu_button()]])
+                        if query.message.chat.type == ChatType.PRIVATE
+                        else None
+                    ),
+                )
+                logging.info(
+                    "Запрос передачи возвращён item_id=%s sender_id=%s recipient_id=%s.",
+                    item_id,
+                    sender_id,
+                    user.id,
+                )
+                await _notify_transfer_resolution(
+                    context,
+                    sender_id=sender_id,
+                    recipient_id=user.id,
+                    item_id=item_id,
+                    accepted=False,
+                )
+            else:
+                await query.answer(
+                    "Запрос уже закрыт или предназначен другому пользователю.",
+                    show_alert=True,
+                )
+                await query.message.edit_text(
+                    "Запрос уже закрыт или предназначен другому пользователю."
+                )
+            return
+        result, recipient_id = await database.cancel_banner_transfer(item_id, user.id)
+        if result == "cancelled" and recipient_id is not None:
+            await query.answer("Передача отменена.")
+            text = f"Передача баннера #{item_id} отменена; предмет остался у тебя."
+            markup = InlineKeyboardMarkup([[_menu_button()]])
+            if query.message.photo or query.message.animation:
+                await query.message.edit_caption(caption=text, reply_markup=markup)
+            else:
+                await query.message.edit_text(text, reply_markup=markup)
+            try:
+                await context.bot.send_message(
+                    chat_id=recipient_id,
+                    text=f"Отправитель отменил запрос на передачу баннера #{item_id}.",
+                )
+            except TelegramError:
+                logging.warning(
+                    "Не удалось сообщить получателю user_id=%s об отмене transfer_item_id=%s.",
+                    recipient_id,
+                    item_id,
+                    exc_info=True,
+                )
+        else:
+            await query.answer("Этот запрос уже закрыт.", show_alert=True)
+            await query.message.reply_text("Этот запрос уже закрыт.")
+        return
     if action in ("inv:noop", "mkt:noop"):
         return
     if action.startswith(("inv:", "menu:inv", "mkt:")) and (
@@ -1397,21 +1763,48 @@ async def on_game_callback(
             await query.message.edit_reply_markup(reply_markup=None)
         except TelegramError:
             logging.exception("Не удалось убрать кнопку пропуска крутки.")
-    elif action == "menu:inv" or action.startswith("inv:p:"):
-        page = 0
-        level_filter = "all"
-        sort_by = "date"
+    elif action == "menu:inv" or action.startswith(
+        ("inv:p:", "inv:lp:", "inv:f:", "inv:v:")
+    ):
+        view_mode = str(context.user_data.get("inventory_view", "carousel"))
+        level_filter = str(context.user_data.get("inventory_filter", "all"))
+        sort_by = str(context.user_data.get("inventory_sort", "date"))
+        page = (
+            int(context.user_data.get("inventory_list_page", 0))
+            if view_mode == "list"
+            else int(context.user_data.get("inventory_page", 0))
+        )
         if action.startswith("inv:p:"):
             parts = action.split(":")
             page = int(parts[2])
             level_filter = parts[3]
             sort_by = parts[4]
+            view_mode = parts[5] if len(parts) > 5 else "carousel"
+        elif action.startswith("inv:lp:"):
+            parts = action.split(":")
+            page = int(parts[2])
+            level_filter = parts[3]
+            sort_by = parts[4]
+            view_mode = "list"
+        elif action.startswith("inv:f:"):
+            parts = action.split(":")
+            page = 0
+            level_filter = parts[2]
+            sort_by = parts[3]
+            view_mode = parts[4]
+        elif action.startswith("inv:v:"):
+            parts = action.split(":")
+            view_mode = parts[2]
+            level_filter = parts[3]
+            sort_by = parts[4]
+            page = int(parts[5])
         await _show_inventory(
             update,
             context,
             page=page,
             level_filter=level_filter,
             sort_by=sort_by,
+            view_mode=view_mode,
         )
     elif action.startswith("inv:i:"):
         item_id = await _parse_callback_int(query, action.split(":")[2])
@@ -1562,9 +1955,14 @@ async def on_game_callback(
             await _show_inventory(
                 update,
                 context,
-                page=max(0, int(context.user_data.get("inventory_page", 0)) - 1),
+                page=(
+                    int(context.user_data.get("inventory_list_page", 0))
+                    if context.user_data.get("inventory_view") == "list"
+                    else max(0, int(context.user_data.get("inventory_page", 0)) - 1)
+                ),
                 level_filter=str(context.user_data.get("inventory_filter", "all")),
                 sort_by=str(context.user_data.get("inventory_sort", "date")),
+                view_mode=str(context.user_data.get("inventory_view", "carousel")),
             )
         else:
             explanations = {
@@ -1755,9 +2153,11 @@ async def _handle_listing_title(
     context.user_data.pop("market_listing_title_item", None)
     context.user_data.pop("market_listing_price_cents", None)
     inventory_message_id = context.user_data.pop("inventory_message_id", None)
-    inventory_page = max(
-        0,
-        int(context.user_data.get("inventory_page", 0)) - 1,
+    inventory_view = str(context.user_data.get("inventory_view", "carousel"))
+    inventory_page = (
+        int(context.user_data.get("inventory_list_page", 0))
+        if inventory_view == "list"
+        else max(0, int(context.user_data.get("inventory_page", 0)) - 1)
     )
     inventory_filter = str(context.user_data.get("inventory_filter", "all"))
     inventory_sort = str(context.user_data.get("inventory_sort", "date"))
@@ -1792,6 +2192,7 @@ async def _handle_listing_title(
             page=inventory_page,
             level_filter=inventory_filter,
             sort_by=inventory_sort,
+            view_mode=inventory_view,
         )
     return True
 
@@ -2047,6 +2448,74 @@ async def handle_activation_message(
     return True
 
 
+async def handle_error_report_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    expires_at = context.user_data.get("error_report_waiting_until")
+    if (
+        message is None
+        or user is None
+        or message.chat.type != ChatType.PRIVATE
+        or expires_at is None
+    ):
+        return False
+    context.user_data.pop("error_report_waiting_until", None)
+    if not isinstance(expires_at, (int, float)) or time.monotonic() > expires_at:
+        await message.reply_text(
+            "Время отправки обращения истекло. Открой справку и нажми "
+            "«🐞 Сообщить об ошибке» ещё раз."
+        )
+        return True
+    report = message.text.strip()
+    if report.casefold() in {"отмена", "отменить", "/cancel"}:
+        await message.reply_text(
+            "Отправка сообщения об ошибке отменена.",
+            reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+        )
+        return True
+    if not report:
+        await message.reply_text("Сообщение пустое. Открой справку и начни отправку заново.")
+        return True
+    if len(report) > 3000:
+        await message.reply_text(
+            "Сообщение слишком длинное. Ограничение — 3000 символов. "
+            "Открой справку и попробуй ещё раз."
+        )
+        return True
+    username = f"@{user.username}" if user.username else "не указан"
+    report_text = (
+        "🐞 <b>Сообщение об ошибке</b>\n"
+        f"От: {html.escape(user.full_name)}\n"
+        f"Username: {html.escape(username)}\n"
+        f"User ID: <code>{user.id}</code>\n\n"
+        f"{html.escape(report)}"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=report_text,
+            parse_mode="HTML",
+        )
+    except TelegramError:
+        logging.exception(
+            "Не удалось доставить сообщение об ошибке владельцу user_id=%s.",
+            user.id,
+        )
+        await message.reply_text(
+            "Не получилось доставить сообщение владельцу. Попробуй позже."
+        )
+        return True
+    logging.info("Получено сообщение об ошибке от user_id=%s.", user.id)
+    await message.reply_text(
+        "Спасибо, сообщение об ошибке отправлено владельцу бота.",
+        reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+    )
+    return True
+
+
 async def _handle_inventory_transfer_input(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2098,7 +2567,7 @@ async def _handle_inventory_transfer_input(
         )
         return True
     try:
-        result = await database.transfer_banner_item(
+        result = await database.request_banner_transfer(
             user.id,
             recipient_id,
             int(item_id_value),
@@ -2112,16 +2581,55 @@ async def _handle_inventory_transfer_input(
         )
         await message.reply_text("Не удалось передать баннер. Попробуй позже.")
         return True
-    if result == "transferred":
+    if result == "pending":
         context.user_data.pop("inventory_transfer_item_id", None)
         logging.info(
-            "Передан баннер item_id=%s sender_id=%s recipient_id=%s.",
+            "Создан запрос передачи баннера item_id=%s sender_id=%s recipient_id=%s.",
             item_id_value,
             user.id,
             recipient_id,
         )
+        private_notified, notified_groups = await _notify_banner_transfer(
+            context,
+            sender_id=user.id,
+            recipient_id=recipient_id,
+            item_id=int(item_id_value),
+        )
+        if not private_notified and notified_groups == 0:
+            cancelled = False
+            try:
+                cancel_result, _ = await database.cancel_banner_transfer(
+                    int(item_id_value),
+                    user.id,
+                )
+                cancelled = cancel_result == "cancelled"
+            except Exception:
+                logging.exception(
+                    "Не удалось отменить недоставленный запрос передачи item_id=%s.",
+                    item_id_value,
+                )
+            await message.reply_text(
+                "Не удалось доставить запрос получателю ни в ЛС, ни в его группах. "
+                + (
+                    "Баннер остался у тебя; попробуй позже."
+                    if cancelled
+                    else "Не удалось отменить запрос автоматически; проверь инвентарь "
+                    "и попробуй снова."
+                )
+            )
+            return True
+        notification_status = (
+            f"Запрос отправлен в ЛС и {notified_groups} группах."
+            if private_notified
+            else (
+                f"Запрос отправлен в {notified_groups} группах, "
+                "но не удалось доставить его в ЛС."
+            )
+        )
         await message.reply_text(
-            f"Баннер #{item_id_value} передан пользователю {recipient_id}.",
+            f"Запрос на передачу баннера #{item_id_value} отправлен пользователю "
+            f"{recipient_id}. Предмет останется у тебя, пока получатель не примет его. "
+            f"{notification_status}",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv")],
@@ -2135,6 +2643,8 @@ async def _handle_inventory_transfer_input(
             "missing": "Этот баннер больше не принадлежит тебе.",
             "owner_item": "Служебный баннер передавать нельзя.",
             "listed": "Сначала сними баннер с площадки.",
+            "already_pending": "Для этого баннера уже ожидается решение по передаче.",
+            "pending": "Для этого баннера уже ожидается решение по передаче.",
             "recipient_not_found": (
                 "Получатель не найден. Он должен сначала открыть бота "
                 "или написать в группу с Юбарой."
@@ -2142,6 +2652,318 @@ async def _handle_inventory_transfer_input(
         }
         await message.reply_text(explanations.get(result, "Передача не выполнена."))
     return True
+
+
+def _transfer_display_name(profile: dict[str, Any] | None, user_id: int) -> str:
+    if profile is None:
+        return f"Пользователь {user_id}"
+    return str(
+        profile.get("callsign")
+        or profile.get("display_name")
+        or profile.get("username")
+        or f"Пользователь {user_id}"
+    )
+
+
+async def _handle_pending_transfer_item(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    item: dict[str, Any],
+) -> bool:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None or query.message is None:
+        return False
+    pending = await database.get_pending_banner_transfer(int(item["item_id"]))
+    if pending is None:
+        return False
+    item_id = int(item["item_id"])
+    sender_id = int(pending["sender_id"])
+    recipient_id = int(pending["recipient_id"])
+    if sender_id == user.id:
+        text = f"⏳ Передача баннера #{item_id} ожидает решения пользователя {recipient_id}."
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "❌ Отменить передачу",
+                    callback_data=f"inv:tx:{item_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton("↩️ Инвентарь", callback_data="menu:inv"),
+                _menu_button(),
+            ],
+        ]
+    else:
+        text = f"⏳ Баннер #{item_id} ожидает подтверждения получателя."
+        buttons = [[_menu_button()]]
+    await send_banner(
+        context.bot,
+        query.message.chat_id,
+        str(item["file_id"]),
+        animated=int(item["level"]) == 6,
+        caption=text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return True
+
+
+async def _notify_banner_transfer(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    sender_id: int,
+    recipient_id: int,
+    item_id: int,
+) -> tuple[bool, int]:
+    item: dict[str, Any] | None = None
+    try:
+        item = await database.get_banner_item(item_id)
+    except Exception:
+        logging.exception(
+            "Не удалось получить баннер для уведомления transfer_item_id=%s.",
+            item_id,
+        )
+    if item is None:
+        logging.error(
+            "Переданный баннер не найден для уведомления item_id=%s recipient_id=%s.",
+            item_id,
+            recipient_id,
+        )
+        rarity = "баннер"
+    else:
+        rarity = _RARITY.get(int(item["level"]), "баннер")
+
+    try:
+        sender_profile = await database.get_global_profile(sender_id)
+        recipient_profile = await database.get_global_profile(recipient_id)
+    except Exception:
+        logging.exception(
+            "Не удалось получить профили для уведомления о передаче "
+            "item_id=%s sender_id=%s recipient_id=%s.",
+            item_id,
+            sender_id,
+            recipient_id,
+        )
+        sender_profile = None
+        recipient_profile = None
+    sender_name = _transfer_display_name(sender_profile, sender_id)
+    recipient_name = _transfer_display_name(recipient_profile, recipient_id)
+    sender_link = f'<a href="tg://user?id={sender_id}">{html.escape(sender_name)}</a>'
+    recipient_link = (
+        f'<a href="tg://user?id={recipient_id}">{html.escape(recipient_name)}</a>'
+    )
+    private_sent = False
+    try:
+        await context.bot.send_message(
+            chat_id=recipient_id,
+            text=(
+                f"🎁 {sender_link} предлагает тебе баннер #{item_id} "
+                f"({html.escape(rarity)}). Прими передачу или верни запрос."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✅ Принять",
+                            callback_data=f"inv:ta:{item_id}",
+                        ),
+                        InlineKeyboardButton(
+                            "↩️ Вернуть",
+                            callback_data=f"inv:tr:{item_id}",
+                        ),
+                    ]
+                ]
+            ),
+        )
+        private_sent = True
+    except TelegramError:
+        logging.warning(
+            "Не удалось отправить получателю ЛС о передаче баннера "
+            "item_id=%s sender_id=%s recipient_id=%s.",
+            item_id,
+            sender_id,
+            recipient_id,
+            exc_info=True,
+        )
+
+    notified_groups = 0
+    try:
+        memberships = set(await database.list_user_group_memberships(recipient_id))
+        allowed_groups = set(await database.list_allowed_groups())
+    except Exception:
+        logging.exception(
+            "Не удалось получить список групп получателя transfer_item_id=%s "
+            "recipient_id=%s.",
+            item_id,
+            recipient_id,
+        )
+        return private_sent, notified_groups
+
+    group_text = (
+        f"🎁 {sender_link} предлагает баннер #{item_id} ({html.escape(rarity)}) "
+        f"пользователю {recipient_link}. Запрос ожидает решения получателя."
+    )
+    for group_id in sorted(memberships & allowed_groups):
+        try:
+            member = await context.bot.get_chat_member(group_id, recipient_id)
+            status = getattr(member.status, "value", member.status)
+            is_member = status in ("creator", "administrator", "member") or (
+                status == "restricted" and bool(getattr(member, "is_member", False))
+            )
+            if not is_member:
+                await database.set_group_membership(
+                    group_id,
+                    recipient_id,
+                    is_member=False,
+                )
+                continue
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=group_text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "✅ Принять",
+                                callback_data=f"inv:ta:{item_id}",
+                            ),
+                            InlineKeyboardButton(
+                                "↩️ Вернуть",
+                                callback_data=f"inv:tr:{item_id}",
+                            ),
+                        ]
+                    ]
+                ),
+            )
+            notified_groups += 1
+        except TelegramError:
+            logging.warning(
+                "Не удалось отправить в группу %s уведомление о передаче "
+                "item_id=%s recipient_id=%s.",
+                group_id,
+                item_id,
+                recipient_id,
+                exc_info=True,
+            )
+        except Exception:
+            logging.exception(
+                "Ошибка уведомления группы %s о передаче item_id=%s recipient_id=%s.",
+                group_id,
+                item_id,
+                recipient_id,
+            )
+    return private_sent, notified_groups
+
+
+async def _notify_transfer_resolution(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    sender_id: int,
+    recipient_id: int,
+    item_id: int,
+    accepted: bool,
+) -> None:
+    if accepted:
+        try:
+            await context.bot.send_message(
+                chat_id=sender_id,
+                text=(
+                    f"✅ Пользователь {recipient_id} принял передачу баннера "
+                    f"#{item_id}. Предмет теперь у получателя."
+                ),
+            )
+        except TelegramError:
+            logging.warning(
+                "Не удалось уведомить отправителя user_id=%s о принятии "
+                "transfer_item_id=%s.",
+                sender_id,
+                item_id,
+                exc_info=True,
+            )
+    else:
+        try:
+            await context.bot.send_message(
+                chat_id=sender_id,
+                text=(
+                    f"↩️ Пользователь {recipient_id} вернул запрос на баннер "
+                    f"#{item_id}. Предмет остался у тебя."
+                ),
+            )
+        except TelegramError:
+            logging.warning(
+                "Не удалось уведомить отправителя user_id=%s об отклонении "
+                "transfer_item_id=%s.",
+                sender_id,
+                item_id,
+                exc_info=True,
+            )
+
+    try:
+        memberships = set(await database.list_user_group_memberships(recipient_id))
+        allowed_groups = set(await database.list_allowed_groups())
+    except Exception:
+        logging.exception(
+            "Не удалось получить группы для результата передачи item_id=%s.",
+            item_id,
+        )
+        return
+
+    try:
+        sender_profile = await database.get_global_profile(sender_id)
+        recipient_profile = await database.get_global_profile(recipient_id)
+    except Exception:
+        logging.exception(
+            "Не удалось получить профили для результата передачи item_id=%s.",
+            item_id,
+        )
+        sender_profile = None
+        recipient_profile = None
+    sender_link = (
+        f'<a href="tg://user?id={sender_id}">'
+        f"{html.escape(_transfer_display_name(sender_profile, sender_id))}</a>"
+    )
+    recipient_link = (
+        f'<a href="tg://user?id={recipient_id}">'
+        f"{html.escape(_transfer_display_name(recipient_profile, recipient_id))}</a>"
+    )
+    group_text = (
+        f"✅ {recipient_link} принял баннер #{item_id} от {sender_link}."
+        if accepted
+        else f"↩️ {recipient_link} вернул запрос на баннер #{item_id} от {sender_link}."
+    )
+    for group_id in sorted(memberships & allowed_groups):
+        try:
+            member = await context.bot.get_chat_member(group_id, recipient_id)
+            status = getattr(member.status, "value", member.status)
+            if status not in ("creator", "administrator", "member") and not (
+                status == "restricted" and bool(getattr(member, "is_member", False))
+            ):
+                await database.set_group_membership(
+                    group_id,
+                    recipient_id,
+                    is_member=False,
+                )
+                continue
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=group_text,
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            logging.warning(
+                "Не удалось отправить группе %s подтверждение передачи item_id=%s.",
+                group_id,
+                item_id,
+                exc_info=True,
+            )
+        except Exception:
+            logging.exception(
+                "Ошибка отправки подтверждения передачи в группу %s item_id=%s.",
+                group_id,
+                item_id,
+            )
 
 
 async def handle_game_message(

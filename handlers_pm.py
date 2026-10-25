@@ -38,6 +38,7 @@ from banner_store import get_profile_banner, send_banner
 from casino import (
     handle_activation_message,
     handle_coin_promo_message,
+    handle_error_report_message,
     handle_game_message,
 )
 from config import (
@@ -1314,6 +1315,10 @@ async def private_access_callback_guard(
     ):
         return
     if query.data in {"menu:activate", "menu:activation_cancel"}:
+        return
+    if query.data in {"menu:report", "menu:report_cancel"} or (
+        query.data or ""
+    ).startswith(("inv:ta:", "inv:tr:", "inv:tx:")):
         return
     try:
         if await has_private_bot_access(user.id, context.bot):
@@ -3879,6 +3884,8 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         or message.chat.type != ChatType.PRIVATE
         or message.text is None
     ):
+        return
+    if await handle_error_report_message(update, context):
         return
     if await handle_activation_message(update, context):
         return
