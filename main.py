@@ -148,6 +148,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         "/assets/market.js": ("market.js", "text/javascript; charset=utf-8"),
         "/assets/activation.js": ("activation.js", "text/javascript; charset=utf-8"),
         "/assets/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
+        "/assets/community.js": ("community.js", "text/javascript; charset=utf-8"),
         "/assets/wheel.js": ("wheel.js", "text/javascript; charset=utf-8"),
         "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
     }

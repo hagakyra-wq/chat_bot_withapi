@@ -12,17 +12,31 @@ const rarityNames = {
 let inventoryItems = [];
 let inventoryIndex = 0;
 let inventoryBalanceCents = 0;
+let inventoryLoading = false;
 
 function setInventoryLoading(isLoading) {
+  inventoryLoading = isLoading;
   const carousel = document.getElementById("inventory-carousel");
   if (carousel) carousel.classList.toggle("is-loading", isLoading);
+  updateInventoryControls();
+}
 
-  const controls = document.querySelectorAll(
-    "#inventory-prev, #inventory-next, #inventory-activate, #inventory-recycle, #inventory-transfer-submit",
-  );
-  controls.forEach((control) => {
-    control.disabled = isLoading || control.dataset.forceDisabled === "true";
-  });
+function updateInventoryControls() {
+  const item = inventoryItems[inventoryIndex];
+  document.getElementById("inventory-prev").disabled =
+    inventoryLoading || inventoryIndex === 0;
+  document.getElementById("inventory-next").disabled =
+    inventoryLoading || !item || inventoryIndex === inventoryItems.length - 1;
+  document.getElementById("inventory-activate").disabled =
+    inventoryLoading || !item || item.is_active || item.is_transfer_pending;
+  document.getElementById("inventory-recycle").disabled =
+    inventoryLoading
+    || !item
+    || item.source === "owner"
+    || item.is_transfer_pending
+    || (item.is_active && inventoryBalanceCents >= 0);
+  document.getElementById("inventory-transfer-submit").disabled =
+    inventoryLoading || !item || item.source === "owner" || item.is_transfer_pending;
 }
 
 function confirmRecycle(message) {
@@ -51,14 +65,10 @@ function renderInventory() {
   const description = document.getElementById("inventory-description");
   const position = document.getElementById("inventory-position");
   const activate = document.getElementById("inventory-activate");
-  const recycle = document.getElementById("inventory-recycle");
   const recycleLabel = document.getElementById("inventory-recycle-label");
-  const previous = document.getElementById("inventory-prev");
-  const next = document.getElementById("inventory-next");
   const count = document.getElementById("inventory-count");
   const level = document.getElementById("inventory-level");
   const transferTitle = document.getElementById("transfer-item-title");
-  const transferSubmit = document.getElementById("inventory-transfer-submit");
   const item = inventoryItems[inventoryIndex];
 
   count.textContent = formatBannerCount(inventoryItems.length);
@@ -71,13 +81,9 @@ function renderInventory() {
     description.textContent = "Полученные и купленные баннеры появятся здесь.";
     position.textContent = "0 / 0";
     level.textContent = "";
-    previous.disabled = true;
-    next.disabled = true;
-    activate.disabled = true;
-    recycle.disabled = true;
+    updateInventoryControls();
     recycleLabel.textContent = "Переработать";
     transferTitle.textContent = "Выбери баннер в карусели";
-    transferSubmit.disabled = true;
     return;
   }
 
@@ -89,7 +95,6 @@ function renderInventory() {
   image.alt = item.animated
     ? `Анимированный баннер: ${rarityNames[item.level]}`
     : `Баннер: ${rarityNames[item.level]}`;
-  image.decoding = "async";
   image.addEventListener("error", () => {
     image.remove();
     art.classList.add("image-unavailable");
@@ -106,21 +111,15 @@ function renderInventory() {
     : `Баннер ${rarityNames[item.level]?.toLowerCase() || ""} уровня ${item.level}.`;
   position.textContent = `${inventoryIndex + 1} / ${inventoryItems.length}`;
   level.textContent = `УРОВЕНЬ ${item.level}`;
-  previous.disabled = inventoryIndex === 0;
-  next.disabled = inventoryIndex === inventoryItems.length - 1;
-  activate.disabled = item.is_active || item.is_transfer_pending;
+  updateInventoryControls();
   activate.textContent = item.is_active ? "Уже активен" : "Сделать активным";
   recycleLabel.textContent =
     `Переработать · ${formatCoinAmount(item.recycle_value_cents)}`;
-  recycle.disabled = item.source === "owner"
-    || item.is_transfer_pending
-    || (item.is_active && inventoryBalanceCents >= 0);
   transferTitle.textContent = item.is_transfer_pending
     ? "Запрос уже ожидает решения"
     : item.source === "owner"
       ? "Этот баннер нельзя передать"
       : `${rarityNames[item.level] || "Баннер"} · #${item.item_id}`;
-  transferSubmit.disabled = item.source === "owner" || item.is_transfer_pending;
 }
 
 function renderTransferList(containerId, countId, transfers, direction) {
@@ -221,6 +220,13 @@ export async function loadProfile() {
       profile.username ? `@${profile.username.replace(/^@/, "")}` : `ID ${profile.user_id}`;
     document.getElementById("profile-balance").textContent =
       formatCoinAmount(profile.balance_cents);
+    const editForm = document.getElementById("profile-edit-form");
+    editForm.elements.callsign.value = profile.callsign || "";
+    editForm.elements.age.value = profile.age ?? "";
+    editForm.elements.gender.value =
+      profile.gender === "парень" || profile.gender === "девушка"
+        ? profile.gender
+        : "";
 
     const details = document.getElementById("profile-details");
     details.replaceChildren();
@@ -369,4 +375,35 @@ function initInventory() {
   });
 }
 
+function initProfileEdit() {
+  const form = document.getElementById("profile-edit-form");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = new FormData(form);
+    const payload = {};
+    for (const field of ["callsign", "note", "gender"]) {
+      const value = String(values.get(field) || "").trim();
+      if (value) payload[field] = value;
+    }
+    const rawAge = String(values.get("age") || "").trim();
+    if (rawAge) payload.age = Number(rawAge);
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      const result = await apiRequest("/api/v1/profile/update", {
+        method: "POST",
+        body: payload,
+      });
+      showToast(result.message || "Профиль обновлён.");
+      form.elements.note.value = "";
+      await loadProfile();
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
 initInventory();
+initProfileEdit();

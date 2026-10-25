@@ -22,6 +22,7 @@
         <button class="nav-item" type="button" data-page="profile"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Профиль</span></button>
         <button class="nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
         <button class="nav-item" type="button" data-page="market"><svg><use href="/assets/icons.svg#market"></use></svg><span>Площадка</span></button>
+        <button class="nav-item" type="button" data-page="community"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Сообщество</span></button>
         <button class="nav-item" type="button" data-page="activation"><svg><use href="/assets/icons.svg#key"></use></svg><span>Активация</span></button>
         <button class="nav-item admin-nav" type="button" data-page="admin" hidden><svg><use href="/assets/icons.svg#settings"></use></svg><span>Управление</span></button>
       </nav>
@@ -65,6 +66,9 @@
           </button>
           <button class="feature-card feature-activation" type="button" data-page="activation">
             <span class="feature-icon"><svg><use href="/assets/icons.svg#key"></use></svg></span><span class="feature-title">Активировать код</span><span class="feature-description">Открой подарок или доступ</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
+          </button>
+          <button class="feature-card feature-community" type="button" data-page="community">
+            <span class="feature-icon"><svg><use href="/assets/icons.svg#profile"></use></svg></span><span class="feature-title">Сообщество</span><span class="feature-description">Рейтинги, поддержка и данные</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
           <button class="feature-card feature-admin admin-card" type="button" data-page="admin" hidden>
             <span class="feature-icon"><svg><use href="/assets/icons.svg#settings"></use></svg></span><span class="feature-title">Управление</span><span class="feature-description">Инструменты администратора</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
@@ -116,6 +120,16 @@
           </article>
           <article class="panel balance-card"><span class="eyebrow">ИГРОВОЙ БАЛАНС</span><strong class="balance-value" id="profile-balance">—</strong><span class="muted">монет</span><span class="balance-spark" aria-hidden="true"><svg><use href="/assets/icons.svg#spark"></use></svg></span></article>
         </div>
+        <form class="panel profile-edit-form" id="profile-edit-form">
+          <div><span class="eyebrow">НАСТРОЙКИ ПРОФИЛЯ</span><h3>Обновить сведения</h3><p class="muted">Изменения видны в профиле во всех группах с Юбарой. Пустые поля останутся без изменений.</p></div>
+          <div class="profile-edit-fields">
+            <label class="select-field"><span>Кличка</span><input name="callsign" type="text" maxlength="80" placeholder="Например, Лунный странник"></label>
+            <label class="select-field"><span>Возраст</span><input name="age" type="number" min="1" max="120" step="1" inputmode="numeric" placeholder="Возраст"></label>
+            <label class="select-field"><span>Пол</span><select name="gender"><option value="">Не менять</option><option value="парень">Парень</option><option value="девушка">Девушка</option></select></label>
+            <label class="select-field profile-note-field"><span>Добавить факт</span><input name="note" type="text" maxlength="500" placeholder="Новый факт о себе"></label>
+          </div>
+          <button class="button button-primary" type="submit">Сохранить изменения</button>
+        </form>
         <section class="profile-notes panel" id="profile-notes" hidden>
           <span class="eyebrow">СОХРАНЁННЫЕ ФАКТЫ</span>
           <ul id="profile-note-list"></ul>
@@ -198,6 +212,46 @@
         </div>
       </section>
 
+      <section class="page" id="page-community" aria-labelledby="community-title" hidden>
+        <div class="page-intro"><span class="eyebrow">ТВОИ ГРУППЫ</span><h2 id="community-title">Сообщество</h2><p>Смотри рейтинги подключённых групп, отправляй обращение и управляй сохранёнными данными.</p></div>
+        <section class="panel community-leaderboard" aria-labelledby="community-rating-title">
+          <div class="community-heading">
+            <div><span class="eyebrow">АКТИВНОСТЬ И МОНЕТЫ</span><h3 id="community-rating-title">Рейтинг группы</h3></div>
+            <button class="icon-button" id="community-refresh" type="button" aria-label="Обновить рейтинг"><svg><use href="/assets/icons.svg#refresh"></use></svg></button>
+          </div>
+          <div class="community-filters">
+            <label class="select-field"><span>Группа</span><select id="community-group" required><option value="">Загружаем группы…</option></select></label>
+            <label class="select-field"><span>Рейтинг</span><select id="community-mode"><option value="activity">Сообщения</option><option value="coins">Монеты</option></select></label>
+            <label class="select-field" id="community-period-field"><span>Период</span><select id="community-period"><option value="d">Сегодня</option><option value="w">За неделю</option><option value="m">За месяц</option></select></label>
+            <button class="button button-primary" id="community-load" type="button">Показать</button>
+          </div>
+          <p class="community-message" id="community-message" aria-live="polite">Выбери группу, чтобы открыть рейтинг.</p>
+          <ol class="community-ranking" id="community-ranking" aria-live="polite"></ol>
+        </section>
+        <div class="community-tools">
+          <form class="panel community-image" id="community-image-form">
+            <span class="eyebrow">ТВОРЧЕСТВО</span><h3>Создать изображение</h3>
+            <p class="muted">Опиши идею здесь. Юбара пришлёт запрос в личный чат, где можно выбрать настройки и запустить генерацию.</p>
+            <label class="field-label" for="community-image-prompt">Описание изображения</label>
+            <textarea id="community-image-prompt" name="prompt" maxlength="1500" rows="4" required placeholder="Например: ночной город под звёздным небом"></textarea>
+            <button class="button button-primary" type="submit">Продолжить в чате</button>
+          </form>
+          <form class="panel community-feedback" id="community-feedback-form">
+            <span class="eyebrow">ОБРАТНАЯ СВЯЗЬ</span><h3>Сообщить об ошибке</h3>
+            <p class="muted">Обращение будет отправлено владельцу бота вместе с твоим Telegram ID.</p>
+            <label class="field-label" for="community-feedback-text">Что произошло?</label>
+            <textarea id="community-feedback-text" name="message" maxlength="3000" rows="5" required placeholder="Опиши, что не работает"></textarea>
+            <div class="community-feedback-footer"><span id="community-feedback-count">0 / 3000</span><button class="button button-primary" type="submit">Отправить</button></div>
+            <p class="form-message" id="community-feedback-message" aria-live="polite"></p>
+          </form>
+          <section class="panel community-privacy">
+            <span class="eyebrow">КОНТРОЛЬ ДАННЫХ</span><h3>Удалить мои данные</h3>
+            <p class="muted">Удалит сохранённые имя, кличку, возраст, пол, факты и статистику сообщений во всех группах. Архивированные сообщения, баланс, инвентарь и покупки не затрагиваются.</p>
+            <button class="button button-quiet" id="community-forget" type="button">Удалить профильные данные</button>
+          </section>
+        </div>
+      </section>
+
       <section class="page" id="page-admin" aria-labelledby="admin-title" hidden>
         <div class="page-intro"><span class="eyebrow">ТОЛЬКО ДЛЯ АДМИНИСТРАТОРА</span><h2 id="admin-title">Управление доступом</h2><p>Создавай одноразовые ключи и отзывай неиспользованные.</p></div>
         <div class="admin-summary">
@@ -225,6 +279,7 @@
     <button class="mobile-nav-item" type="button" data-page="profile"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Профиль</span></button>
     <button class="mobile-nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
     <button class="mobile-nav-item" type="button" data-page="market"><svg><use href="/assets/icons.svg#market"></use></svg><span>Площадка</span></button>
+    <button class="mobile-nav-item" type="button" data-page="community"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Ещё</span></button>
     <button class="mobile-nav-item" type="button" data-page="activation"><svg><use href="/assets/icons.svg#key"></use></svg><span>Код</span></button>
     <button class="mobile-nav-item admin-nav" type="button" data-page="admin" hidden><svg><use href="/assets/icons.svg#settings"></use></svg><span>Админ</span></button>
   </nav>

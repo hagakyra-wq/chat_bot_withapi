@@ -1,6 +1,7 @@
 import { apiRequest, showToast } from "./api.js";
 import { initActivation } from "./activation.js";
 import { initAdmin, loadAdmin } from "./admin.js";
+import { initCommunity } from "./community.js";
 import { initMarket, loadMarket } from "./market.js";
 import { loadProfile } from "./profile.js";
 import { initWheel, loadWheel } from "./wheel.js";
@@ -11,6 +12,7 @@ const pageTitles = {
   profile: "Профиль",
   wheel: "Колесо удачи",
   market: "Площадка",
+  community: "Сообщество",
   activation: "Активация",
   admin: "Управление",
 };
@@ -21,6 +23,7 @@ let marketInitialized = false;
 let wheelInitialized = false;
 let activationInitialized = false;
 let adminInitialized = false;
+let communityInitialized = false;
 
 function showPage(pageName) {
   if (!pageTitles[pageName] || (pageName === "admin" && !isAdmin)) return;
@@ -102,6 +105,10 @@ function initNavigation() {
         initActivation();
         activationInitialized = true;
       }
+      if (pageName === "community" && !communityInitialized) {
+        initCommunity();
+        communityInitialized = true;
+      }
       if (pageName === "admin" && (!isAdmin || !adminInitialized)) return;
       showPage(pageName);
     });
@@ -117,5 +124,8 @@ window.addEventListener("miniapp:market-updated", () => {
   if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
 });
 window.addEventListener("miniapp:casino-updated", () => {
+  if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
+});
+window.addEventListener("miniapp:profile-updated", () => {
   if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
 });

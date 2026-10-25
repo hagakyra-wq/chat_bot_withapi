@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import html
 import logging
 import re
 import secrets
@@ -35,6 +36,180 @@ _TRANSFER_USER_ID_RE = re.compile(r"\d{1,19}")
 
 def _is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
+
+
+async def _community_groups(user_id: int, bot: Any | None) -> list[dict[str, Any]]:
+    memberships = set(await database.list_user_group_memberships(user_id))
+    allowed_groups = set(await database.list_allowed_groups())
+    groups = []
+    for group_id in sorted(memberships & allowed_groups):
+        title = f"Группа {group_id}"
+        if bot is not None:
+            try:
+                chat = await bot.get_chat(group_id)
+                title = str(chat.title or title)
+            except TelegramError:
+                logging.warning(
+                    "Не удалось получить название группы group_id=%s для Mini App.",
+                    group_id,
+                    exc_info=True,
+                )
+        groups.append({"group_id": group_id, "title": title})
+    return groups
+
+
+async def _community_leaderboard(
+    query: dict[str, list[str]],
+    user_id: int,
+) -> tuple[int, dict[str, Any]]:
+    try:
+        group_id = int(query.get("group_id", [""])[0])
+    except ValueError:
+        return 400, {"error": "Выбери группу для рейтинга."}
+    period = query.get("period", ["d"])[0]
+    mode = query.get("mode", ["activity"])[0]
+    if period not in ("d", "w", "m"):
+        return 400, {"error": "Выбери период: день, неделя или месяц."}
+    if mode not in ("activity", "coins"):
+        return 400, {"error": "Неизвестный тип рейтинга."}
+
+    memberships = set(await database.list_user_group_memberships(user_id))
+    if group_id not in memberships or not await database.is_group_allowed(group_id):
+        return 403, {"error": "Рейтинг доступен только участникам подключённых групп."}
+
+    if mode == "coins":
+        records = await database.get_group_coin_leaderboard(group_id, limit=20)
+        entries = [
+            {
+                "display_name": str(record["display_name"]),
+                "value": int(record["balance_cents"]),
+            }
+            for record in records
+        ]
+    else:
+        records = await database.get_group_message_leaderboard(
+            group_id,
+            period,
+            limit=20,
+        )
+        entries = [
+            {
+                "display_name": str(record["display_name"]),
+                "value": int(record["message_count"]),
+            }
+            for record in records
+        ]
+    return 200, {"group_id": group_id, "mode": mode, "period": period, "entries": entries}
+
+
+async def _update_profile(
+    user_id: int,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    fields: dict[str, Any] = {}
+    callsign = payload.get("callsign")
+    if callsign is not None:
+        if not isinstance(callsign, str) or len(callsign.strip()) > 80:
+            return 400, {"error": "Кличка должна содержать не более 80 символов."}
+        if callsign.strip():
+            fields["callsign"] = callsign.strip()
+
+    age = payload.get("age")
+    if age is not None:
+        if type(age) is not int or not 1 <= age <= 120:
+            return 400, {"error": "Возраст должен быть целым числом от 1 до 120."}
+        fields["age"] = age
+
+    gender = payload.get("gender")
+    if gender is not None:
+        if gender not in ("парень", "девушка"):
+            return 400, {"error": "Выбери корректный вариант пола."}
+        fields["gender"] = gender
+
+    note = payload.get("note")
+    if note is not None:
+        if not isinstance(note, str) or len(note.strip()) > 500:
+            return 400, {"error": "Факт должен содержать не более 500 символов."}
+        if note.strip():
+            fields["note"] = note.strip()
+    if not fields:
+        return 400, {"error": "Укажи хотя бы одно новое значение профиля."}
+
+    memberships = set(await database.list_user_group_memberships(user_id))
+    allowed_groups = set(await database.list_allowed_groups())
+    group_ids = sorted(memberships & allowed_groups)
+    if not group_ids:
+        return 403, {"error": "Изменение профиля доступно участникам подключённых групп."}
+    if not await database.update_user_profile(user_id, group_ids[0], **fields):
+        return 404, {"error": "Профиль пока нельзя изменить. Напиши Юбаре в подключённой группе."}
+    return 200, {"status": "updated", "message": "Профиль обновлён."}
+
+
+async def _submit_error_report(
+    user_id: int,
+    first_name: str,
+    username: str | None,
+    payload: dict[str, Any],
+    bot: Any | None,
+) -> tuple[int, dict[str, Any]]:
+    report = payload.get("message")
+    if not isinstance(report, str) or not 1 <= len(report.strip()) <= 3000:
+        return 400, {"error": "Опиши проблему сообщением от 1 до 3000 символов."}
+    if bot is None:
+        return 503, {"error": "Отправка обращений временно недоступна."}
+
+    username_label = f"@{username}" if username else "не указан"
+    text = (
+        "🐞 Сообщение об ошибке из Mini App\n"
+        f"От: {html.escape(first_name)}\n"
+        f"Username: {html.escape(username_label)}\n"
+        f"User ID: <code>{user_id}</code>\n\n"
+        f"{html.escape(report.strip())}"
+    )
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="HTML")
+    except TelegramError:
+        logging.exception(
+            "Не удалось доставить Mini App обращение владельцу user_id=%s.",
+            user_id,
+        )
+        return 503, {"error": "Не получилось доставить обращение. Попробуй позже."}
+    logging.info("Получено Mini App обращение об ошибке от user_id=%s.", user_id)
+    return 200, {"status": "sent", "message": "Спасибо! Обращение отправлено владельцу бота."}
+
+
+async def _offer_image_request(
+    user_id: int,
+    payload: dict[str, Any],
+    bot: Any | None,
+) -> tuple[int, dict[str, Any]]:
+    from images import PROMPT_MAX_LENGTH, image_manager
+
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= PROMPT_MAX_LENGTH:
+        return 400, {
+            "error": (
+                "Описание изображения должно содержать от 1 до "
+                f"{PROMPT_MAX_LENGTH} символов."
+            ),
+        }
+    if bot is None:
+        return 503, {"error": "Генерация изображений временно недоступна."}
+    memberships = set(await database.list_user_group_memberships(user_id))
+    allowed_groups = set(await database.list_allowed_groups())
+    if not memberships.intersection(allowed_groups) and not await _has_admin_access(user_id):
+        return 403, {"error": "Генерация доступна участникам подключённых групп."}
+
+    try:
+        await image_manager.offer_webapp(bot, user_id, prompt)
+    except TelegramError:
+        return 409, {
+            "error": "Не удалось написать тебе в Telegram. Сначала открой личный чат с Юбарой.",
+        }
+    return 202, {
+        "status": "queued",
+        "message": "Запрос отправлен в чат с Юбарой. Продолжи генерацию там.",
+    }
 
 
 async def _has_admin_access(user_id: int) -> bool:
@@ -748,6 +923,34 @@ async def dispatch(
 ) -> tuple[int, dict[str, Any]]:
     if path == "/api/v1/profile" and method == "GET":
         return 200, await _profile(user_id, first_name, username)
+    if path == "/api/v1/profile/update" and method == "POST":
+        return await _update_profile(user_id, payload)
+    if path == "/api/v1/community/groups" and method == "GET":
+        return 200, {"groups": await _community_groups(user_id, bot)}
+    if path == "/api/v1/community/leaderboard" and method == "GET":
+        return await _community_leaderboard(query, user_id)
+    if path == "/api/v1/feedback" and method == "POST":
+        return await _submit_error_report(
+            user_id,
+            first_name,
+            username,
+            payload,
+            bot,
+        )
+    if path == "/api/v1/image" and method == "POST":
+        return await _offer_image_request(user_id, payload, bot)
+    if path == "/api/v1/privacy/forget" and method == "POST":
+        if payload.get("confirmed") is not True:
+            return 400, {"error": "Подтверди удаление сохранённых данных."}
+        deleted = await database.forget_user(user_id, 0)
+        return 200, {
+            "status": "deleted" if deleted else "empty",
+            "message": (
+                "Сохранённые профильные данные и статистика сообщений удалены."
+                if deleted
+                else "Сохранённых профильных данных и статистики нет."
+            ),
+        }
     if path == "/api/v1/casino" and method == "GET":
         return 200, await _casino_dashboard(user_id, username)
     if path == "/api/v1/casino/spin" and method == "POST":

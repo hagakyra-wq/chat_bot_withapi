@@ -54,6 +54,28 @@ with access to the backup channel.
 - Signed image access for a pending transfer is limited to its sender,
   recipient, or a public marketplace listing.
 
-## Next
+## Completed: community utilities
 
-1. Continue migrating other bot tools while keeping Telegram commands available.
+- Added group message and coin leaderboards for groups the user is recorded as
+  currently belonging to and the bot is allowed to use.
+- Added Mini App error reports delivered to the bot owner.
+- Added an explicit, confirmed action to delete profile data and message
+  activity from all groups while preserving balance and banner inventory.
+- Added an image prompt form that hands the request to the existing bot
+  generation workflow in the user's private chat.
+- Added profile editing for callsign, age, gender, and appending a profile fact.
+  Profile edits use the existing shared profile data and apply across groups.
+
+## Chat-only operations
+
+- Group message moderation and reactions need a target chat/message context.
+- Duels require a second participant and their consent.
+- Auto-responder controls, personal Telegram account authorization, group
+  management, and history exports remain in their existing bot conversations.
+- Image prompts can be submitted in Mini App, but generation configuration and
+  final delivery still take place in the private bot chat.
+- Deleting profile data does not remove archived message contents; it removes
+  profile fields, group user records, and message activity counters.
+
+These operations remain available in Telegram; Mini App does not claim to replace
+the Telegram chat context or the personal-account authorization flow.
