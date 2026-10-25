@@ -1598,8 +1598,8 @@ async def on_game_callback(
                 await query.answer("Передача принята.")
                 accepted_text = (
                     f"✅ Ты принял баннер #{item_id}. Он стал твоим активным баннером. "
-                    "Нажми «Переделать баннер» в профиле, чтобы создать оформление "
-                    "с твоей аватаркой."
+                    "Если нужно сразу обновить его с твоими именем и аватаром, "
+                    "нажми «Обновить баннер под профиль»."
                 )
                 if query.message.chat.type == ChatType.PRIVATE:
                     await query.message.edit_text(
@@ -2319,7 +2319,11 @@ async def _handle_recycle_command(
     return True
 
 
-async def _activate_code(update: Update, code: str | None) -> None:
+async def _activate_code(
+    update: Update,
+    code: str | None,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+) -> None:
     message = update.effective_message
     user = update.effective_user
     if message is None or user is None:
@@ -2399,6 +2403,52 @@ async def _activate_code(update: Update, code: str | None) -> None:
             if result == "used":
                 await message.reply_text("Этот штрафной ключ уже активирован.")
                 return
+        elif code.upper().startswith("YUBARA-BANNER-"):
+            if BACKUP_CHANNEL_ID is None or context is None:
+                await message.reply_text(
+                    "Создание баннера сейчас недоступно: проверь канал резервных копий "
+                    "и контекст бота. "
+                    "Ключ не был использован."
+                )
+                return
+            item = await database.redeem_banner_pattern_key(code, user.id)
+            if item is None:
+                await message.reply_text("Этот баннерский ключ не найден или уже использован.")
+                return
+            try:
+                item = await ensure_banner_file(context.bot, item, priority=0)
+                file_id = item.get("file_id")
+                if not isinstance(file_id, str) or not file_id:
+                    raise RuntimeError(
+                        f"Для выданного баннера item_id={item['item_id']} нет file_id."
+                    )
+                await send_banner(
+                    context.bot,
+                    message.chat_id,
+                    file_id,
+                    animated=int(item["level"]) == 6,
+                    caption=(
+                        f"🎁 Получен баннер уровня {_RARITY[int(item['level'])]}.\n"
+                        f"Номер: {item['item_id']}"
+                    ),
+                )
+                await message.reply_text(
+                    "Ключ активирован. Баннер добавлен в твой инвентарь.",
+                    reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+                )
+            except Exception:
+                logging.exception(
+                    "Баннерский ключ активирован, но баннер item_id=%s не удалось отрисовать "
+                    "или отправить user_id=%s.",
+                    item["item_id"],
+                    user.id,
+                )
+                await message.reply_text(
+                    f"Ключ активирован, баннер №{item['item_id']} добавлен в инвентарь, "
+                    "но сейчас не удалось отправить его изображение. Попробуй открыть "
+                    "«Инвентарь» позже."
+                )
+            return
     except Exception:
         logging.exception(
             "Не удалось активировать ключ/промокод user_id=%s.",
@@ -2446,16 +2496,16 @@ async def handle_activation_message(
                 if _COIN_PROMO_RE.fullmatch(code) is not None:
                     await handle_coin_promo_message(update)
                     return True
-                await _activate_code(update, code)
+                await _activate_code(update, code, context)
                 return True
             code = command_match.group(1).strip() if command_match.group(1) else None
-            await _activate_code(update, code)
+            await _activate_code(update, code, context)
             return True
     match = _ACTIVATE_CODE_RE.fullmatch(message.text.strip())
     if match is None:
         return False
     code = match.group(1).strip() if match.group(1) else None
-    await _activate_code(update, code)
+    await _activate_code(update, code, context)
     return True
 
 

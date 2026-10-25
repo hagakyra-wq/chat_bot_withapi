@@ -45,6 +45,7 @@ from config import (
     ADMIN_ID,
     AVAILABLE_REACTIONS,
     BACKUP_CHANNEL_ID,
+    BANNER_SALT,
     MOSCOW_TIMEZONE,
     PROFILE_TRIGGERS,
 )
@@ -83,6 +84,8 @@ WAIT_DELETE_ALL_CONFIRMATION = 31
 WAIT_CREATE_COIN_PROMO = 32
 WAIT_CREATE_PENALTY = 33
 WAIT_REVOKE_PENALTY = 34
+WAIT_CREATE_BANNER_KEY = 35
+WAIT_REVOKE_BANNER_KEY = 36
 COIN_PROMO_MAX_CENTS = 10_000_000
 _COIN_PROMO_AMOUNT_RE = re.compile(r"^\s*(\d{1,6})(?:[,.](\d{1,2}))?\s*$")
 _PENALTY_AMOUNT_RE = re.compile(r"^\s*(\d{1,18})(?:[,.](\d{1,2}))?\s*$")
@@ -190,7 +193,7 @@ def _profile_keyboard(
                     callback_data="profile:fact",
                 )
             ],
-            [InlineKeyboardButton("🎨 Переделать баннер", callback_data="profile:banner")],
+            [InlineKeyboardButton("🎨 Обновить баннер под профиль", callback_data="profile:banner")],
             [InlineKeyboardButton("↩️ Главное меню", callback_data="casino:home")],
         ]
     )
@@ -512,9 +515,9 @@ async def on_profile_callback(
                         "Сначала сними баннер с продажи, затем переделывай его.",
                     )
                     return
-                if status != "rerolled":
+                if status != "refreshed":
                     raise RuntimeError(
-                        f"Не удалось переделать активный баннер: status={status}."
+                        f"Не удалось обновить баннер профиля: status={status}."
                     )
             else:
                 await database.set_meta(
@@ -531,7 +534,7 @@ async def on_profile_callback(
                 context,
                 edit_message=query.message,
             )
-            await progress.edit_text("✅ Баннер профиля переделан.")
+            await progress.edit_text("✅ Баннер профиля обновлён без изменения дизайна.")
         except Exception:
             logging.exception("Не удалось переделать баннер профиля пользователя %s.", user.id)
             await progress.edit_text("Не удалось обновить баннер. Попробуй позже.")
@@ -698,7 +701,16 @@ def _admin_access_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🚫 Отозвать ключ", callback_data="admin:revoke_key"),
             ],
             [InlineKeyboardButton("👥 Список людей", callback_data="admin:people")],
-            [InlineKeyboardButton("💰 Промокод на монеты", callback_data="admin:create_coin_promo")],
+            [
+                InlineKeyboardButton("💰 Промокод на монеты", callback_data="admin:create_coin_promo"),
+                InlineKeyboardButton("🖼 Баннерский ключ", callback_data="admin:create_banner_key"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗑 Отозвать баннерский ключ",
+                    callback_data="admin:revoke_banner_key",
+                )
+            ],
             [
                 InlineKeyboardButton("➖ Штрафной ключ", callback_data="admin:create_penalty"),
                 InlineKeyboardButton("🗑 Отозвать штрафной", callback_data="admin:revoke_penalty"),
@@ -1803,6 +1815,21 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             ),
         )
         return WAIT_CREATE_COIN_PROMO
+    if action == "admin:create_banner_key":
+        await query.edit_message_text(
+            "Отправь напечатанный на баннере 6-значный номер, уровень и Telegram ID прежнего владельца "
+            "через пробел:\n`номер уровень Telegram_ID`\n\n"
+            "Например: `123456 5 123456789`. Ключ сохранит исходные seed, уровень, пресет и "
+            "владельца дизайна; активирующий получит отдельную копию с собственным "
+            "именем и аватаром. Если номер совпал у нескольких шаблонов, укажи "
+            "`id:ITEM_ID` из подписи резервного сообщения.\n"
+            "Для отмены нажми кнопку или отправь /cancel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Отмена", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_CREATE_BANNER_KEY
     if action == "admin:create_penalty":
         await query.edit_message_text(
             "Введи положительную сумму штрафа в монетах (можно с копейками). "
@@ -2263,6 +2290,26 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return WAIT_REVOKE_KEY
+    if action == "admin:revoke_banner_key":
+        keys = await database.list_banner_pattern_keys()
+        context.user_data["revoke_banner_keys"] = keys
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"Баннер {item['source_item_id']} · ур. {item['level']} · {item['key'][-6:]}",
+                    callback_data=f"admin:revoke_banner_pattern:{index}",
+                )
+            ]
+            for index, item in enumerate(keys[:80])
+        ]
+        buttons.append([InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")])
+        await query.edit_message_text(
+            "Выбери неиспользованный баннерский ключ для отзыва:"
+            if keys
+            else "Неиспользованных баннерских ключей нет.",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return WAIT_REVOKE_BANNER_KEY
     if action == "admin:revoke_penalty":
         codes = [
             item
@@ -3209,6 +3256,132 @@ async def create_key_input(update: Update, _context: ContextTypes.DEFAULT_TYPE) 
         return WAIT_CREATE_KEY
 
 
+async def create_banner_pattern_key_input(
+    update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    del _context
+    user = update.effective_user
+    message = update.effective_message
+    if user is None or not await _is_admin(user.id):
+        if user is not None:
+            ADMIN_PANEL_USERS.discard(user.id)
+        return ConversationHandler.END
+    if message is None or message.text is None:
+        return WAIT_CREATE_BANNER_KEY
+    parts = message.text.split()
+    if (
+        len(parts) != 3
+        or len(parts[1]) != 1
+        or not parts[1].isdecimal()
+        or not 1 <= len(parts[2]) <= 20
+        or not parts[2].isdecimal()
+    ):
+        await message.reply_text(
+            "Нужны номер баннера, уровень (1–6) и "
+            "Telegram ID прежнего владельца."
+        )
+        return WAIT_CREATE_BANNER_KEY
+    if parts[0].casefold().startswith("id:"):
+        raw_item_id = parts[0][3:]
+        if not 1 <= len(raw_item_id) <= 20 or not raw_item_id.isdecimal():
+            await message.reply_text("Формат ID баннера: id:12345.")
+            return WAIT_CREATE_BANNER_KEY
+        source_item_id = int(raw_item_id)
+        source_banner_number = None
+    elif len(parts[0]) == 6 and parts[0].isdecimal():
+        source_banner_number = int(parts[0])
+        source_item_id = None
+    else:
+        await message.reply_text("Введи шестизначный номер баннера или id:ITEM_ID.")
+        return WAIT_CREATE_BANNER_KEY
+    level, source_owner_id = int(parts[1]), int(parts[2])
+    if (
+        source_owner_id <= 0
+        or (source_item_id is not None and source_item_id <= 0)
+        or (
+            source_item_id is None
+            and (
+                source_banner_number is None
+                or not 0 <= source_banner_number < 1_000_000
+            )
+        )
+        or not 1 <= level <= 6
+    ):
+        await message.reply_text(
+            "Номер должен быть от 000000 до 999999, Telegram ID — положительным, "
+            "уровень — 1–6."
+        )
+        return WAIT_CREATE_BANNER_KEY
+    source_label = (
+        f"№ {source_banner_number:06d}"
+        if source_banner_number is not None
+        else f"item_id {source_item_id}"
+    )
+    try:
+        result = "duplicate"
+        code = ""
+        for _ in range(3):
+            candidate = f"YUBARA-BANNER-{secrets.token_hex(6).upper()}"
+            result = await database.create_banner_pattern_key(
+                candidate,
+                source_banner_number=source_banner_number,
+                source_item_id=source_item_id,
+                source_owner_id=source_owner_id,
+                level=level,
+                created_by=user.id,
+                banner_salt=BANNER_SALT,
+            )
+            if result == "created":
+                code = candidate
+                break
+            if result != "duplicate":
+                break
+        if result == "missing":
+            await message.reply_text(
+                "Баннер не найден. Проверь номер и Telegram ID; если BANNER_SALT "
+                "менялся, попробуй id:ITEM_ID из подписи резервного сообщения."
+            )
+            return WAIT_CREATE_BANNER_KEY
+        if result == "wrong_owner":
+            await message.reply_text(
+                "Telegram ID не совпадает с владельцем баннера или владельцем его дизайна."
+            )
+            return WAIT_CREATE_BANNER_KEY
+        if result == "wrong_level":
+            await message.reply_text("Уровень не совпадает с сохранённым уровнем баннера.")
+            return WAIT_CREATE_BANNER_KEY
+        if result == "ambiguous":
+            await message.reply_text(
+                "Найдено несколько разных шаблонов с таким номером у владельца. "
+                "Повтори ввод с `id:ITEM_ID` из подписи резервного сообщения."
+            )
+            return WAIT_CREATE_BANNER_KEY
+        if not code:
+            raise RuntimeError("Не удалось сгенерировать уникальный баннерский ключ.")
+        await message.reply_text(
+            f"Создан одноразовый баннерский ключ для баннера {source_label} "
+            f"(уровень {level}):\n`{code}`\n\n"
+            "Получатель активирует его кнопкой «🔑 Активировать код» в личном чате "
+            "с ботом. Исходный баннер не изменяется.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+            ),
+        )
+        return ADMIN_MENU
+    except Exception:
+        logging.exception(
+            "Не удалось создать баннерский ключ admin_id=%s banner_number=%s.",
+            user.id,
+            source_banner_number,
+        )
+        await message.reply_text(
+            "Не удалось создать баннерский ключ. Проверь логи и попробуй ещё раз."
+        )
+        return WAIT_CREATE_BANNER_KEY
+
+
 async def create_coin_promo_input(
     update: Update,
     _context: ContextTypes.DEFAULT_TYPE,
@@ -3353,6 +3526,49 @@ async def revoke_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         logging.exception("Ошибка отзыва ключа")
         await query.edit_message_text("Не удалось отозвать ключ из-за ошибки базы данных.")
         return WAIT_REVOKE_KEY
+
+
+async def revoke_banner_pattern_key_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None:
+        return WAIT_REVOKE_BANNER_KEY
+    await query.answer()
+    if user is None or not await _is_admin(user.id):
+        if user is not None:
+            ADMIN_PANEL_USERS.discard(user.id)
+        return ConversationHandler.END
+    try:
+        index = int((query.data or "").rsplit(":", 1)[1])
+        keys = context.user_data.get("revoke_banner_keys", [])
+        key = str(keys[index]["key"])
+        revoked = await database.revoke_banner_pattern_key(key)
+        await query.edit_message_text(
+            "Баннерский ключ отозван."
+            if revoked
+            else "Ключ уже активирован или отозван.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_REVOKE_BANNER_KEY
+    except (ValueError, IndexError, TypeError, KeyError):
+        await query.edit_message_text(
+            "Выбранный баннерский ключ больше недоступен.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_REVOKE_BANNER_KEY
+    except Exception:
+        logging.exception("Не удалось отозвать баннерский ключ.")
+        await query.edit_message_text(
+            "Не удалось отозвать ключ из-за ошибки базы данных."
+        )
+        return WAIT_REVOKE_BANNER_KEY
 
 
 async def revoke_penalty_key_callback(
@@ -3508,6 +3724,13 @@ def build_admin_conversation_handler() -> ConversationHandler:
                     create_coin_promo_input,
                 ),
             ],
+            WAIT_CREATE_BANNER_KEY: [
+                back,
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    create_banner_pattern_key_input,
+                ),
+            ],
             WAIT_CREATE_PENALTY: [
                 back,
                 MessageHandler(
@@ -3528,6 +3751,13 @@ def build_admin_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(
                     revoke_penalty_key_callback,
                     pattern=r"^admin:revoke_penalty:",
+                ),
+            ],
+            WAIT_REVOKE_BANNER_KEY: [
+                back,
+                CallbackQueryHandler(
+                    revoke_banner_pattern_key_callback,
+                    pattern=r"^admin:revoke_banner_pattern:",
                 ),
             ],
             WAIT_REVOKE_USER: [

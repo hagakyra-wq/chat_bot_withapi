@@ -16,8 +16,24 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from . import frames
-from .bn_common import (H, LEVELS, SS, TITLES, TRAITS, W, clean_text, content_hash,  # noqa: F401
-                        font, glow, lerp, make_digest, palette, put_text, spaced_len)
+from .bn_common import (
+    H,
+    LEVELS,
+    SS,
+    TITLES,
+    TRAITS,
+    W,
+    clean_text,
+    content_hash,  # noqa: F401
+    font,
+    glow,
+    lerp,
+    make_digest,
+    palette,
+    put_text,
+    spaced_len,
+    text_length,
+)
 
 PAD, RADIUS = 44, 34
 EX, EY, ER = W - 255, H // 2 - 8, 148          # положение и размер эмблемы
@@ -156,8 +172,7 @@ def _seal(rng, acc, cx, cy, R, level, name):
     if level < 3:
         ch = (clean_text(name, 3) or "Ю")[0].upper()
         f = font("b", int(R / SS * .95))
-        probe = ImageDraw.Draw(lay)
-        tw = probe.textlength(ch, font=f)
+        tw = text_length(ch, f)
         txt = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         put_text(txt, (cx / SS - tw / 2, cy / SS - R / SS * .6), ch, f, (255, 255, 255, 240))
         lay = Image.alpha_composite(lay, Image.alpha_composite(glow(txt, 8, 1.4), txt))
@@ -257,11 +272,15 @@ def _medallion(rng, acc, avatar, name, cx, cy, R, level):
         disc = Image.fromarray((c0 + (c1 - c0) * np.clip(t, 0, 1)).astype(np.uint8), "RGB")
         ch = (clean_text(name, 3) or "Ю")[0].upper()
         f = font("b", int(ar * 1.15))
-        dd = ImageDraw.Draw(disc)
-        try:
-            dd.text((ar, ar), ch, font=f, fill=(255, 255, 255), anchor="mm")
-        except Exception:
-            dd.text((ar * .6, ar * .4), ch, font=f, fill=(255, 255, 255))
+        initials = Image.new("RGBA", (2 * ar, 2 * ar), (0, 0, 0, 0))
+        put_text(
+            initials,
+            ((2 * ar - text_length(ch, f)) / 2, ar - int(f.size / 2)),
+            ch,
+            f,
+            (255, 255, 255, 255),
+        )
+        disc = Image.alpha_composite(disc.convert("RGBA"), initials).convert("RGB")
     k = 4
     mask = Image.new("L", (2 * ar * k, 2 * ar * k), 0)
     ImageDraw.Draw(mask).ellipse([0, 0, 2 * ar * k - 1, 2 * ar * k - 1], fill=255)
@@ -311,18 +330,20 @@ def _text_layer(rng, acc, name, tag, level, digest, show_name=True):
 
     size = 92
     f_name = font("b", size)
-    while probe.textlength(name, font=f_name) > max_w and size > 36:
+    while text_length(name, f_name) > max_w and size > 36:
         size -= 3
         f_name = font("b", size)
     ny = 180 + (92 - size) // 2
-    name_w = probe.textlength(name, font=f_name)
+    name_w = text_length(name, f_name)
 
-    gl = Image.new("RGBA", (W, H), (0, 0, 0, 0))                     # свечение имени
-    ImageDraw.Draw(gl).text((lx, ny), name, font=f_name, fill=A(0) + (255,))
+    name_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    put_text(name_layer, (lx, ny), name, f_name, (255, 255, 255, 255))
+    gl = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gl.putalpha(name_layer.getchannel("A"))
     out = Image.alpha_composite(out, glow(gl, 14, 1.3))
 
     mask = Image.new("L", (W, H), 0)                                 # градиентная заливка имени
-    ImageDraw.Draw(mask).text((lx, ny), name, font=f_name, fill=255)
+    mask.paste(name_layer.getchannel("A"), (0, 0))
     y0, y1, x1 = int(ny), min(H, int(ny + size * 1.4)), min(W, int(lx + name_w) + 2)
     t = np.clip((np.arange(y0, y1) - ny) / (size * 1.2), 0, 1)[:, None, None]
     top, bot = np.array((255, 255, 255), np.float32), np.array(lerp(A(0), (255, 255, 255), .45), np.float32)

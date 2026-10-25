@@ -4,8 +4,6 @@ import asyncio
 import itertools
 import io
 import logging
-import secrets
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,10 +13,8 @@ from telegram.error import TelegramError
 
 import database
 from config import BACKUP_CHANNEL_ID, BANNER_SALT
-from yubari_banner import clean_text, content_hash, make_banner, make_digest, pick_preset
+from yubari_banner import clean_text, content_hash, make_banner
 from yubari_banner.bn_common import font
-
-_ACTIVE_REFRESH_SECONDS = 10 * 60
 
 
 @dataclass
@@ -163,6 +159,7 @@ async def _render_and_backup(
 ) -> dict[str, Any]:
     user_id = int(item["user_id"])
     design_user_id = int(item.get("design_user_id") or user_id)
+    avatar_user_id = int(item.get("avatar_user_id") or user_id)
     profile = await database.get_global_profile(user_id)
     if profile is None:
         raise RuntimeError(f"Не найден профиль владельца баннера user_id={user_id}.")
@@ -174,7 +171,7 @@ async def _render_and_backup(
     avatar_id: str | None = None
     if int(item["level"]) >= 5:
         try:
-            avatar, avatar_id = await _avatar_for_user(bot, design_user_id)
+            avatar, avatar_id = await _avatar_for_user(bot, avatar_user_id)
         except Exception:
             logging.warning(
                 "Не удалось получить аватар для баннера item_id=%s; будет использован инициал.",
@@ -184,7 +181,7 @@ async def _render_and_backup(
     digest = content_hash(name, tag, avatar_id)
     current_hash = str(item.get("content_hash") or "")
     file_id = str(item.get("file_id") or "")
-    if file_id and current_hash == digest:
+    if file_id and current_hash == digest and not force:
         return {**item, "content_hash": digest}
     old_backup_id = item.get("backup_msg_id")
     if (
@@ -206,6 +203,7 @@ async def _render_and_backup(
                 backup_msg_id=recovered_backup_id,
                 content_hash=digest,
                 design_user_id=design_user_id,
+                avatar_user_id=avatar_user_id,
             )
             await _delete_replaced_backup(
                 bot,
@@ -218,14 +216,6 @@ async def _render_and_backup(
                     f"Баннер item_id={item['item_id']} исчез после восстановления из бэкапа."
                 )
             return updated
-    rendered_at = float(item.get("rendered_at") or 0)
-    if (
-        not force
-        and file_id
-        and bool(item.get("is_active"))
-        and time.time() - rendered_at < _ACTIVE_REFRESH_SECONDS
-    ):
-        return item
     if BACKUP_CHANNEL_ID is None:
         raise RuntimeError(
             "Для создания или обновления баннера настройте BACKUP_CHANNEL_ID."
@@ -274,10 +264,9 @@ async def _render_and_backup(
             backup_msg_id=sent.message_id,
             content_hash=digest,
             design_user_id=design_user_id,
+            avatar_user_id=avatar_user_id,
             replace_design=replace_design,
             owner_user_id=user_id if replace_design else None,
-            seed=str(item["seed"]) if replace_design else None,
-            preset=item.get("preset") if replace_design else None,
         )
     except Exception:
         await _delete_replaced_backup(
@@ -324,28 +313,20 @@ async def reroll_active_banner(
     if BACKUP_CHANNEL_ID is None:
         raise RuntimeError("Для переделки баннера настройте BACKUP_CHANNEL_ID.")
 
-    seed = secrets.token_hex(16)
-    preset = (
-        pick_preset(make_digest(int(item.get("design_user_id") or user_id), item_seed=seed))
-        if int(item["level"]) == 6
-        else None
-    )
-    rerolled_item = {
+    refreshed_item = {
         **item,
-        "seed": seed,
-        "preset": preset,
-        "design_user_id": user_id,
+        "avatar_user_id": user_id,
         "file_id": None,
         "content_hash": None,
     }
     updated = await _render_and_backup(
         bot,
-        rerolled_item,
+        refreshed_item,
         priority=0,
         force=True,
         replace_design=True,
     )
-    return "rerolled", updated
+    return "refreshed", updated
 
 
 async def ensure_market_banner_file(

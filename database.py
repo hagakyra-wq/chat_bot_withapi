@@ -57,6 +57,7 @@ _MOSCOW_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "coin_promo_codes": ("created_at", "redeemed_at"),
     "coin_penalty_codes": ("created_at", "redeemed_at"),
     "access_keys": ("created_at",),
+    "banner_pattern_keys": ("created_at", "redeemed_at"),
     "authorized_users": ("authorized_at",),
     "user_features": ("authorized_at",),
     "banner_items": ("obtained_at",),
@@ -196,6 +197,19 @@ async def initialize() -> None:
                     duration_seconds INTEGER,
                     created_by INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS banner_pattern_keys (
+                    key TEXT PRIMARY KEY,
+                    source_item_id INTEGER NOT NULL,
+                    source_owner_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL CHECK(level BETWEEN 1 AND 6),
+                    seed TEXT NOT NULL,
+                    preset TEXT,
+                    design_user_id INTEGER NOT NULL,
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                    redeemed_by INTEGER,
+                    redeemed_at TIMESTAMP
+                );
                 CREATE TABLE IF NOT EXISTS authorized_users (
                     user_id INTEGER PRIMARY KEY,
                     authorized_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
@@ -236,6 +250,8 @@ async def initialize() -> None:
                     seed TEXT NOT NULL,
                     preset TEXT,
                     source TEXT NOT NULL,
+                    design_user_id INTEGER,
+                    avatar_user_id INTEGER,
                     obtained_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
                     file_id TEXT,
                     backup_msg_id INTEGER,
@@ -505,6 +521,21 @@ async def initialize() -> None:
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
+                CREATE TRIGGER IF NOT EXISTS dirty_banner_pattern_keys_insert
+                AFTER INSERT ON banner_pattern_keys BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_banner_pattern_keys_update
+                AFTER UPDATE ON banner_pattern_keys BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_banner_pattern_keys_delete
+                AFTER DELETE ON banner_pattern_keys BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
                 CREATE TRIGGER IF NOT EXISTS dirty_authorized_users_insert
                 AFTER INSERT ON authorized_users BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
@@ -544,6 +575,16 @@ async def initialize() -> None:
                 "(SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?), -1"
                 ")",
                 (_OWNER_BANNER_USER_ID_META_KEY,),
+            )
+            await _ensure_columns(
+                db,
+                "banner_items",
+                {
+                    "design_user_id": "INTEGER",
+                    "avatar_user_id": "INTEGER",
+                    "market_file_id": "TEXT",
+                    "market_backup_msg_id": "INTEGER",
+                },
             )
             await _ensure_columns(
                 db,
@@ -901,6 +942,7 @@ async def merge_backup_database(
                     "coin_promo_codes",
                     "coin_penalty_codes",
                     "access_keys",
+                    "banner_pattern_keys",
                     "authorized_users",
                     "user_features",
                     "image_settings",
@@ -3849,6 +3891,224 @@ async def get_banner_item(item_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+async def create_banner_pattern_key(
+    key: str,
+    *,
+    source_banner_number: int | None,
+    source_item_id: int | None = None,
+    source_owner_id: int,
+    level: int,
+    created_by: int,
+    banner_salt: str,
+) -> str:
+    normalized = key.strip().upper()
+    if not re.fullmatch(r"YUBARA-BANNER-[A-F0-9]{12}", normalized):
+        raise ValueError("Ключ баннера имеет неверный формат.")
+    if source_item_id is None and (
+        source_banner_number is None or not 0 <= source_banner_number < 1_000_000
+    ):
+        raise ValueError("Номер баннера должен содержать число от 000000 до 999999.")
+    if not 1 <= level <= 6:
+        raise ValueError("Уровень баннера должен быть от 1 до 6.")
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if source_item_id is not None:
+                cursor = await db.execute(
+                    """
+                    SELECT item_id, user_id, level, seed, preset, design_user_id
+                    FROM banner_items
+                    WHERE item_id = ?
+                    """,
+                    (source_item_id,),
+                )
+                item = await cursor.fetchone()
+                if item is None:
+                    await db.rollback()
+                    return "missing"
+                if source_owner_id not in (
+                    int(item["user_id"]),
+                    int(item["design_user_id"] or item["user_id"]),
+                ):
+                    await db.rollback()
+                    return "wrong_owner"
+                if int(item["level"]) != level:
+                    await db.rollback()
+                    return "wrong_level"
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT item_id, user_id, level, seed, preset, design_user_id
+                    FROM banner_items
+                    WHERE user_id = ?
+                       OR COALESCE(design_user_id, user_id) = ?
+                    ORDER BY item_id
+                    """,
+                    (source_owner_id, source_owner_id),
+                )
+                owned_items = await cursor.fetchall()
+                number_matches = []
+                for candidate in owned_items:
+                    design_user_id = int(
+                        candidate["design_user_id"] or candidate["user_id"]
+                    )
+                    digest = hashlib.sha256(
+                        f"{banner_salt}:{design_user_id}:{candidate['seed']}".encode()
+                    ).hexdigest()
+                    if int(digest[:8], 16) % 1_000_000 == source_banner_number:
+                        number_matches.append(candidate)
+                level_matches = [
+                    candidate
+                    for candidate in number_matches
+                    if int(candidate["level"]) == level
+                ]
+                patterns = {
+                    (
+                        str(candidate["seed"]),
+                        candidate["preset"],
+                        int(candidate["design_user_id"] or candidate["user_id"]),
+                        int(candidate["level"]),
+                    )
+                    for candidate in level_matches
+                }
+                if len(patterns) > 1:
+                    await db.rollback()
+                    return "ambiguous"
+                if level_matches:
+                    item = level_matches[0]
+                elif number_matches:
+                    await db.rollback()
+                    return "wrong_level"
+                else:
+                    await db.rollback()
+                    return "missing"
+            source_item_id = int(item["item_id"])
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO banner_pattern_keys(
+                        key, source_item_id, source_owner_id, level, seed,
+                        preset, design_user_id, created_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized,
+                        source_item_id,
+                        source_owner_id,
+                        level,
+                        str(item["seed"]),
+                        item["preset"],
+                        int(item["design_user_id"] or item["user_id"]),
+                        created_by,
+                    ),
+                )
+            except aiosqlite.IntegrityError:
+                await db.rollback()
+                return "duplicate"
+            await db.commit()
+        _record_write()
+    return "created"
+
+
+async def redeem_banner_pattern_key(
+    key: str,
+    user_id: int,
+) -> dict[str, Any] | None:
+    normalized = key.strip().upper()
+    if not re.fullmatch(r"YUBARA-BANNER-[A-F0-9]{12}", normalized):
+        return None
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                SELECT level, seed, preset, design_user_id, redeemed_by
+                FROM banner_pattern_keys
+                WHERE key = ?
+                """,
+                (normalized,),
+            )
+            pattern = await cursor.fetchone()
+            if pattern is None or pattern["redeemed_by"] is not None:
+                await db.rollback()
+                return None
+            cursor = await db.execute(
+                "SELECT 1 FROM banner_items WHERE user_id = ? AND is_active = 1",
+                (user_id,),
+            )
+            activate = await cursor.fetchone() is None
+            cursor = await db.execute(
+                """
+                INSERT INTO banner_items(
+                    user_id, level, seed, preset, source, design_user_id,
+                    avatar_user_id, is_active
+                ) VALUES (?, ?, ?, ?, 'key', ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    int(pattern["level"]),
+                    str(pattern["seed"]),
+                    pattern["preset"],
+                    int(pattern["design_user_id"]),
+                    user_id,
+                    int(activate),
+                ),
+            )
+            item_id = int(cursor.lastrowid)
+            cursor = await db.execute(
+                """
+                UPDATE banner_pattern_keys
+                SET redeemed_by = ?, redeemed_at = datetime('now', '+3 hours')
+                WHERE key = ? AND redeemed_by IS NULL
+                """,
+                (user_id, normalized),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return None
+            await db.commit()
+        _record_write()
+    return {
+        "item_id": item_id,
+        "user_id": user_id,
+        "level": int(pattern["level"]),
+        "seed": str(pattern["seed"]),
+        "preset": pattern["preset"],
+        "source": "key",
+        "design_user_id": int(pattern["design_user_id"]),
+        "avatar_user_id": user_id,
+        "is_active": int(activate),
+    }
+
+
+async def list_banner_pattern_keys() -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT key, source_item_id, source_owner_id, level, created_by
+            FROM banner_pattern_keys
+            WHERE redeemed_by IS NULL
+            ORDER BY created_at, key
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def revoke_banner_pattern_key(key: str) -> bool:
+    normalized = key.strip().upper()
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM banner_pattern_keys "
+                "WHERE key = ? AND redeemed_by IS NULL",
+                (normalized,),
+            )
+            await db.commit()
+        if cursor.rowcount:
+            _record_write()
+    return cursor.rowcount > 0
+
+
 async def request_banner_transfer(
     sender_id: int,
     recipient_id: int,
@@ -3997,11 +4257,12 @@ async def accept_banner_transfer(
             cursor = await db.execute(
                 """
                 UPDATE banner_items
-                SET user_id = ?, is_active = 1,
+                SET user_id = ?, is_active = 1, avatar_user_id = ?,
+                    content_hash = NULL, rendered_at = 0,
                     obtained_at = datetime('now', '+3 hours')
                 WHERE item_id = ? AND user_id = ?
                 """,
-                (recipient_id, item_id, sender_id),
+                (recipient_id, recipient_id, item_id, sender_id),
             )
             if cursor.rowcount != 1:
                 await db.rollback()
@@ -4197,24 +4458,22 @@ async def set_banner_item_rendering(
     backup_msg_id: int,
     content_hash: str,
     design_user_id: int,
+    avatar_user_id: int | None = None,
     replace_design: bool = False,
     owner_user_id: int | None = None,
-    seed: str | None = None,
-    preset: str | None = None,
 ) -> None:
     async with _write_lock:
         async with _connect() as db:
             if replace_design:
-                if owner_user_id is None or not seed:
+                if owner_user_id is None:
                     raise ValueError(
-                        "Для замены дизайна нужны owner_user_id и seed."
+                        "Для обновления баннера нужен owner_user_id."
                     )
                 cursor = await db.execute(
                     """
                     UPDATE banner_items
-                    SET seed = ?, preset = ?, file_id = ?, backup_msg_id = ?,
-                        content_hash = ?, rendered_at = ?,
-                        design_user_id = ?
+                    SET file_id = ?, backup_msg_id = ?, content_hash = ?,
+                        rendered_at = ?, design_user_id = ?, avatar_user_id = ?
                     WHERE item_id = ? AND user_id = ? AND is_active = 1
                       AND source != 'owner'
                       AND NOT EXISTS (
@@ -4228,13 +4487,12 @@ async def set_banner_item_rendering(
                       )
                     """,
                     (
-                        seed,
-                        preset,
                         file_id,
                         backup_msg_id,
                         content_hash,
                         time.time(),
                         design_user_id,
+                        avatar_user_id or owner_user_id,
                         item_id,
                         owner_user_id,
                     ),
@@ -4244,7 +4502,8 @@ async def set_banner_item_rendering(
                     """
                     UPDATE banner_items
                     SET file_id = ?, backup_msg_id = ?, content_hash = ?, rendered_at = ?,
-                        design_user_id = COALESCE(design_user_id, ?)
+                        design_user_id = COALESCE(design_user_id, ?),
+                        avatar_user_id = COALESCE(?, avatar_user_id)
                     WHERE item_id = ?
                     """,
                     (
@@ -4253,6 +4512,7 @@ async def set_banner_item_rendering(
                         content_hash,
                         time.time(),
                         design_user_id,
+                        avatar_user_id,
                         item_id,
                     ),
                 )
@@ -5064,9 +5324,10 @@ async def buy_market_lot(
                 await db.rollback()
                 return "sold", None
             await db.execute(
-                "UPDATE banner_items SET user_id = ?, is_active = 0, file_id = NULL, "
-                "backup_msg_id = NULL, content_hash = NULL, rendered_at = NULL WHERE item_id = ?",
-                (buyer_id, item_id),
+                "UPDATE banner_items SET user_id = ?, is_active = 0, avatar_user_id = ?, "
+                "file_id = NULL, backup_msg_id = NULL, content_hash = NULL, rendered_at = 0 "
+                "WHERE item_id = ?",
+                (buyer_id, buyer_id, item_id),
             )
             await db.commit()
         _record_write()

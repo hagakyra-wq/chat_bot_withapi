@@ -1,10 +1,4 @@
-"""
-bn_common.py - общие утилиты генератора баннеров «Юбари».
-
-Шрифты, очистка текста, seed, палитры, конфиг уровней.
-Зависимости: pillow, numpy. Шрифты: положи рядом папку fonts/ с
-DejaVuSans.ttf и DejaVuSans-Bold.ttf (на Render системных шрифтов нет).
-"""
+"""Common fonts, text helpers, seeds, palettes, and banner-level settings."""
 import colorsys
 import hashlib
 import logging
@@ -26,15 +20,27 @@ FONT_DIRS = [os.path.join(HERE, "fonts"), "/usr/share/fonts/truetype/dejavu",
              "/usr/share/fonts/dejavu", "/usr/share/fonts/TTF", "C:/Windows/Fonts"]
 REG = ["DejaVuSans.ttf", "arial.ttf", "LiberationSans-Regular.ttf"]
 BOLD = ["DejaVuSans-Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"]
+SYMBOLS = "NotoSansSymbols2-Regular.ttf"
+EMOJI = "NotoColorEmoji.ttf"
+EMOJI_FONT_SIZE = 109
 _warned = False
 
 
 @lru_cache(maxsize=64)
 def font(kind, size):
-    """kind: 'r' обычный, 'b' жирный. Нет шрифтов - запасной + предупреждение в лог."""
+    """Load a bundled font; Noto Color Emoji uses its single supported bitmap size."""
     global _warned
+    if kind == "s":
+        path = os.path.join(HERE, "fonts", SYMBOLS)
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    if kind == "e":
+        path = os.path.join(HERE, "fonts", EMOJI)
+        if os.path.exists(path):
+            return ImageFont.truetype(path, EMOJI_FONT_SIZE)
     for d in FONT_DIRS:
-        for n in (BOLD if kind == "b" else REG):
+        names = BOLD if kind == "b" else REG
+        for n in names:
             p = os.path.join(d, n)
             if os.path.exists(p):
                 return ImageFont.truetype(p, size)
@@ -81,11 +87,24 @@ def make_digest(user_id, salt="yubari", fresh=False, item_seed=None):
 
 
 def clean_text(s, limit=22):
-    """NFKC превращает 𝓕𝓪𝓷𝓬𝔂-юникод в обычные буквы, эмодзи/невидимые символы выкидываются."""
-    s = unicodedata.normalize("NFKC", s or "")
-    out = [ch for ch in s if unicodedata.category(ch)[0] in "LN" or ch in " _-.'"]
+    """Keep printable Unicode, including combining marks and emoji joiners."""
+    s = unicodedata.normalize("NFC", s or "")
+    out = [
+        ch
+        for ch in s
+        if unicodedata.category(ch)[0] in "LNMPSZ"
+        or ch in " _-.'\u200d\ufe0e\ufe0f"
+        or 0xE0020 <= ord(ch) <= 0xE007F
+    ]
     s = " ".join("".join(out).split())
-    return (s[:limit - 1] + "…") if len(s) > limit else s
+    if len(s) <= limit:
+        return s
+    prefix = ""
+    for unit in _text_units(s):
+        if len(prefix) + len(unit) > max(0, limit - 1):
+            break
+        prefix += unit
+    return prefix + "…"
 
 
 def content_hash(name, tag=None, avatar_uid=None):
@@ -133,7 +152,88 @@ def glow(layer, radius, strength=1.0):
 
 
 def spaced_len(draw, text, f, spacing):
-    return sum(draw.textlength(c, font=f) + spacing for c in text) - spacing
+    units = _text_units(text)
+    if not units:
+        return 0
+    width = sum(_unit_width(draw, unit, f) for unit in units)
+    return width + spacing * (len(units) - 1)
+
+
+def text_length(text, f):
+    """Measure Unicode text using the same fallback fonts as put_text()."""
+    return spaced_len(ImageDraw.Draw(Image.new("L", (1, 1))), text, f, 0)
+
+
+def _is_emoji_base(char):
+    codepoint = ord(char)
+    return (
+        0x1F000 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or codepoint in {0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D, 0x3297, 0x3299}
+    )
+
+
+def _text_units(text):
+    units = []
+    for char in text:
+        codepoint = ord(char)
+        category = unicodedata.category(char)
+        if (
+            units
+            and (
+                category.startswith("M")
+                or char == "\u200d"
+                or units[-1].endswith("\u200d")
+                or 0x1F3FB <= codepoint <= 0x1F3FF
+                or (
+                    0x1F1E6 <= codepoint <= 0x1F1FF
+                    and len(units[-1]) == 1
+                    and 0x1F1E6 <= ord(units[-1][0]) <= 0x1F1FF
+                )
+            )
+        ):
+            units[-1] += char
+        else:
+            units.append(char)
+    return units
+
+
+def _unit_font(unit, base_font):
+    if any(_is_emoji_base(char) for char in unit):
+        emoji_font = font("e", EMOJI_FONT_SIZE)
+        if _emoji_glyph_exists(unit, emoji_font):
+            return emoji_font, True
+    if any(
+        unicodedata.category(char).startswith("S")
+        or 0x1D000 <= ord(char) <= 0x1D7FF
+        for char in unit
+    ):
+        return font("s", int(getattr(base_font, "size", 20))), False
+    return base_font, False
+
+
+@lru_cache(maxsize=512)
+def _emoji_glyph_exists(unit, emoji_font):
+    bounds = emoji_font.getbbox(unit)
+    width = max(1, bounds[2] - bounds[0])
+    height = max(1, bounds[3] - bounds[1])
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(image).text(
+        (-bounds[0], -bounds[1]),
+        unit,
+        font=emoji_font,
+        fill=(255, 255, 255, 255),
+        embedded_color=True,
+    )
+    return image.getchannel("A").getbbox() is not None
+
+
+def _unit_width(draw, unit, base_font):
+    selected_font, is_emoji = _unit_font(unit, base_font)
+    if is_emoji:
+        size = int(getattr(base_font, "size", 20))
+        return selected_font.getlength(unit) * size / EMOJI_FONT_SIZE
+    return draw.textlength(unit, font=selected_font)
 
 
 def put_text(out, xy, text, f, col, spacing=0):
@@ -141,14 +241,42 @@ def put_text(out, xy, text, f, col, spacing=0):
     col = (r, g, b, a)."""
     x, y = int(xy[0]), int(xy[1])
     probe = ImageDraw.Draw(Image.new("L", (4, 4)))
+    units = _text_units(text)
     w = int(spaced_len(probe, text, f, spacing)) + 12
     h = int(getattr(f, "size", 20) * 1.5) + 4
     m = Image.new("L", (w, h), 0)
     md = ImageDraw.Draw(m)
     cx = 4.0
-    for ch in text:
-        md.text((cx, 2), ch, font=f, fill=255)
-        cx += md.textlength(ch, font=f) + spacing
+    for unit in units:
+        selected_font, is_emoji = _unit_font(unit, f)
+        if is_emoji:
+            bounds = selected_font.getbbox(unit)
+            emoji_image = Image.new(
+                "RGBA",
+                (max(1, bounds[2] - bounds[0]), max(1, bounds[3] - bounds[1])),
+                (0, 0, 0, 0),
+            )
+            ImageDraw.Draw(emoji_image).text(
+                (-bounds[0], -bounds[1]),
+                unit,
+                font=selected_font,
+                fill=(255, 255, 255, 255),
+                embedded_color=True,
+            )
+            emoji = emoji_image.getchannel("A")
+            scale = int(getattr(f, "size", 20)) / EMOJI_FONT_SIZE
+            emoji = emoji.resize(
+                (
+                    max(1, round(emoji.width * scale)),
+                    max(1, round(emoji.height * scale)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+            m.paste(emoji, (round(cx), 2))
+            cx += emoji.width + spacing
+        else:
+            md.text((cx, 2), unit, font=selected_font, fill=255)
+            cx += md.textlength(unit, font=selected_font) + spacing
     a = col[3] if len(col) > 3 else 255
     if a < 255:
         m = m.point(lambda v: v * a // 255)
