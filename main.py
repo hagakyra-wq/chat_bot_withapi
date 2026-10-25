@@ -86,6 +86,24 @@ from banner_store import stop_banner_render_queue
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        if self.path in ("/", "/index.html"):
+            page_path = Path(__file__).resolve().parent / "webapp" / "index.html"
+            try:
+                page = page_path.read_bytes()
+            except OSError:
+                logging.exception("Не удалось прочитать страницу Mini App %s.", page_path)
+                self.send_error(500, "Mini App page unavailable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+            return
+        if self.path != "/health":
+            self.send_error(404)
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()

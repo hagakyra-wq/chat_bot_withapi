@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>Юбара — Mini App</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: var(--tg-theme-bg-color, #111827);
+      --surface: var(--tg-theme-secondary-bg-color, #1f2937);
+      --text: var(--tg-theme-text-color, #f9fafb);
+      --muted: var(--tg-theme-hint-color, #9ca3af);
+      --accent: var(--tg-theme-button-color, #8b5cf6);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: max(24px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom));
+      background:
+        radial-gradient(ellipse at 50% -10%, rgb(139 92 246 / 28%), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    main { width: min(100%, 520px); margin: 0 auto; }
+
+    .hero {
+      padding: 30px 24px;
+      border: 1px solid rgb(255 255 255 / 8%);
+      border-radius: 28px;
+      background: linear-gradient(145deg, rgb(139 92 246 / 22%), var(--surface));
+      text-align: center;
+    }
+
+    .logo {
+      display: grid;
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 16px;
+      place-items: center;
+      border-radius: 24px;
+      background: var(--accent);
+      font-size: 36px;
+    }
+
+    h1 { margin: 0; font-size: 28px; letter-spacing: -0.04em; }
+    .intro { max-width: 360px; margin: 10px auto 0; color: var(--muted); }
+    h2 { margin: 28px 4px 12px; font-size: 18px; }
+
+    .features { display: grid; gap: 10px; }
+
+    .feature {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      padding: 15px;
+      border: 1px solid rgb(255 255 255 / 7%);
+      border-radius: 18px;
+      background: var(--surface);
+    }
+
+    .icon { font-size: 25px; }
+    .feature strong { display: block; }
+    .feature span:last-child { color: var(--muted); font-size: 14px; }
+
+    button {
+      width: 100%;
+      margin-top: 22px;
+      padding: 14px 18px;
+      border: 0;
+      border-radius: 16px;
+      background: var(--accent);
+      color: var(--accent-text);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .note { margin: 14px 8px 0; color: var(--muted); font-size: 13px; text-align: center; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="logo" aria-hidden="true">🌙</div>
+      <h1>Юбара</h1>
+      <p class="intro">Твоя игровая вселенная в Telegram — профили, баннеры и удача.</p>
+    </section>
+
+    <h2>Что можно делать</h2>
+    <section class="features" aria-label="Возможности бота">
+      <article class="feature">
+        <span class="icon" aria-hidden="true">👤</span>
+        <span><strong>Профиль</strong><span>Статистика и информация о тебе</span></span>
+      </article>
+      <article class="feature">
+        <span class="icon" aria-hidden="true">🎨</span>
+        <span><strong>Баннеры</strong><span>Собирай и настраивай свою коллекцию</span></span>
+      </article>
+      <article class="feature">
+        <span class="icon" aria-hidden="true">🎡</span>
+        <span><strong>Колесо удачи</strong><span>Испытай удачу и получи награды</span></span>
+      </article>
+    </section>
+
+    <button id="close-app" type="button">Вернуться в чат</button>
+    <p class="note">Разделы пока открываются командами и кнопками в чате с ботом.</p>
+  </main>
+  <script>
+    const webApp = window.Telegram?.WebApp;
+    webApp?.ready();
+    webApp?.expand();
+    document.getElementById("close-app").addEventListener("click", () => {
+      if (webApp) {
+        webApp.close();
+      } else {
+        window.history.back();
+      }
+    });
+  </script>
+</body>
+</html>
