@@ -6,8 +6,10 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import secrets
 import time
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
@@ -26,7 +28,9 @@ from yubari_banner import PRESET_NAMES
 
 _MEDIA_LINK_LIFETIME_SECONDS = 600
 _MAX_BANNER_MEDIA_SIZE = 20 * 1024 * 1024
-_CASINO_BANNER_TASKS: set[asyncio.Task[None]] = set()
+_BANNER_ART_TASKS: set[asyncio.Task[None]] = set()
+_TRANSFER_USERNAME_RE = re.compile(r"@?([a-z0-9_]{5,32})", re.IGNORECASE)
+_TRANSFER_USER_ID_RE = re.compile(r"\d{1,19}")
 
 
 def _is_admin(user_id: int) -> bool:
@@ -68,6 +72,37 @@ async def _profile(
     balance = await database.get_duel_balance(user_id, username)
     active_banner = await database.get_active_banner_item(user_id)
     inventory = await database.get_user_banner_items(user_id, limit=100)
+    incoming_transfers = await database.get_user_pending_banner_transfers(
+        user_id,
+        direction="incoming",
+    )
+    outgoing_transfers = await database.get_user_pending_banner_transfers(
+        user_id,
+        direction="outgoing",
+    )
+    pending_transfers: dict[str, list[dict[str, Any]]] = {}
+    for direction, transfers in (
+        ("incoming", incoming_transfers),
+        ("outgoing", outgoing_transfers),
+    ):
+        pending_transfers[direction] = [
+            {
+                "item_id": int(item["item_id"]),
+                "other_name": str(
+                    item.get("other_callsign")
+                    or item.get("other_display_name")
+                    or item.get("other_username")
+                    or (
+                        f"ID {item['sender_id']}"
+                        if direction == "incoming"
+                        else f"ID {item['recipient_id']}"
+                    )
+                ),
+                "level": int(item["level"]),
+                "image_url": _media_url(user_id, int(item["item_id"])),
+            }
+            for item in transfers
+        ]
     return {
         "user_id": user_id,
         "username": profile.get("username") or username,
@@ -103,29 +138,54 @@ async def _profile(
             }
             for item in inventory
         ],
+        "pending_transfers": pending_transfers,
     }
 
 
-async def _prepare_casino_reward_art(bot: Any, items: list[dict[str, Any]]) -> None:
+async def _prepare_banner_art(
+    bot: Any,
+    items: list[dict[str, Any]],
+    purpose: str,
+) -> None:
     from banner_store import ensure_banner_file
 
     for item in items:
         try:
             banner = await database.get_banner_item(int(item["item_id"]))
             if banner is None:
-                raise RuntimeError(f"Casino reward {item['item_id']} was not found.")
+                raise RuntimeError(f"Banner {item['item_id']} was not found.")
             await ensure_banner_file(bot, banner, priority=1)
         except Exception:
             logging.exception(
-                "Не удалось подготовить баннер награды казино item_id=%s.",
+                "Не удалось подготовить баннер item_id=%s purpose=%s.",
                 item.get("item_id"),
+                purpose,
             )
 
 
-def _queue_casino_reward_art(bot: Any, items: list[dict[str, Any]]) -> None:
-    task = asyncio.create_task(_prepare_casino_reward_art(bot, items))
-    _CASINO_BANNER_TASKS.add(task)
-    task.add_done_callback(_CASINO_BANNER_TASKS.discard)
+def _queue_banner_art(bot: Any, items: list[dict[str, Any]], purpose: str) -> None:
+    task = asyncio.create_task(_prepare_banner_art(bot, items, purpose))
+    _BANNER_ART_TASKS.add(task)
+    task.add_done_callback(_BANNER_ART_TASKS.discard)
+
+
+async def _notify_transfer_user(
+    bot: Any | None,
+    user_id: int,
+    message: str,
+) -> bool:
+    if bot is None:
+        return False
+    try:
+        await bot.send_message(chat_id=user_id, text=message)
+    except TelegramError:
+        logging.warning(
+            "Не удалось уведомить user_id=%s об изменении передачи баннера.",
+            user_id,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 async def _casino_dashboard(user_id: int, username: str | None) -> dict[str, Any]:
@@ -200,7 +260,7 @@ async def _spin_casino(
         }
 
     if bot is not None:
-        _queue_casino_reward_art(bot, items)
+        _queue_banner_art(bot, items, "casino_reward")
     balance = await database.get_duel_balance(user_id, username)
     return 200, {
         "balance_cents": balance,
@@ -242,6 +302,124 @@ async def _delete_recycled_banner_backups(
                 "message_id=%s.",
                 message_id,
             )
+
+
+async def _notify_existing_transfer_request(
+    bot: Any,
+    sender_id: int,
+    recipient_id: int,
+    item_id: int,
+) -> tuple[bool, int]:
+    from casino import _notify_banner_transfer
+
+    return await _notify_banner_transfer(
+        SimpleNamespace(bot=bot),
+        sender_id=sender_id,
+        recipient_id=recipient_id,
+        item_id=item_id,
+    )
+
+
+async def _notify_existing_transfer_resolution(
+    bot: Any | None,
+    sender_id: int,
+    recipient_id: int,
+    item_id: int,
+    *,
+    accepted: bool,
+) -> bool:
+    if bot is None:
+        return False
+    from casino import _notify_transfer_resolution
+
+    try:
+        await _notify_transfer_resolution(
+            SimpleNamespace(bot=bot),
+            sender_id=sender_id,
+            recipient_id=recipient_id,
+            item_id=item_id,
+            accepted=accepted,
+        )
+    except Exception:
+        logging.exception(
+            "Не удалось отправить уведомление о решении передачи item_id=%s.",
+            item_id,
+        )
+        return False
+    return True
+
+
+async def _request_banner_transfer(
+    user_id: int,
+    payload: dict[str, Any],
+    bot: Any | None,
+) -> tuple[int, dict[str, Any]]:
+    item_id = payload.get("item_id")
+    recipient_input = payload.get("recipient")
+    if type(item_id) is not int or item_id <= 0:
+        return 400, {"error": "Выбери баннер из своего инвентаря."}
+    if not isinstance(recipient_input, str):
+        return 400, {"error": "Укажи Telegram ID или username получателя."}
+
+    recipient_value = recipient_input.strip()
+    if _TRANSFER_USER_ID_RE.fullmatch(recipient_value):
+        recipient_id = int(recipient_value)
+        if recipient_id <= 0:
+            return 400, {"error": "Telegram ID должен быть положительным числом."}
+    else:
+        username_match = _TRANSFER_USERNAME_RE.fullmatch(recipient_value)
+        if username_match is None:
+            return 400, {"error": "Укажи корректный Telegram ID или username."}
+        recipient_id = await database.find_user_id_by_username(username_match.group(1))
+        if recipient_id is None:
+            return 404, {
+                "error": "Пользователь не найден. Он должен хотя бы раз открыть бота."
+            }
+
+    result = await database.request_banner_transfer(user_id, recipient_id, item_id)
+    if result != "pending":
+        messages = {
+            "same_user": "Нельзя передать баннер самому себе.",
+            "missing": "Баннер не найден в твоём инвентаре.",
+            "owner_item": "Баннер владельца нельзя передать.",
+            "already_pending": "Для этого баннера уже ожидается решение.",
+            "listed": "Сначала сними баннер с площадки.",
+            "recipient_not_found": "Получатель не найден. Он должен открыть бота.",
+        }
+        return 409, {"error": messages.get(result, "Не удалось создать запрос передачи.")}
+
+    notified_in_private = False
+    notified_groups = 0
+    notification_failed = False
+    if bot is not None:
+        try:
+            notified_in_private, notified_groups = await _notify_existing_transfer_request(
+                bot,
+                user_id,
+                recipient_id,
+                item_id,
+            )
+        except Exception:
+            logging.exception(
+                "Запрос передачи создан, но уведомление не выполнено item_id=%s.",
+                item_id,
+            )
+            notification_failed = True
+    if notified_in_private:
+        message = "Запрос отправлен. Получатель должен подтвердить передачу."
+    elif notified_groups:
+        message = "Запрос создан и показан получателю в общей группе."
+    elif notification_failed:
+        message = (
+            "Запрос создан, но уведомление не отправлено. Получатель может "
+            "увидеть его во входящих Mini App; при необходимости сообщи ему отдельно."
+        )
+    else:
+        message = (
+            "Запрос сохранён, но уведомление получателю не доставлено. "
+            "При необходимости сообщи ему отдельно."
+        )
+    return 201, {"status": "pending", "message": message}
 
 
 async def _market(
@@ -380,7 +558,19 @@ async def get_banner_media(
 
     lot = await database.get_market_lot_for_item(item_id)
     is_public_listing = lot is not None
+    is_pending_recipient = False
     if not is_public_listing and int(item["user_id"]) != user_id:
+        pending_transfer = await database.get_pending_banner_transfer(item_id)
+        is_pending_recipient = (
+            pending_transfer is not None
+            and int(pending_transfer["sender_id"]) == int(item["user_id"])
+            and int(pending_transfer["recipient_id"]) == user_id
+        )
+    if (
+        not is_public_listing
+        and int(item["user_id"]) != user_id
+        and not is_pending_recipient
+    ):
         return 404, b"Banner not found.", "text/plain; charset=utf-8"
 
     file_id = (
@@ -592,6 +782,97 @@ async def dispatch(
         if not await database.activate_banner_item(user_id, item_id):
             return 404, {"error": "Баннер не найден или сейчас недоступен."}
         return 200, {"status": "activated", "message": "Баннер установлен."}
+    if path == "/api/v1/inventory/transfer" and method == "POST":
+        return await _request_banner_transfer(user_id, payload, bot)
+    if path == "/api/v1/inventory/transfer/resolve" and method == "POST":
+        item_id = payload.get("item_id")
+        action = payload.get("action")
+        if type(item_id) is not int or item_id <= 0:
+            return 400, {"error": "Укажи корректный номер баннера."}
+        if action not in ("accept", "return"):
+            return 400, {"error": "Выбери действие: принять или вернуть запрос."}
+        if action == "accept":
+            result, sender_id = await database.accept_banner_transfer(item_id, user_id)
+            if result != "transferred":
+                messages = {
+                    "missing": "Запрос больше недоступен.",
+                    "not_recipient": "Принять передачу может только получатель.",
+                    "listed": "Баннер выставлен на площадку и не может быть передан.",
+                }
+                return 409, {"error": messages.get(result, "Не удалось принять передачу.")}
+            if bot is not None:
+                _queue_banner_art(bot, [{"item_id": item_id}], "banner_transfer")
+            notified = False
+            if sender_id is None:
+                logging.error(
+                    "Передача item_id=%s завершена без ID отправителя для уведомления.",
+                    item_id,
+                )
+            else:
+                notified = await _notify_existing_transfer_resolution(
+                    bot,
+                    sender_id,
+                    user_id,
+                    item_id,
+                    accepted=True,
+                )
+            message = "Баннер передан и добавлен в инвентарь."
+            if bot is not None and not notified:
+                message += " Уведомление отправителю не подтверждено."
+            return 200, {"status": result, "message": message}
+
+        result, sender_id = await database.return_banner_transfer(item_id, user_id)
+        if result != "returned":
+            messages = {
+                "missing": "Запрос больше недоступен.",
+                "not_recipient": "Вернуть запрос может только получатель.",
+            }
+            return 409, {"error": messages.get(result, "Не удалось вернуть запрос.")}
+        notified = False
+        if sender_id is None:
+            logging.error(
+                "Запрос item_id=%s возвращён без ID отправителя для уведомления.",
+                item_id,
+            )
+        else:
+            notified = await _notify_existing_transfer_resolution(
+                bot,
+                sender_id,
+                user_id,
+                item_id,
+                accepted=False,
+            )
+        message = "Запрос возвращён отправителю."
+        if bot is not None and not notified:
+            message += " Уведомление отправителю не подтверждено."
+        return 200, {"status": result, "message": message}
+    if path == "/api/v1/inventory/transfer/cancel" and method == "POST":
+        item_id = payload.get("item_id")
+        if type(item_id) is not int or item_id <= 0:
+            return 400, {"error": "Укажи корректный номер баннера."}
+        result, recipient_id = await database.cancel_banner_transfer(item_id, user_id)
+        if result != "cancelled":
+            messages = {
+                "missing": "Запрос больше недоступен.",
+                "not_sender": "Отменить передачу может только отправитель.",
+            }
+            return 409, {"error": messages.get(result, "Не удалось отменить передачу.")}
+        message = "Запрос передачи отменён."
+        if recipient_id is None:
+            logging.error(
+                "Запрос item_id=%s отменён без ID получателя для уведомления.",
+                item_id,
+            )
+            message += " Уведомление получателю не отправлено."
+        else:
+            notified = await _notify_transfer_user(
+                bot,
+                recipient_id,
+                f"Запрос на передачу баннера #{item_id} отменён отправителем.",
+            )
+            if bot is not None and not notified:
+                message += " Уведомление получателю не подтверждено."
+        return 200, {"status": result, "message": message}
     if path == "/api/v1/inventory/recycle" and method == "POST":
         item_id = payload.get("item_id")
         if type(item_id) is not int or item_id <= 0:

@@ -45,9 +45,12 @@ function renderInventory() {
   const next = document.getElementById("inventory-next");
   const count = document.getElementById("inventory-count");
   const level = document.getElementById("inventory-level");
+  const transferTitle = document.getElementById("transfer-item-title");
+  const transferSubmit = document.getElementById("inventory-transfer-submit");
   const item = inventoryItems[inventoryIndex];
 
   count.textContent = formatBannerCount(inventoryItems.length);
+  status.classList.toggle("is-pending", Boolean(item?.is_transfer_pending));
   art.querySelector("img")?.remove();
   art.classList.remove("image-unavailable", "rarity-1", "rarity-2", "rarity-3", "rarity-4", "rarity-5", "rarity-6");
   if (!item) {
@@ -61,6 +64,8 @@ function renderInventory() {
     activate.disabled = true;
     recycle.disabled = true;
     recycleLabel.textContent = "Переработать";
+    transferTitle.textContent = "Выбери баннер в карусели";
+    transferSubmit.disabled = true;
     return;
   }
 
@@ -77,7 +82,11 @@ function renderInventory() {
   }, { once: true });
   art.prepend(image);
   title.textContent = `${rarityNames[item.level] || "Баннер"} · #${item.item_id}`;
-  status.textContent = item.is_active ? "Активный" : "";
+  status.textContent = item.is_transfer_pending
+    ? "Ожидает передачи"
+    : item.is_active
+      ? "Активный"
+      : "";
   description.textContent = item.animated
     ? "Легендарный баннер с анимацией."
     : `Баннер ${rarityNames[item.level]?.toLowerCase() || ""} уровня ${item.level}.`;
@@ -92,6 +101,81 @@ function renderInventory() {
   recycle.disabled = item.source === "owner"
     || item.is_transfer_pending
     || (item.is_active && inventoryBalanceCents >= 0);
+  transferTitle.textContent = item.is_transfer_pending
+    ? "Запрос уже ожидает решения"
+    : item.source === "owner"
+      ? "Этот баннер нельзя передать"
+      : `${rarityNames[item.level] || "Баннер"} · #${item.item_id}`;
+  transferSubmit.disabled = item.source === "owner" || item.is_transfer_pending;
+}
+
+function renderTransferList(containerId, countId, transfers, direction) {
+  const container = document.getElementById(containerId);
+  const entries = Array.isArray(transfers) ? transfers : [];
+  document.getElementById(countId).textContent = String(entries.length);
+  container.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "transfer-empty muted";
+    empty.textContent = direction === "incoming"
+      ? "Новых запросов пока нет."
+      : "Ты пока никому не отправлял запросы.";
+    container.append(empty);
+    return;
+  }
+
+  for (const transfer of entries) {
+    const card = document.createElement("article");
+    card.className = "transfer-card";
+    const art = document.createElement("div");
+    art.className = "transfer-card-art";
+    const image = document.createElement("img");
+    image.src = transfer.image_url;
+    image.alt = `Баннер: ${rarityNames[transfer.level] || "неизвестная редкость"}`;
+    image.loading = "lazy";
+    image.addEventListener("error", () => image.remove(), { once: true });
+    art.append(image);
+    const content = document.createElement("div");
+    content.className = "transfer-card-copy";
+    const title = document.createElement("strong");
+    title.textContent = `${rarityNames[transfer.level] || "Баннер"} · #${transfer.item_id}`;
+    const otherUser = document.createElement("span");
+    otherUser.textContent = direction === "incoming"
+      ? `Отправитель: ${transfer.other_name}`
+      : `Получатель: ${transfer.other_name}`;
+    content.append(title, otherUser);
+    const actions = document.createElement("div");
+    actions.className = "transfer-card-actions";
+    const buttons = direction === "incoming"
+      ? [["accept", "Принять", "button-primary"], ["return", "Вернуть", "button-quiet"]]
+      : [["cancel", "Отменить", "button-quiet"]];
+    for (const [action, label, buttonClass] of buttons) {
+      const button = document.createElement("button");
+      button.className = `button ${buttonClass}`;
+      button.type = "button";
+      button.dataset.action = action;
+      button.dataset.itemId = String(transfer.item_id);
+      button.textContent = label;
+      actions.append(button);
+    }
+    card.append(art, content, actions);
+    container.append(card);
+  }
+}
+
+function renderTransfers(transfers) {
+  renderTransferList(
+    "incoming-transfers",
+    "incoming-transfer-count",
+    transfers?.incoming,
+    "incoming",
+  );
+  renderTransferList(
+    "outgoing-transfers",
+    "outgoing-transfer-count",
+    transfers?.outgoing,
+    "outgoing",
+  );
 }
 
 function addDetail(container, label, value) {
@@ -153,6 +237,7 @@ export async function loadProfile() {
     activity.append(card);
   }
   renderInventory();
+  renderTransfers(profile.pending_transfers);
 }
 
 function initInventory() {
@@ -164,6 +249,54 @@ function initInventory() {
     inventoryIndex = Math.min(inventoryItems.length - 1, inventoryIndex + 1);
     renderInventory();
   });
+  document.getElementById("inventory-transfer-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const item = inventoryItems[inventoryIndex];
+    const form = event.currentTarget;
+    const recipient = new FormData(form).get("recipient");
+    if (!item || item.source === "owner" || item.is_transfer_pending || typeof recipient !== "string") {
+      return;
+    }
+    const button = document.getElementById("inventory-transfer-submit");
+    button.disabled = true;
+    try {
+      const result = await apiRequest("/api/v1/inventory/transfer", {
+        method: "POST",
+        body: { item_id: item.item_id, recipient: recipient.trim() },
+      });
+      showToast(result.message || "Запрос передачи создан.");
+      form.reset();
+      await loadProfile();
+    } catch (error) {
+      showToast(error.message, true);
+      renderInventory();
+    }
+  });
+  for (const containerId of ["incoming-transfers", "outgoing-transfers"]) {
+    document.getElementById(containerId).addEventListener("click", async (event) => {
+      if (!(event.target instanceof Element)) return;
+      const button = event.target.closest("button[data-action][data-item-id]");
+      if (!button) return;
+      const itemId = Number(button.dataset.itemId);
+      const action = button.dataset.action;
+      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
+      button.disabled = true;
+      try {
+        const endpoint = action === "cancel"
+          ? "/api/v1/inventory/transfer/cancel"
+          : "/api/v1/inventory/transfer/resolve";
+        const body = action === "cancel"
+          ? { item_id: itemId }
+          : { item_id: itemId, action };
+        const result = await apiRequest(endpoint, { method: "POST", body });
+        showToast(result.message || "Запрос передачи обновлён.");
+        await loadProfile();
+      } catch (error) {
+        showToast(error.message, true);
+        button.disabled = false;
+      }
+    });
+  }
   document.getElementById("inventory-activate").addEventListener("click", async (event) => {
     const item = inventoryItems[inventoryIndex];
     if (!item || item.is_active || item.is_transfer_pending) return;

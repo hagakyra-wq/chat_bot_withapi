@@ -317,6 +317,8 @@ async def initialize() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_pending_banner_transfers_recipient
                     ON pending_banner_transfers(recipient_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_pending_banner_transfers_sender
+                    ON pending_banner_transfers(sender_id, created_at);
                 CREATE TABLE IF NOT EXISTS bonus_claims (
                     claim_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -4181,6 +4183,43 @@ async def get_pending_banner_transfer(item_id: int) -> dict[str, Any] | None:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def get_user_pending_banner_transfers(
+    user_id: int,
+    *,
+    direction: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Transfer list limit must be between 1 and 100.")
+    if direction == "incoming":
+        user_column = "recipient_id"
+        other_column = "sender_id"
+    elif direction == "outgoing":
+        user_column = "sender_id"
+        other_column = "recipient_id"
+    else:
+        raise ValueError("Transfer direction must be incoming or outgoing.")
+    async with _connect() as db:
+        cursor = await db.execute(
+            f"""
+            SELECT transfer.item_id, transfer.sender_id, transfer.recipient_id,
+                   transfer.created_at, item.level,
+                   other.callsign AS other_callsign,
+                   other.display_name AS other_display_name,
+                   other.username AS other_username
+            FROM pending_banner_transfers transfer
+            JOIN banner_items item ON item.item_id = transfer.item_id
+            LEFT JOIN global_profiles other
+              ON other.user_id = transfer.{other_column}
+            WHERE transfer.{user_column} = ?
+            ORDER BY transfer.created_at ASC, transfer.item_id ASC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
 
 async def cancel_banner_transfer(item_id: int, sender_id: int) -> tuple[str, int | None]:

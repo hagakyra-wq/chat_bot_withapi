@@ -42,7 +42,16 @@ with access to the backup channel.
 - Backup-channel copies are removed after successful recycling when the bot
   has channel access.
 
+## Completed: banner transfers
+
+- Added a profile transfer panel to send a request by Telegram ID or username,
+  review incoming and outgoing requests, accept or return incoming banners, and
+  cancel outgoing requests.
+- Existing ownership, marketplace, and recipient-consent checks remain enforced
+  by the database transactions; bot notifications and chat actions still work.
+- Signed image access for a pending transfer is limited to its sender,
+  recipient, or a public marketplace listing.
+
 ## Next
 
-1. Add banner transfer requests and recipient-side acceptance.
-2. Continue migrating other bot tools while keeping Telegram commands available.
+1. Continue migrating other bot tools while keeping Telegram commands available.

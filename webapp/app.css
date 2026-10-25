@@ -239,6 +239,7 @@ svg { display: block; }
 .inventory-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .inventory-heading h3 { margin: 6px 0 0; font-size: 19px; font-weight: 600; }
 .inventory-status { padding: 6px 9px; border: 1px solid rgb(140 206 175 / 18%); border-radius: 10px; background: rgb(140 206 175 / 8%); color: var(--success); font-size: 10px; }
+.inventory-status.is-pending { border-color: rgb(228 195 149 / 20%); background: rgb(228 195 149 / 8%); color: var(--gold); }
 .inventory-details > .muted { margin-top: 9px; font-size: 11px; }
 .inventory-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 25px; }
 .carousel-navigation { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -250,6 +251,26 @@ svg { display: block; }
 .inventory-recycle { border-color: rgb(219 155 170 / 22%); color: var(--rose); }
 .inventory-recycle svg { width: 15px; height: 15px; }
 @keyframes inventory-reveal { from { opacity: .45; transform: scale(1.025); } to { opacity: 1; transform: scale(1); } }
+.transfer-layout { display: grid; grid-template-columns: minmax(220px, .72fr) minmax(0, 1.28fr); gap: 12px; align-items: start; }
+.transfer-form { display: grid; gap: 11px; padding: 19px; }
+.transfer-form h3 { margin: -4px 0 3px; font-size: 17px; }
+.transfer-form .muted { margin: 0; font-size: 11px; line-height: 1.6; }
+.transfer-recipient { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 11px; outline: 0; background: var(--surface-raised); color: var(--text); font: inherit; font-size: 12px; }
+.transfer-recipient:focus { border-color: var(--violet); box-shadow: 0 0 0 3px rgb(165 138 250 / 10%); }
+.transfer-lists { display: grid; gap: 12px; }
+.transfer-list-panel { min-width: 0; padding: 16px; }
+.transfer-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.transfer-list-heading h3 { margin: 5px 0 0; font-size: 16px; }
+.transfer-list { display: grid; gap: 9px; margin-top: 13px; }
+.transfer-empty { margin: 0; padding: 13px 0 2px; font-size: 11px; }
+.transfer-card { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px; border: 1px solid var(--line); border-radius: 13px; background: rgb(255 255 255 / 2%); animation: inventory-reveal .2s ease-out; }
+.transfer-card-art { display: grid; width: 58px; height: 58px; place-items: center; overflow: hidden; border-radius: 10px; background: linear-gradient(145deg, #282238, #181923); }
+.transfer-card-art img { width: 100%; height: 100%; object-fit: cover; }
+.transfer-card-copy { display: grid; min-width: 0; gap: 5px; }
+.transfer-card-copy strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.transfer-card-copy span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.transfer-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.transfer-card-actions .button { min-height: 32px; padding: 0 9px; font-size: 10px; }
 .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .stat-card { padding: 16px; }
 .stat-label { color: var(--muted); font-size: 11px; }
@@ -436,7 +457,11 @@ svg { display: block; }
   .mobile-nav-item { display: grid; flex: 1; min-width: 0; min-height: 48px; place-content: center; gap: 2px; border: 0; border-radius: 11px; background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
   .mobile-nav-item svg { width: 18px; height: 18px; margin: 0 auto; }
   .mobile-nav-item.is-active { color: var(--violet-bright); }
-  .profile-layout, .activation-layout, .admin-layout { grid-template-columns: 1fr; }
+  .profile-layout, .activation-layout, .admin-layout, .transfer-layout { grid-template-columns: 1fr; }
+  .transfer-card { grid-template-columns: 48px minmax(0, 1fr); }
+  .transfer-card-art { width: 48px; height: 48px; }
+  .transfer-card-actions { grid-column: 1 / -1; justify-content: stretch; }
+  .transfer-card-actions .button { flex: 1; }
   .wheel-layout { grid-template-columns: 1fr; }
   .wheel-machine { min-height: 350px; padding: 17px; }
   .wheel-frame { width: min(100%, 320px); }

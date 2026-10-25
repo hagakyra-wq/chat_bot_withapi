@@ -138,6 +138,27 @@
             </div>
           </div>
         </section>
+        <div class="section-head"><div><span class="eyebrow">ОБМЕН КОЛЛЕКЦИЕЙ</span><h2>Передачи баннеров</h2></div></div>
+        <div class="transfer-layout">
+          <form class="panel transfer-form" id="inventory-transfer-form">
+            <span class="eyebrow">ТЕКУЩИЙ БАННЕР</span>
+            <h3 id="transfer-item-title">Выбери баннер в карусели</h3>
+            <label class="field-label" for="transfer-recipient">Telegram ID или username получателя</label>
+            <input class="transfer-recipient" id="transfer-recipient" name="recipient" type="text" maxlength="33" placeholder="@username или 123456789" autocomplete="off" required>
+            <p class="muted">Передача завершится только после подтверждения получателем. Пользователь должен быть известен боту.</p>
+            <button class="button button-primary" id="inventory-transfer-submit" type="submit" disabled>Отправить запрос</button>
+          </form>
+          <div class="transfer-lists">
+            <section class="panel transfer-list-panel" aria-labelledby="incoming-transfers-title">
+              <div class="transfer-list-heading"><div><span class="eyebrow">ОЖИДАЮТ ТВОЕГО РЕШЕНИЯ</span><h3 id="incoming-transfers-title">Входящие</h3></div><span class="result-count" id="incoming-transfer-count">0</span></div>
+              <div class="transfer-list" id="incoming-transfers" aria-live="polite"></div>
+            </section>
+            <section class="panel transfer-list-panel" aria-labelledby="outgoing-transfers-title">
+              <div class="transfer-list-heading"><div><span class="eyebrow">ОЖИДАЮТ ПОДТВЕРЖДЕНИЯ</span><h3 id="outgoing-transfers-title">Исходящие</h3></div><span class="result-count" id="outgoing-transfer-count">0</span></div>
+              <div class="transfer-list" id="outgoing-transfers" aria-live="polite"></div>
+            </section>
+          </div>
+        </div>
         <div class="section-head"><div><span class="eyebrow">АКТИВНОСТЬ</span><h2>Сообщения в группах</h2></div></div>
         <div class="stats-grid" id="profile-activity"><div class="panel stat-card">Загружаем статистику…</div></div>
       </section>
