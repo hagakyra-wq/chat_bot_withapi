@@ -101,9 +101,22 @@ ACCESS_DURATIONS = {
 ACCESS_MESSAGE = (
     "Чтобы пользоваться Юбарой в ЛС, вступи в группу, где есть бот, "
     "и отправь там любое сообщение, на которое Юбара ответит. "
-    "Или запроси у администратора одноразовый ключ и активируй его командой /activate КОД."
+    "Если у тебя есть ключ, нажми кнопку ниже и отправь код сообщением."
 )
 _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
+
+
+def _activation_entry_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔑 Активировать код",
+                    callback_data="menu:activate",
+                )
+            ]
+        ]
+    )
 
 
 def _format_private_profile(
@@ -1029,7 +1042,8 @@ async def personal_autoresponder_start(
             if update.effective_message is not None:
                 await update.effective_message.reply_text(
                     "Для доступа к личному автоответчику запроси ключ у администратора "
-                    "и активируй его командой /activate КОД."
+                    "и отправь его через кнопку ниже.",
+                    reply_markup=_activation_entry_markup(),
                 )
             return ConversationHandler.END
         context.user_data["autoresponder_menu"] = True
@@ -1200,6 +1214,17 @@ async def personal_autoresponder_cancel(
     return ConversationHandler.END
 
 
+async def personal_autoresponder_leave_for_game_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is not None:
+        await _cancel_userbot_login(user.id, context)
+    context.user_data["autoresponder_menu"] = False
+    return ConversationHandler.END
+
+
 async def break_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1286,6 +1311,8 @@ async def private_access_callback_guard(
         or query.message is None
         or query.message.chat.type != ChatType.PRIVATE
     ):
+        return
+    if query.data in {"menu:activate", "menu:activation_cancel"}:
         return
     try:
         if await has_private_bot_access(user.id, context.bot):
@@ -1643,7 +1670,7 @@ async def admin_user_command_fallback(
     if user is not None:
         ADMIN_PANEL_USERS.discard(user.id)
         await _cancel_userbot_login(user.id, context)
-    if await handle_activation_message(update):
+    if await handle_activation_message(update, context):
         return ConversationHandler.END
     if await handle_coin_promo_message(update):
         return ConversationHandler.END
@@ -3151,8 +3178,8 @@ async def create_coin_promo_input(
             f"Создан промокод на {_format_coin_amount(amount_cents)} монет:\n"
             f"`{code}`\n\n"
             "Передай его пользователю лично. Он одноразовый — активировать может "
-            "только один человек командами `/coinpromo CODE` или `/activate CODE` "
-            "в ЛС бота.",
+            "только один человек. В ЛС с ботом нажми «🔑 Активировать код» и "
+            "отправь код сообщением; также работают `/coinpromo CODE` и `/activate CODE`.",
             parse_mode="Markdown",
         )
         await _show_admin_menu(update)
@@ -3204,7 +3231,8 @@ async def create_penalty_key_input(
             f"Создан одноразовый штрафной ключ на {_format_coin_amount(amount_cents)} монет:\n"
             f"`{code}`\n\n"
             "При активации он спишет сумму с баланса пользователя; баланс может стать "
-            "отрицательным. Команда активации: `/activate CODE`.",
+            "отрицательным. В ЛС с ботом нажми «🔑 Активировать код» и отправь код "
+            "сообщением; также работает `/activate CODE`.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
@@ -3580,7 +3608,13 @@ def build_personal_autoresponder_conversation_handler() -> ConversationHandler:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, _save_private_text_input),
             ],
         },
-        fallbacks=[CommandHandler("cancel", personal_autoresponder_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", personal_autoresponder_cancel),
+            CallbackQueryHandler(
+                personal_autoresponder_leave_for_game_menu,
+                pattern=r"^menu:",
+            ),
+        ],
         allow_reentry=True,
         per_message=False,
     )
@@ -3660,7 +3694,9 @@ async def _private_dialog(
             ):
                 await message.reply_text(
                     "Для управления автоответчиком используй /addacc. "
-                    "Этот ключ не открывает доступ к обычному диалогу с ботом."
+                    "Этот ключ не открывает доступ к обычному диалогу с ботом. "
+                    "Чтобы активировать другой ключ, нажми кнопку ниже.",
+                    reply_markup=_activation_entry_markup(),
                 )
                 return
         except Exception:
@@ -3668,7 +3704,10 @@ async def _private_dialog(
             await message.reply_text("Не удалось проверить доступ. Попробуй позже.")
             return
     if not authorized:
-        await message.reply_text(ACCESS_MESSAGE)
+        await message.reply_text(
+            ACCESS_MESSAGE,
+            reply_markup=_activation_entry_markup(),
+        )
         return
     if user.username:
         try:
@@ -3839,7 +3878,7 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         or message.text is None
     ):
         return
-    if await handle_activation_message(update):
+    if await handle_activation_message(update, context):
         return
     if await handle_coin_promo_message(update):
         return

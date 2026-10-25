@@ -5,6 +5,7 @@ import html
 import logging
 import re
 import secrets
+import time
 from typing import Any
 
 from telegram import (
@@ -50,6 +51,7 @@ _COIN_PROMO_RE = re.compile(
     re.IGNORECASE,
 )
 _ACTIVATE_CODE_RE = re.compile(r"^/activate(?:@\w+)?(?:\s+(.+))?$", re.IGNORECASE)
+_ACTIVATION_INPUT_TTL_SECONDS = 5 * 60
 _TRANSFER_RECIPIENT_RE = re.compile(r"^@?([a-z0-9_]{5,32})$", re.IGNORECASE)
 _TRANSFER_USER_ID_RE = re.compile(r"^\d{1,20}$")
 _RECYCLE_COMMAND_RE = re.compile(
@@ -361,8 +363,8 @@ async def _show_admin_help(
         "• /start — открыть inline-меню; /help — эта справка.\n"
         "• /casino — колесо удачи; /inventory — инвентарь баннеров.\n"
         "• «баланс» — посмотреть монеты; «топ монет» — рейтинг.\n"
-        "• /activate КОД — активировать ключ или штрафной ключ в личном чате.\n"
-        "• /coinpromo КОД — активировать промокод на монеты в личном чате.\n"
+        "• Нажми «🔑 Активировать код» в меню и отправь код сообщением; "
+        "/activate КОД и /coinpromo КОД тоже доступны.\n"
         "• /cancel — отменить текущий ввод."
     ]
     if is_group_admin:
@@ -1292,6 +1294,7 @@ async def on_game_callback(
             "market_listing_title_item",
             "market_listing_price_cents",
             "inventory_transfer_item_id",
+            "activation_code_waiting_until",
         ):
             context.user_data.pop(key, None)
         await _return_to_main_menu(update, context)
@@ -1300,10 +1303,25 @@ async def on_game_callback(
         await _show_admin_help(update, context)
         return
     if action == "menu:activate":
+        context.user_data["activation_code_waiting_until"] = (
+            time.monotonic() + _ACTIVATION_INPUT_TTL_SECONDS
+        )
         await query.message.reply_text(
-            "Отправь в личном чате команду /activate КОД. "
-            "Так активируются ключи доступа и одноразовые штрафные коды. "
-            "Промокод на монеты можно активировать командой /coinpromo КОД.",
+            "Отправь код следующим сообщением — вводить команду со слешем не нужно. "
+            "Подойдут ключ доступа, промокод на монеты или штрафной ключ. "
+            "Запрос действует 5 минут.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("❌ Отмена", callback_data="menu:activation_cancel")],
+                    [_menu_button()],
+                ]
+            ),
+        )
+        return
+    if action == "menu:activation_cancel":
+        context.user_data.pop("activation_code_waiting_until", None)
+        await query.message.reply_text(
+            "Ввод кода отменён.",
             reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
         )
         return
@@ -1897,7 +1915,9 @@ async def _activate_code(update: Update, code: str | None) -> None:
         await message.reply_text("Ключи и промокоды активируются только в личном чате с Юбарой.")
         return
     if not code:
-        await message.reply_text("Формат команды: /activate КОД")
+        await message.reply_text(
+            "Отправь код сообщением или нажми «🔑 Активировать код» в меню."
+        )
         return
 
     try:
@@ -1976,10 +1996,48 @@ async def _activate_code(update: Update, code: str | None) -> None:
     await message.reply_text("Код не найден или указан неверно.")
 
 
-async def handle_activation_message(update: Update) -> bool:
+async def handle_activation_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+) -> bool:
     message = update.effective_message
     if message is None or message.text is None:
         return False
+    if (
+        context is not None
+        and message.chat.type == ChatType.PRIVATE
+        and "activation_code_waiting_until" in context.user_data
+    ):
+        expires_at = context.user_data.get("activation_code_waiting_until")
+        if not isinstance(expires_at, (int, float)) or time.monotonic() > expires_at:
+            context.user_data.pop("activation_code_waiting_until", None)
+            await message.reply_text(
+                "Время ввода кода истекло. Нажми «🔑 Активировать код» в меню ещё раз."
+            )
+            return True
+        else:
+            code = message.text.strip()
+            if code.casefold() in {"отмена", "отменить", "в меню", "/cancel"}:
+                context.user_data.pop("activation_code_waiting_until", None)
+                await message.reply_text(
+                    "Ввод кода отменён.",
+                    reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+                )
+                return True
+            if not code:
+                await message.reply_text("Отправь код одним сообщением или нажми «Отмена».")
+                return True
+            context.user_data.pop("activation_code_waiting_until", None)
+            command_match = _ACTIVATE_CODE_RE.fullmatch(code)
+            if command_match is None:
+                if _COIN_PROMO_RE.fullmatch(code) is not None:
+                    await handle_coin_promo_message(update)
+                    return True
+                await _activate_code(update, code)
+                return True
+            code = command_match.group(1).strip() if command_match.group(1) else None
+            await _activate_code(update, code)
+            return True
     match = _ACTIVATE_CODE_RE.fullmatch(message.text.strip())
     if match is None:
         return False
@@ -2107,7 +2165,7 @@ async def handle_game_message(
     if re.fullmatch(r"/(?:help|adminhelp|helpadmin)(?:@\w+)?", text):
         await _show_admin_help(update, context)
         return True
-    if await handle_activation_message(update):
+    if await handle_activation_message(update, context):
         return True
     start_match = re.fullmatch(r"/start(?:@\w+)?(?:\s+(\w+))?", text)
     if start_match and start_match.group(1) == "inventory":
