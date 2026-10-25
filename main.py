@@ -211,7 +211,11 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_error(503, "API is unavailable")
             return
         future = asyncio.run_coroutine_threadsafe(
-            miniapp_api.get_banner_media(item_id, parse_qs(urlsplit(self.path).query)),
+            miniapp_api.get_banner_media(
+                item_id,
+                parse_qs(urlsplit(self.path).query),
+                bot=self.bot,
+            ),
             loop,
         )
         try:

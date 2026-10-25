@@ -7,6 +7,8 @@
   retrieves the image through Telegram, and never sends the bot token to the browser.
 - Banner photos and animated level-six GIFs can be shown directly in the feed.
 - Existing stored backup references (`file_id` and `market_file_id`) are used.
+- Missing previews are now recovered from their backup or rendered on the first
+  image request, including inventory banners and marketplace-specific artwork.
 
 Telegram Bot API does not provide a method to enumerate historical channel
 messages. This section therefore displays images attached to banner records

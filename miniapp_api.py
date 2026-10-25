@@ -537,6 +537,7 @@ async def _admin_dashboard() -> dict[str, Any]:
 async def get_banner_media(
     item_id: int,
     query: dict[str, list[str]],
+    bot: Any | None = None,
 ) -> tuple[int, bytes, str]:
     try:
         user_id = int(query.get("user", [""])[0])
@@ -572,6 +573,37 @@ async def get_banner_media(
         and not is_pending_recipient
     ):
         return 404, b"Banner not found.", "text/plain; charset=utf-8"
+
+    if is_public_listing and not item.get("market_file_id") and bot is not None:
+        try:
+            from banner_store import ensure_market_banner_file
+
+            item = await ensure_market_banner_file(bot, item)
+        except Exception:
+            if item.get("file_id"):
+                logging.warning(
+                    "Не удалось подготовить отдельное превью лота item_id=%s; "
+                    "будет показан баннер владельца.",
+                    item_id,
+                    exc_info=True,
+                )
+            else:
+                logging.exception(
+                    "Не удалось подготовить превью лота item_id=%s.",
+                    item_id,
+                )
+                return 503, b"Banner preview is not ready.", "text/plain; charset=utf-8"
+    elif not item.get("file_id") and bot is not None:
+        try:
+            from banner_store import ensure_banner_file
+
+            item = await ensure_banner_file(bot, item)
+        except Exception:
+            logging.exception(
+                "Не удалось подготовить превью баннера item_id=%s.",
+                item_id,
+            )
+            return 503, b"Banner preview is not ready.", "text/plain; charset=utf-8"
 
     file_id = (
         item.get("market_file_id") or item.get("file_id")
