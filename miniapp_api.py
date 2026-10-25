@@ -56,6 +56,7 @@ async def _profile(
     activity = await database.get_user_message_activity(user_id)
     balance = await database.get_duel_balance(user_id, username)
     active_banner = await database.get_active_banner_item(user_id)
+    inventory = await database.get_user_banner_items(user_id, limit=100)
     return {
         "user_id": user_id,
         "username": profile.get("username") or username,
@@ -76,6 +77,18 @@ async def _profile(
             if active_banner is not None
             else None
         ),
+        "inventory": [
+            {
+                "item_id": int(item["item_id"]),
+                "level": int(item["level"]),
+                "is_active": bool(item["is_active"]),
+                "is_transfer_pending": bool(item["is_transfer_pending"]),
+                "source": str(item["source"]),
+                "image_url": _media_url(user_id, int(item["item_id"])),
+                "animated": int(item["level"]) == 6,
+            }
+            for item in inventory
+        ],
     }
 
 
@@ -412,6 +425,13 @@ async def dispatch(
         if await database.withdraw_market_lot(user_id, lot_id):
             return 200, {"status": "withdrawn", "message": "Лот снят с продажи."}
         return 404, {"error": "Лот не найден или недоступен."}
+    if path == "/api/v1/inventory/activate" and method == "POST":
+        item_id = payload.get("item_id")
+        if type(item_id) is not int or item_id <= 0:
+            return 400, {"error": "Выбери баннер из своего инвентаря."}
+        if not await database.activate_banner_item(user_id, item_id):
+            return 404, {"error": "Баннер не найден или сейчас недоступен."}
+        return 200, {"status": "activated", "message": "Баннер установлен."}
     if path == "/api/v1/activation" and method == "POST":
         return await _activate_code(user_id, username, payload)
     if path == "/api/v1/admin":

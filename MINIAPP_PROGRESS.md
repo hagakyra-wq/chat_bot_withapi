@@ -14,9 +14,16 @@ already indexed by the bot; it does not import unindexed photos from the
 channel. A historical backfill requires an authorized Telegram user session
 with access to the backup channel.
 
+## Completed: inventory carousel
+
+- The profile shows the user's stored banners in a responsive carousel with image
+  previews, rarity, active state, and previous/next controls.
+- Users can activate an owned banner from the carousel; the operation is checked
+  and performed server-side, including protection against activating a listed lot.
+- Existing Telegram inventory and activation commands remain available.
+
 ## Next
 
-1. Add the user's banner inventory as a carousel with safe image previews.
-2. Bring the existing fortune-wheel rules into Mini App and add a polished,
+1. Bring the existing fortune-wheel rules into Mini App and add a polished,
    reduced-motion-aware animation.
-3. Continue migrating other bot tools while keeping Telegram commands available.
+2. Continue migrating other bot tools while keeping Telegram commands available.

@@ -4561,6 +4561,11 @@ async def activate_banner_item(user_id: int, item_id: int) -> bool:
                           (SELECT value FROM meta WHERE key = ?) AS INTEGER
                       )
                   )
+                  AND NOT EXISTS(
+                      SELECT 1 FROM market_lots lot
+                      WHERE lot.item_id = banner_items.item_id
+                        AND lot.status = 'open'
+                  )
                 """,
                 (item_id, user_id, _OWNER_BANNER_USER_ID_META_KEY),
             )

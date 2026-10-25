@@ -221,6 +221,32 @@ svg { display: block; }
 .profile-notes ul { display: grid; gap: 7px; margin: 11px 0 0; padding: 0; list-style: none; }
 .profile-notes li { position: relative; padding-left: 15px; color: var(--text); font-size: 12px; }
 .profile-notes li::before { position: absolute; top: .58em; left: 0; width: 5px; height: 5px; border-radius: 50%; background: var(--violet); content: ""; }
+.inventory-carousel { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr); overflow: hidden; }
+.inventory-art { position: relative; display: grid; min-height: 225px; place-items: center; overflow: hidden; background: radial-gradient(ellipse at 50% 115%, rgb(165 138 250 / 24%), transparent 68%), linear-gradient(145deg, #252033, #191a25); }
+.inventory-art::before, .inventory-art::after { position: absolute; width: 180px; height: 180px; border: 1px solid rgb(224 205 242 / 12%); border-radius: 50%; content: ""; }
+.inventory-art::after { width: 125px; height: 125px; border-color: rgb(224 205 242 / 18%); }
+.inventory-art > svg { z-index: 1; width: 56px; height: 56px; color: var(--violet-bright); filter: drop-shadow(0 0 15px rgb(194 164 255 / 32%)); opacity: .72; }
+.inventory-art > img { position: absolute; z-index: 1; width: 100%; height: 100%; object-fit: cover; animation: inventory-reveal .28s ease-out; }
+.inventory-art.image-unavailable > img { display: none; }
+.inventory-level { position: absolute; z-index: 2; right: 12px; bottom: 12px; padding: 6px 9px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 9px; background: rgb(18 17 25 / 78%); color: var(--text); font-size: 9px; letter-spacing: .12em; }
+.inventory-art.rarity-1 { background-color: #1c1d27; }
+.inventory-art.rarity-2 { background-color: #1b2226; }
+.inventory-art.rarity-3 { background-color: #1b202b; }
+.inventory-art.rarity-4 { background-color: #211d2b; }
+.inventory-art.rarity-5 { background-color: #28211d; }
+.inventory-art.rarity-6 { background-color: #291d2a; }
+.inventory-details { display: flex; min-width: 0; flex-direction: column; justify-content: center; padding: 22px; }
+.inventory-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.inventory-heading h3 { margin: 6px 0 0; font-size: 19px; font-weight: 600; }
+.inventory-status { padding: 6px 9px; border: 1px solid rgb(140 206 175 / 18%); border-radius: 10px; background: rgb(140 206 175 / 8%); color: var(--success); font-size: 10px; }
+.inventory-details > .muted { margin-top: 9px; font-size: 11px; }
+.inventory-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 25px; }
+.carousel-navigation { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.carousel-button { width: 36px; min-height: 36px; padding: 0; }
+.carousel-button svg { width: 14px; height: 14px; }
+#inventory-prev svg { transform: rotate(180deg); }
+.inventory-controls > .button { min-height: 38px; padding: 0 12px; font-size: 10px; }
+@keyframes inventory-reveal { from { opacity: .45; transform: scale(1.025); } to { opacity: 1; transform: scale(1); } }
 .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .stat-card { padding: 16px; }
 .stat-label { color: var(--muted); font-size: 11px; }
@@ -358,6 +384,9 @@ svg { display: block; }
   .mobile-nav-item svg { width: 18px; height: 18px; margin: 0 auto; }
   .mobile-nav-item.is-active { color: var(--violet-bright); }
   .profile-layout, .activation-layout, .admin-layout { grid-template-columns: 1fr; }
+  .inventory-carousel { grid-template-columns: 1fr; }
+  .inventory-art { min-height: 185px; }
+  .inventory-details { padding: 17px; }
   .balance-card { min-height: 130px; }
   .filters { grid-template-columns: 1fr 1fr; }
   .sell-form { grid-template-columns: 1fr 1fr; }

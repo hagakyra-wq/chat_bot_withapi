@@ -82,6 +82,21 @@
           <span class="eyebrow">СОХРАНЁННЫЕ ФАКТЫ</span>
           <ul id="profile-note-list"></ul>
         </section>
+        <div class="section-head"><div><span class="eyebrow">ТВОЯ КОЛЛЕКЦИЯ</span><h2>Инвентарь баннеров</h2></div><span class="result-count" id="inventory-count"></span></div>
+        <section class="panel inventory-carousel" id="inventory-carousel" aria-label="Инвентарь баннеров">
+          <div class="inventory-art" id="inventory-art">
+            <svg aria-hidden="true"><use href="/assets/icons.svg#mark"></use></svg>
+            <span class="inventory-level" id="inventory-level"></span>
+          </div>
+          <div class="inventory-details">
+            <div class="inventory-heading"><div><span class="eyebrow">БАННЕР КОЛЛЕКЦИИ</span><h3 id="inventory-title">Загружаем инвентарь…</h3></div><span class="inventory-status" id="inventory-status"></span></div>
+            <p class="muted" id="inventory-description"></p>
+            <div class="inventory-controls">
+              <div class="carousel-navigation"><button class="button button-quiet carousel-button" id="inventory-prev" type="button" aria-label="Предыдущий баннер"><svg><use href="/assets/icons.svg#arrow"></use></svg></button><span id="inventory-position" aria-live="polite">—</span><button class="button button-quiet carousel-button" id="inventory-next" type="button" aria-label="Следующий баннер"><svg><use href="/assets/icons.svg#arrow"></use></svg></button></div>
+              <button class="button button-primary" id="inventory-activate" type="button" disabled>Сделать активным</button>
+            </div>
+          </div>
+        </section>
         <div class="section-head"><div><span class="eyebrow">АКТИВНОСТЬ</span><h2>Сообщения в группах</h2></div></div>
         <div class="stats-grid" id="profile-activity"><div class="panel stat-card">Загружаем статистику…</div></div>
       </section>
