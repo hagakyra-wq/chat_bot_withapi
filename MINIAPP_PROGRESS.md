@@ -1,84 +1,45 @@
-# Mini App progress
+# Mini App: мини-игры
 
-## Completed: marketplace banner photo feed
+В Mini App оставлены только игры: карточные комнаты, ежедневный расклад Таро и
+колесо удачи. Профиль, площадка, сообщество, активация и администрирование
+больше не показываются в веб-интерфейсе. Команды и связанные с ними функции
+Telegram-бота продолжают работать в чате.
 
-- Marketplace lots now carry short-lived, signed image URLs.
-- The server checks the stored banner ownership or active marketplace listing,
-  retrieves the image through Telegram, and never sends the bot token to the browser.
-- Banner photos and animated level-six GIFs can be shown directly in the feed.
-- Existing stored backup references (`file_id` and `market_file_id`) are used.
-- Missing previews are now recovered from their backup or rendered on the first
-  image request, including inventory banners and marketplace-specific artwork.
+## Карточные комнаты
 
-Telegram Bot API does not provide a method to enumerate historical channel
-messages. This section therefore displays images attached to banner records
-already indexed by the bot; it does not import unindexed photos from the
-channel. A historical backfill requires an authorized Telegram user session
-with access to the backup channel.
+- Подкидной дурак на стандартной колоде из 36 карт для 2–4 игроков.
+- Создание комнаты на выбранное число игроков, вход по шестизначному коду,
+  приглашение известного боту пользователя по Telegram username и запуск партии
+  создателем после заполнения всех мест.
+- Если партия длится 120 раундов, она завершается по числу оставшихся карт,
+  чтобы онлайн-стол не зависал при бесконечном перебрасывании.
+- Стол показывает козырь, остаток колоды, карты на столе и руку текущего
+  игрока. Участники видят только собственные карты; ходы проверяются сервером.
+- Состояние комнат сохраняется в SQLite, а интерфейс получает обновления опросом
+  API. Изменение комнаты и ход защищены проверкой версии, чтобы не перезаписать
+  параллельный ход другого игрока.
 
-## Completed: inventory carousel
+## Таро дня
 
-- The profile shows the user's stored banners in a responsive carousel with image
-  previews, rarity, active state, and previous/next controls.
-- Users can activate an owned banner from the carousel; the operation is checked
-  and performed server-side, including protection against activating a listed lot.
-- Existing Telegram inventory and activation commands remain available.
+- Пользователь задаёт вопрос и получает три случайные карты с визуальными
+  лицевыми сторонами и коротким толкованием от настроенного Groq API.
+- Сервер ограничивает расклад одним в московский календарный день. Карты,
+  вопрос и толкование сохраняются в SQLite; незавершённая заявка освобождается
+  после ошибки ИИ и автоматически очищается, если зависла более чем на 10 минут.
+- Толкование обозначено как развлекательное размышление, а не гарантированное
+  предсказание или профессиональная рекомендация.
 
-## Completed: fortune wheel
+## Колесо удачи
 
-- Added single and ×10 spins to the Mini App, using the existing cost, rarity
-  rules, server-side random rolls, and casino-round debit/refund transactions.
-- The wheel sectors and displayed odds use the same shared rarity weights as the
-  Telegram bot. Results are stored as banner inventory items before animation.
-- Added a multi-turn wheel animation, result cards, balance display, and
-  reduced-motion support. Reward artwork is prepared in the background and
-  preparation failures are logged without losing the saved prize.
+- Сохранён существующий экран колеса и связанный серверный расчёт наград,
+  стоимости и зачисления баннеров.
 
-## Completed: inventory recycling
+## Технические границы
 
-- Added an irreversible recycle action with a confirmation prompt and the
-  configured coin payout shown beside each eligible banner.
-- The server derives the payout from banner rarity and executes the existing
-  transactional recycle operation; active, owner, listed, pending, and
-  unowned banners cannot be recycled.
-- Backup-channel copies are removed after successful recycling when the bot
-  has channel access.
-
-## Completed: banner transfers
-
-- Added a profile transfer panel to send a request by Telegram ID or username,
-  review incoming and outgoing requests, accept or return incoming banners, and
-  cancel outgoing requests.
-- Existing ownership, marketplace, and recipient-consent checks remain enforced
-  by the database transactions; bot notifications and chat actions still work.
-- Signed image access for a pending transfer is limited to its sender,
-  recipient, or a public marketplace listing.
-
-## Completed: community utilities
-
-- Added group message and coin leaderboards for groups the user is recorded as
-  currently belonging to and the bot is allowed to use.
-- Added Mini App error reports delivered to the bot owner.
-- Added an explicit, confirmed action to delete profile data and message
-  activity from all groups while preserving balance and banner inventory.
-- Added an image prompt form that hands the request to the existing bot
-  generation workflow in the user's private chat.
-- Added profile editing for callsign, age, gender, and appending a profile fact.
-  Profile edits use the existing shared profile data and apply across groups.
-
-## Chat-only operations
-
-- Group message moderation and reactions need a target chat/message context.
-- Duels require a second participant and their consent.
-- Auto-responder controls, personal Telegram account authorization, group
-  management, and history exports remain in their existing bot conversations.
-- Owner-only service shutdown and full data reset, plus personal-account
-  credentials and banner-pattern administration, are intentionally not exposed
-  in the Mini App.
-- Image prompts can be submitted in Mini App, but generation configuration and
-  final delivery still take place in the private bot chat.
-- Deleting profile data does not remove archived message contents; it removes
-  profile fields, group user records, and message activity counters.
-
-These operations remain available in Telegram; Mini App does not claim to replace
-the Telegram chat context or the personal-account authorization flow.
+- API комнат и раскладов доступен только после проверки подписанных Telegram
+  `initData`; карты соперников не отправляются браузеру.
+- Комнаты и расклады хранятся в SQLite, а не в памяти процесса.
+- Пригласить по username можно пользователя, чей Telegram-профиль уже известен
+  боту (например, после открытия Mini App или общения с ботом). Telegram может
+  запретить боту написать первым в личные сообщения; в этом случае интерфейс
+  явно сообщает, что приглашение не доставлено.

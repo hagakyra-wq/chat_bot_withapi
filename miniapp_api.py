@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 import httpx
 import database
+import mini_games
 from casino_rules import RARITY_NAMES, RARITY_WEIGHTS, generate_result
 from config import (
     ADMIN_ID,
@@ -238,7 +239,12 @@ def _media_url(user_id: int, item_id: int) -> str:
     return f"/media/banner/{item_id}?user={user_id}&expires={expires}&sig={signature}"
 
 
-async def get_session(user_id: int, first_name: str) -> tuple[int, dict[str, Any]]:
+async def get_session(
+    user_id: int,
+    first_name: str,
+    username: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    await database.upsert_global_profile_identity(user_id, username, first_name)
     is_admin = await _has_admin_access(user_id)
     return 200, {
         "user_id": user_id,
@@ -968,6 +974,33 @@ async def dispatch(
         if type(spins) is not int or spins not in (1, 10):
             return 400, {"error": "Можно выполнить одну крутку или пакет ×10."}
         return await _spin_casino(user_id, username, spins, bot)
+    if path == "/api/v1/games/rooms" and method == "GET":
+        return await mini_games.list_rooms(user_id)
+    if path == "/api/v1/games/rooms/create" and method == "POST":
+        return await mini_games.create_room(user_id, first_name, username, payload)
+    if path == "/api/v1/games/rooms/join" and method == "POST":
+        return await mini_games.join_room(user_id, first_name, username, payload)
+    if path == "/api/v1/games/rooms/room" and method == "GET":
+        return await mini_games.get_room(query.get("code", [""])[0], user_id)
+    if path == "/api/v1/games/rooms/start" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        return await mini_games.start_room(room_code, user_id)
+    if path == "/api/v1/games/rooms/invite" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        return await mini_games.invite_player(room_code, user_id, payload, bot)
+    if path == "/api/v1/games/rooms/action" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        return await mini_games.perform_action(room_code, user_id, payload)
+    if path == "/api/v1/games/tarot" and method == "GET":
+        return await mini_games.tarot_status(user_id)
+    if path == "/api/v1/games/tarot" and method == "POST":
+        return await mini_games.draw_tarot(user_id, payload)
     if path == "/api/v1/market" and method == "GET":
         return 200, await _market(query, user_id)
     if path == "/api/v1/market/buy" and method == "POST":

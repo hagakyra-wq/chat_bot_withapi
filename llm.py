@@ -289,6 +289,43 @@ async def generate_reply(prompt: str, summary: bool) -> str:
         return "Ой, я немного задумалась... Повтори ещё раз, пожалуйста!"
 
 
+async def generate_tarot_interpretation(
+    question: str,
+    cards: list[dict[str, Any]],
+) -> str:
+    spread = "\n".join(
+        f"{card['position']}: {card['name']}"
+        f"{' (перевёрнутая)' if card['reversed'] else ''}"
+        for card in cards
+    )
+    response = await _client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ты бережно и кратко объясняешь символический расклад Таро на русском. "
+                    "Это развлечение и повод для размышления, а не предсказание фактов. "
+                    "Не утверждай, что знаешь будущее; не давай медицинских, правовых или "
+                    "финансовых рекомендаций. Уважай свободу выбора человека. Ответь 2–4 "
+                    "короткими предложениями: свяжи карты с вопросом и закончи мягкой "
+                    "практичной мыслью. Не используй Markdown."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Вопрос: {question}\n\nКарты:\n{spread}",
+            },
+        ],
+        temperature=0.65,
+        max_tokens=280,
+    )
+    interpretation = (response.choices[0].message.content or "").strip()
+    if not interpretation:
+        raise ValueError("ИИ вернул пустое толкование расклада.")
+    return interpretation
+
+
 async def generate_summary(
     history: list[dict[str, Any]],
     *,

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#11121a">
-  <meta name="description" content="Юбара — игровая вселенная в Telegram">
-  <title>Юбара</title>
+  <meta name="description" content="Карточные игры, Таро и колесо удачи в Mini App Юбары">
+  <title>Игры — Юбара</title>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script type="module" src="/assets/app.js"></script>
@@ -13,28 +13,22 @@
 <body>
   <div class="app-shell">
     <aside class="rail">
-      <a class="brand" href="#" data-page="home" aria-label="Юбара — на главную">
+      <a class="brand" href="#" data-page="home" aria-label="Юбара — игры">
         <svg class="brand-mark" aria-hidden="true"><use href="/assets/icons.svg#mark"></use></svg>
         <span>ЮБАРА</span>
       </a>
-      <nav class="rail-nav" aria-label="Основная навигация">
-        <button class="nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Главная</span></button>
-        <button class="nav-item" type="button" data-page="profile"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Профиль</span></button>
-        <button class="nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
-        <button class="nav-item" type="button" data-page="market"><svg><use href="/assets/icons.svg#market"></use></svg><span>Площадка</span></button>
-        <button class="nav-item" type="button" data-page="community"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Сообщество</span></button>
-        <button class="nav-item" type="button" data-page="activation"><svg><use href="/assets/icons.svg#key"></use></svg><span>Активация</span></button>
-        <button class="nav-item admin-nav" type="button" data-page="admin" hidden><svg><use href="/assets/icons.svg#settings"></use></svg><span>Управление</span></button>
+      <nav class="rail-nav" aria-label="Игры">
+        <button class="nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Игры</span></button>
+        <button class="nav-item" type="button" data-page="rooms"><span class="nav-symbol">♠</span><span>Карточная комната</span></button>
+        <button class="nav-item" type="button" data-page="tarot"><span class="nav-symbol">✦</span><span>Таро дня</span></button>
+        <button class="nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо удачи</span></button>
       </nav>
-      <div class="rail-foot"><span class="online-dot"></span><span>Telegram Mini App</span></div>
+      <div class="rail-foot"><span class="online-dot"></span><span>Играй вместе</span></div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <div>
-          <span class="eyebrow">ИГРОВАЯ ВСЕЛЕННАЯ</span>
-          <h1 id="page-heading">Главная</h1>
-        </div>
+        <div><span class="eyebrow">МИНИ-ИГРЫ ЮБАРЫ</span><h1 id="page-heading">Игры</h1></div>
         <div class="account-chip">
           <span class="avatar-mark" aria-hidden="true"><svg><use href="/assets/icons.svg#profile"></use></svg></span>
           <span class="account-copy"><strong id="account-name">Подключаем Telegram…</strong><small id="account-role">Проверка аккаунта</small></span>
@@ -42,39 +36,91 @@
       </header>
 
       <section class="page is-visible" id="page-home" aria-labelledby="home-title">
-        <div class="welcome-card">
+        <div class="welcome-card games-welcome">
           <div class="welcome-copy">
-            <span class="eyebrow">МИР ЮБАРЫ</span>
-            <h2 id="home-title">Твоя история<br>начинается здесь</h2>
-            <p>Управляй профилем, находи редкие баннеры и открывай новые возможности.</p>
-            <button class="button button-primary" type="button" data-page="profile">Открыть профиль <svg><use href="/assets/icons.svg#arrow"></use></svg></button>
+            <span class="eyebrow">ТВОЙ ВЕЧЕР В ХОРОШЕЙ КОМПАНИИ</span>
+            <h2 id="home-title">Выбирай игру.<br>Остальное — магия.</h2>
+            <p>Собирай друзей за карточным столом, задай вопрос картам или испытай удачу.</p>
+            <button class="button button-primary" type="button" data-page="rooms">К игровому столу <svg><use href="/assets/icons.svg#arrow"></use></svg></button>
           </div>
-          <div class="moon-art" aria-hidden="true"><svg><use href="/assets/icons.svg#moon-art"></use></svg></div>
+          <div class="games-hero-art" aria-hidden="true"><span>♠</span><span>✦</span><span>♥</span></div>
           <span class="card-orbit orbit-one"></span><span class="card-orbit orbit-two"></span>
         </div>
 
-        <div class="section-head"><div><span class="eyebrow">БЫСТРЫЙ ДОСТУП</span><h2>Твои разделы</h2></div></div>
-        <div class="feature-grid">
-          <button class="feature-card feature-profile" type="button" data-page="profile">
-            <span class="feature-icon"><svg><use href="/assets/icons.svg#profile"></use></svg></span><span class="feature-title">Профиль</span><span class="feature-description">Баланс и статистика</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
+        <div class="section-head"><div><span class="eyebrow">ТРИ СПОСОБА ПРОВЕСТИ ВРЕМЯ</span><h2>Во что сыграем?</h2></div></div>
+        <div class="feature-grid games-grid">
+          <button class="feature-card game-feature game-feature-cards" type="button" data-page="rooms">
+            <span class="game-feature-symbol">♠</span><span class="feature-title">Карточный стол</span><span class="feature-description">Подкидной дурак с друзьями, от 2 до 4 игроков</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
-          <button class="feature-card feature-market" type="button" data-page="market">
-            <span class="feature-icon"><svg><use href="/assets/icons.svg#market"></use></svg></span><span class="feature-title">Площадка</span><span class="feature-description">Баннеры и сделки</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
+          <button class="feature-card game-feature game-feature-tarot" type="button" data-page="tarot">
+            <span class="game-feature-symbol">✦</span><span class="feature-title">Таро дня</span><span class="feature-description">Три карты и короткое толкование от ИИ — раз в день</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
-          <button class="feature-card feature-wheel" type="button" data-page="wheel">
-            <span class="feature-icon"><svg><use href="/assets/icons.svg#fortune"></use></svg></span><span class="feature-title">Колесо удачи</span><span class="feature-description">Испытай удачу и открой баннер</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
-          </button>
-          <button class="feature-card feature-activation" type="button" data-page="activation">
-            <span class="feature-icon"><svg><use href="/assets/icons.svg#key"></use></svg></span><span class="feature-title">Активировать код</span><span class="feature-description">Открой подарок или доступ</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
-          </button>
-          <button class="feature-card feature-community" type="button" data-page="community">
-            <span class="feature-icon"><svg><use href="/assets/icons.svg#profile"></use></svg></span><span class="feature-title">Сообщество</span><span class="feature-description">Рейтинги, поддержка и данные</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
-          </button>
-          <button class="feature-card feature-admin admin-card" type="button" data-page="admin" hidden>
-            <span class="feature-icon"><svg><use href="/assets/icons.svg#settings"></use></svg></span><span class="feature-title">Управление</span><span class="feature-description">Инструменты администратора</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
+          <button class="feature-card game-feature game-feature-wheel" type="button" data-page="wheel">
+            <span class="game-feature-symbol">◉</span><span class="feature-title">Колесо удачи</span><span class="feature-description">Испытай удачу и получи баннер в коллекцию</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
         </div>
-        <p class="subtle-note">Бот и его команды остаются доступны в чате.</p>
+        <p class="subtle-note">Команды и привычные функции бота по-прежнему доступны в чате Telegram.</p>
+      </section>
+
+      <section class="page" id="page-rooms" aria-labelledby="rooms-title" hidden>
+        <div class="page-intro"><span class="eyebrow">ПОДКИДНОЙ ДУРАК · 36 КАРТ</span><h2 id="rooms-title">Карточная комната</h2><p>Создай стол для друзей или присоединись к игре по коду комнаты. Если партия затянется на 120 раундов, проиграет игрок с наибольшим числом карт.</p></div>
+        <div id="room-lobby">
+          <div class="games-room-forms">
+            <form class="panel game-form" id="room-create-form">
+              <span class="eyebrow">ТВОЙ СТОЛ — ТВОИ ПРАВИЛА</span><h3>Создать комнату</h3>
+              <label class="select-field"><span>Количество игроков</span><select name="max_players"><option value="2">2 игрока</option><option value="3">3 игрока</option><option value="4">4 игрока</option></select></label>
+              <button class="button button-primary" type="submit">Создать стол</button>
+            </form>
+            <form class="panel game-form" id="room-join-form">
+              <span class="eyebrow">ТЕБЯ УЖЕ ЖДУТ</span><h3>Войти по коду</h3>
+              <label class="select-field"><span>Код комнаты</span><input name="room_code" type="text" minlength="6" maxlength="6" placeholder="Например, A7K9Q2" autocomplete="off" required></label>
+              <button class="button button-quiet" type="submit">Присоединиться</button>
+            </form>
+          </div>
+          <div class="section-head"><div><span class="eyebrow">ВОЗВРАТ К ИГРЕ</span><h2>Твои комнаты</h2></div><button class="icon-button" id="rooms-refresh" type="button" aria-label="Обновить комнаты"><svg><use href="/assets/icons.svg#refresh"></use></svg></button></div>
+          <div class="game-room-list" id="game-room-list" aria-live="polite"><div class="panel game-empty">Загружаем комнаты…</div></div>
+        </div>
+
+        <section class="panel room-panel" id="room-view" hidden aria-live="polite">
+          <div class="room-heading">
+            <div><span class="eyebrow" id="room-status-label">КОМНАТА</span><h3>Стол <button class="room-code-copy" id="room-code-label" type="button" aria-label="Скопировать код комнаты"></button></h3></div>
+            <button class="button button-quiet" id="room-back" type="button">К комнатам</button>
+          </div>
+          <div class="room-content">
+            <div>
+              <div class="room-players" id="room-players"></div>
+              <form class="room-invite-form" id="room-invite-form">
+                <label class="select-field"><span>Пригласить по Telegram username</span><input name="username" type="text" maxlength="33" placeholder="@username" required></label>
+                <button class="button button-quiet" type="submit">Отправить приглашение</button>
+              </form>
+              <button class="button button-primary room-start-button" id="room-start" type="button" hidden>Начать игру</button>
+              <p class="muted room-help" id="room-help">Отправь код друзьям — они смогут войти в комнату из Mini App.</p>
+            </div>
+            <div class="card-table" id="card-table" hidden>
+              <div class="table-meta"><span id="deck-count">Колода: —</span><span class="trump-badge" id="trump-badge"></span></div>
+              <div class="table-opponents" id="table-opponents"></div>
+              <div class="table-cards" id="table-cards"><p class="table-empty">Стол пока пуст</p></div>
+              <div class="table-turn" id="table-turn" aria-live="polite"></div>
+              <div class="player-hand" id="player-hand"></div>
+              <div class="table-actions" id="table-actions"></div>
+            </div>
+          </div>
+          <p class="room-winner" id="room-winner" hidden></p>
+        </section>
+      </section>
+
+      <section class="page" id="page-tarot" aria-labelledby="tarot-title" hidden>
+        <div class="page-intro"><span class="eyebrow">ОДИН РАСКЛАД В МОСКОВСКИЕ СУТКИ</span><h2 id="tarot-title">Таро дня</h2><p>Сформулируй вопрос, выбери направление мысли — и открой три карты. Это символическая подсказка, не предсказание.</p></div>
+        <form class="panel tarot-form" id="tarot-form">
+          <label class="field-label" for="tarot-question">Что тебя волнует?</label>
+          <textarea id="tarot-question" name="question" maxlength="300" minlength="3" placeholder="Напиши вопрос своими словами…" required></textarea>
+          <div class="tarot-form-footer"><span id="tarot-availability">Загружаем состояние расклада…</span><button class="button button-primary" id="tarot-submit" type="submit" disabled>Открыть карты</button></div>
+        </form>
+        <section class="tarot-result" id="tarot-result" hidden aria-live="polite">
+          <div class="section-head"><div><span class="eyebrow">ТВОЙ РАСКЛАД</span><h2>Три взгляда на вопрос</h2></div></div>
+          <div class="tarot-cards" id="tarot-cards"></div>
+          <article class="panel tarot-interpretation"><span class="eyebrow">ТОЛКОВАНИЕ</span><p id="tarot-interpretation"></p></article>
+        </section>
       </section>
 
       <section class="page" id="page-wheel" aria-labelledby="wheel-title" hidden>
@@ -97,7 +143,7 @@
                 <button class="wheel-option" type="button" data-spins="10">Пакет ×10<span id="wheel-ten-cost">—</span></button>
               </div>
               <button class="button button-primary wheel-spin-button" id="wheel-spin" type="button" disabled>Крутить</button>
-              <button class="button button-quiet wheel-inventory-link" type="button" data-page="profile">Открыть инвентарь</button>
+              <p class="wheel-inventory-note">Баннеры зачисляются в коллекцию бота.</p>
             </article>
             <article class="panel wheel-odds">
               <div class="section-head"><div><span class="eyebrow">ЧЕСТНЫЕ ШАНСЫ</span><h3>Редкость приза</h3></div></div>
@@ -111,177 +157,15 @@
         </section>
       </section>
 
-      <section class="page" id="page-profile" aria-labelledby="profile-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ТВОЙ АККАУНТ</span><h2 id="profile-title">Профиль</h2><p>Личная карточка и активность в группах.</p></div>
-        <div class="profile-layout">
-          <article class="panel profile-card">
-            <div class="profile-top"><span class="profile-avatar"><svg><use href="/assets/icons.svg#profile"></use></svg></span><div><h3 id="profile-name">Загружаем профиль…</h3><p class="muted" id="profile-username"></p></div></div>
-            <div class="profile-details" id="profile-details"></div>
-          </article>
-          <article class="panel balance-card"><span class="eyebrow">ИГРОВОЙ БАЛАНС</span><strong class="balance-value" id="profile-balance">—</strong><span class="muted">монет</span><span class="balance-spark" aria-hidden="true"><svg><use href="/assets/icons.svg#spark"></use></svg></span></article>
-        </div>
-        <form class="panel profile-edit-form" id="profile-edit-form">
-          <div><span class="eyebrow">НАСТРОЙКИ ПРОФИЛЯ</span><h3>Обновить сведения</h3><p class="muted">Изменения видны в профиле во всех группах с Юбарой. Пустые поля останутся без изменений.</p></div>
-          <div class="profile-edit-fields">
-            <label class="select-field"><span>Кличка</span><input name="callsign" type="text" maxlength="80" placeholder="Например, Лунный странник"></label>
-            <label class="select-field"><span>Возраст</span><input name="age" type="number" min="1" max="120" step="1" inputmode="numeric" placeholder="Возраст"></label>
-            <label class="select-field"><span>Пол</span><select name="gender"><option value="">Не менять</option><option value="парень">Парень</option><option value="девушка">Девушка</option></select></label>
-            <label class="select-field profile-note-field"><span>Добавить факт</span><input name="note" type="text" maxlength="500" placeholder="Новый факт о себе"></label>
-          </div>
-          <button class="button button-primary" type="submit">Сохранить изменения</button>
-        </form>
-        <section class="profile-notes panel" id="profile-notes" hidden>
-          <span class="eyebrow">СОХРАНЁННЫЕ ФАКТЫ</span>
-          <ul id="profile-note-list"></ul>
-        </section>
-        <div class="section-head"><div><span class="eyebrow">ТВОЯ КОЛЛЕКЦИЯ</span><h2>Инвентарь баннеров</h2></div><span class="result-count" id="inventory-count"></span></div>
-        <section class="panel inventory-carousel" id="inventory-carousel" aria-label="Инвентарь баннеров">
-          <div class="inventory-art" id="inventory-art">
-            <svg aria-hidden="true"><use href="/assets/icons.svg#mark"></use></svg>
-            <span class="inventory-level" id="inventory-level"></span>
-          </div>
-          <div class="inventory-details">
-            <div class="inventory-heading"><div><span class="eyebrow">БАННЕР КОЛЛЕКЦИИ</span><h3 id="inventory-title">Загружаем инвентарь…</h3></div><span class="inventory-status" id="inventory-status"></span></div>
-            <p class="muted" id="inventory-description"></p>
-            <div class="inventory-controls">
-              <div class="carousel-navigation"><button class="button button-quiet carousel-button" id="inventory-prev" type="button" aria-label="Предыдущий баннер"><svg><use href="/assets/icons.svg#arrow"></use></svg></button><span id="inventory-position" aria-live="polite">—</span><button class="button button-quiet carousel-button" id="inventory-next" type="button" aria-label="Следующий баннер"><svg><use href="/assets/icons.svg#arrow"></use></svg></button></div>
-              <div class="inventory-action-buttons">
-                <button class="button button-primary" id="inventory-activate" type="button" disabled>Сделать активным</button>
-                <button class="button button-quiet inventory-recycle" id="inventory-recycle" type="button" disabled><svg aria-hidden="true"><use href="/assets/icons.svg#recycle"></use></svg><span id="inventory-recycle-label">Переработать</span></button>
-              </div>
-            </div>
-          </div>
-        </section>
-        <div class="section-head"><div><span class="eyebrow">ОБМЕН КОЛЛЕКЦИЕЙ</span><h2>Передачи баннеров</h2></div></div>
-        <div class="transfer-layout">
-          <form class="panel transfer-form" id="inventory-transfer-form">
-            <span class="eyebrow">ТЕКУЩИЙ БАННЕР</span>
-            <h3 id="transfer-item-title">Выбери баннер в карусели</h3>
-            <label class="field-label" for="transfer-recipient">Telegram ID или username получателя</label>
-            <input class="transfer-recipient" id="transfer-recipient" name="recipient" type="text" maxlength="33" placeholder="@username или 123456789" autocomplete="off" required>
-            <p class="muted">Передача завершится только после подтверждения получателем. Пользователь должен быть известен боту.</p>
-            <button class="button button-primary" id="inventory-transfer-submit" type="submit" disabled>Отправить запрос</button>
-          </form>
-          <div class="transfer-lists">
-            <section class="panel transfer-list-panel" aria-labelledby="incoming-transfers-title">
-              <div class="transfer-list-heading"><div><span class="eyebrow">ОЖИДАЮТ ТВОЕГО РЕШЕНИЯ</span><h3 id="incoming-transfers-title">Входящие</h3></div><span class="result-count" id="incoming-transfer-count">0</span></div>
-              <div class="transfer-list" id="incoming-transfers" aria-live="polite"></div>
-            </section>
-            <section class="panel transfer-list-panel" aria-labelledby="outgoing-transfers-title">
-              <div class="transfer-list-heading"><div><span class="eyebrow">ОЖИДАЮТ ПОДТВЕРЖДЕНИЯ</span><h3 id="outgoing-transfers-title">Исходящие</h3></div><span class="result-count" id="outgoing-transfer-count">0</span></div>
-              <div class="transfer-list" id="outgoing-transfers" aria-live="polite"></div>
-            </section>
-          </div>
-        </div>
-        <div class="section-head"><div><span class="eyebrow">АКТИВНОСТЬ</span><h2>Сообщения в группах</h2></div></div>
-        <div class="stats-grid" id="profile-activity"><div class="panel stat-card">Загружаем статистику…</div></div>
-      </section>
-
-      <section class="page" id="page-market" aria-labelledby="market-title" hidden>
-        <div class="page-intro"><span class="eyebrow">КОЛЛЕКЦИЯ ЮБАРЫ</span><h2 id="market-title">Площадка</h2><p>Подбери баннер для своей коллекции.</p></div>
-        <form class="filters panel" id="market-filters">
-          <label class="search-field"><svg><use href="/assets/icons.svg#search"></use></svg><input name="q" type="search" maxlength="64" placeholder="Название, редкость или seed" autocomplete="off"></label>
-          <label class="select-field"><span>Редкость</span><select name="level"><option value="all">Все уровни</option><option value="1">I · обычный</option><option value="2">II · необычный</option><option value="3">III · редкий</option><option value="4">IV · эпический</option><option value="5">V · элитный</option><option value="6">VI · легендарный</option></select></label>
-          <label class="select-field"><span>Сортировка</span><select name="sort"><option value="date">Сначала новые</option><option value="price">Сначала дешевле</option></select></label>
-          <button class="button button-primary filter-submit" type="submit">Найти</button>
-        </form>
-        <div class="section-head market-results-head"><div><span class="eyebrow">ОТКРЫТЫЕ ЛОТЫ</span><h2>Предложения</h2></div><span class="result-count" id="market-count"></span></div>
-        <div class="listing-grid" id="market-listings" aria-live="polite"></div>
-        <div class="pagination"><button class="button button-quiet" id="market-prev" type="button" disabled>Назад</button><span id="market-page-label">Страница 1</span><button class="button button-quiet" id="market-next" type="button" disabled>Дальше</button></div>
-        <div class="section-head"><div><span class="eyebrow">УПРАВЛЕНИЕ ПРОДАЖЕЙ</span><h2>Выставить баннер</h2></div></div>
-        <form class="panel sell-form" id="market-list-form">
-          <label class="select-field"><span>Баннер из инвентаря</span><select name="item_id" id="market-item-select" required><option value="">Загружаем инвентарь…</option></select></label>
-          <label class="select-field"><span>Цена, монет</span><input name="price" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="Например, 25.50" required></label>
-          <label class="select-field"><span>Название лота, необязательно</span><input name="title" type="text" maxlength="48" placeholder="Название до 48 символов"></label>
-          <button class="button button-primary" type="submit">Выставить на продажу</button>
-        </form>
-        <div class="section-head"><div><span class="eyebrow">ТВОИ ОБЪЯВЛЕНИЯ</span><h2>Мои лоты</h2></div></div>
-        <div class="my-lots" id="my-lots"></div>
-      </section>
-
-      <section class="page" id="page-activation" aria-labelledby="activation-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ПОДАРКИ И ДОСТУП</span><h2 id="activation-title">Активация кода</h2><p>Введи полученный код, чтобы применить его к своему аккаунту.</p></div>
-        <div class="activation-layout">
-          <form class="panel activation-form" id="activation-form">
-            <label class="field-label" for="activation-code">Код активации</label>
-            <div class="code-input-wrap"><svg><use href="/assets/icons.svg#key"></use></svg><input id="activation-code" name="code" type="text" maxlength="128" placeholder="YUBARA-…" autocomplete="off" required></div>
-            <button class="button button-primary" type="submit">Активировать <svg><use href="/assets/icons.svg#arrow"></use></svg></button>
-            <p class="form-message" id="activation-message" aria-live="polite"></p>
-          </form>
-          <aside class="panel info-panel"><svg class="info-icon"><use href="/assets/icons.svg#shield"></use></svg><h3>Код привязан к аккаунту</h3><p>Проверь, что Mini App открыт в нужном Telegram-профиле. Каждый код можно применить один раз.</p></aside>
-        </div>
-      </section>
-
-      <section class="page" id="page-community" aria-labelledby="community-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ТВОИ ГРУППЫ</span><h2 id="community-title">Сообщество</h2><p>Смотри рейтинги подключённых групп, отправляй обращение и управляй сохранёнными данными.</p></div>
-        <section class="panel community-leaderboard" aria-labelledby="community-rating-title">
-          <div class="community-heading">
-            <div><span class="eyebrow">АКТИВНОСТЬ И МОНЕТЫ</span><h3 id="community-rating-title">Рейтинг группы</h3></div>
-            <button class="icon-button" id="community-refresh" type="button" aria-label="Обновить рейтинг"><svg><use href="/assets/icons.svg#refresh"></use></svg></button>
-          </div>
-          <div class="community-filters">
-            <label class="select-field"><span>Группа</span><select id="community-group" required><option value="">Загружаем группы…</option></select></label>
-            <label class="select-field"><span>Рейтинг</span><select id="community-mode"><option value="activity">Сообщения</option><option value="coins">Монеты</option></select></label>
-            <label class="select-field" id="community-period-field"><span>Период</span><select id="community-period"><option value="d">Сегодня</option><option value="w">За неделю</option><option value="m">За месяц</option></select></label>
-            <button class="button button-primary" id="community-load" type="button">Показать</button>
-          </div>
-          <p class="community-message" id="community-message" aria-live="polite">Выбери группу, чтобы открыть рейтинг.</p>
-          <ol class="community-ranking" id="community-ranking" aria-live="polite"></ol>
-        </section>
-        <div class="community-tools">
-          <form class="panel community-image" id="community-image-form">
-            <span class="eyebrow">ТВОРЧЕСТВО</span><h3>Создать изображение</h3>
-            <p class="muted">Опиши идею здесь. Юбара пришлёт запрос в личный чат, где можно выбрать настройки и запустить генерацию.</p>
-            <label class="field-label" for="community-image-prompt">Описание изображения</label>
-            <textarea id="community-image-prompt" name="prompt" maxlength="1500" rows="4" required placeholder="Например: ночной город под звёздным небом"></textarea>
-            <button class="button button-primary" type="submit">Продолжить в чате</button>
-          </form>
-          <form class="panel community-feedback" id="community-feedback-form">
-            <span class="eyebrow">ОБРАТНАЯ СВЯЗЬ</span><h3>Сообщить об ошибке</h3>
-            <p class="muted">Обращение будет отправлено владельцу бота вместе с твоим Telegram ID.</p>
-            <label class="field-label" for="community-feedback-text">Что произошло?</label>
-            <textarea id="community-feedback-text" name="message" maxlength="3000" rows="5" required placeholder="Опиши, что не работает"></textarea>
-            <div class="community-feedback-footer"><span id="community-feedback-count">0 / 3000</span><button class="button button-primary" type="submit">Отправить</button></div>
-            <p class="form-message" id="community-feedback-message" aria-live="polite"></p>
-          </form>
-          <section class="panel community-privacy">
-            <span class="eyebrow">КОНТРОЛЬ ДАННЫХ</span><h3>Удалить мои данные</h3>
-            <p class="muted">Удалит сохранённые имя, кличку, возраст, пол, факты и статистику сообщений во всех группах. Архивированные сообщения, баланс, инвентарь и покупки не затрагиваются.</p>
-            <button class="button button-quiet" id="community-forget" type="button">Удалить профильные данные</button>
-          </section>
-        </div>
-      </section>
-
-      <section class="page" id="page-admin" aria-labelledby="admin-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ТОЛЬКО ДЛЯ АДМИНИСТРАТОРА</span><h2 id="admin-title">Управление доступом</h2><p>Создавай одноразовые ключи и отзывай неиспользованные.</p></div>
-        <div class="admin-summary">
-          <article class="panel summary-card"><span class="eyebrow">АДМИНИСТРАТОРЫ</span><strong id="admin-count">—</strong></article>
-          <article class="panel summary-card"><span class="eyebrow">КОМИССИЯ ПЛОЩАДКИ</span><strong id="admin-fee">—</strong></article>
-        </div>
-        <div class="admin-layout">
-          <form class="panel admin-form" id="admin-key-form">
-            <div class="section-head"><div><span class="eyebrow">НОВЫЙ КЛЮЧ</span><h3>Выдать доступ</h3></div></div>
-            <label class="select-field"><span>Тип доступа</span><select name="access_level"><option value="user">Пользователь</option><option value="admin">Администратор</option><option value="autoresponder">Автоответчик</option></select></label>
-            <label class="select-field"><span>Срок после активации</span><select name="duration_seconds"><option value="86400">1 день</option><option value="604800">7 дней</option><option value="2592000" selected>30 дней</option><option value="31536000">1 год</option><option value="permanent">Без срока</option></select></label>
-            <button class="button button-primary" type="submit">Создать одноразовый ключ</button>
-            <div class="generated-key" id="generated-key" hidden></div>
-          </form>
-          <div class="panel key-list-panel"><div class="section-head"><div><span class="eyebrow">ОЖИДАЮТ АКТИВАЦИИ</span><h3>Активные ключи</h3></div><button class="icon-button" id="admin-refresh" type="button" aria-label="Обновить список"><svg><use href="/assets/icons.svg#refresh"></use></svg></button></div><div id="admin-keys" class="admin-keys"></div></div>
-        </div>
-      </section>
-
-      <footer class="footer"><span>ЮБАРА</span><span>Твоя вселенная в Telegram</span></footer>
+      <footer class="footer"><span>ЮБАРА</span><span>Твоя следующая игра уже здесь</span></footer>
     </main>
   </div>
 
-  <nav class="mobile-nav" aria-label="Основная навигация">
-    <button class="mobile-nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Главная</span></button>
-    <button class="mobile-nav-item" type="button" data-page="profile"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Профиль</span></button>
+  <nav class="mobile-nav" aria-label="Игры">
+    <button class="mobile-nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Игры</span></button>
+    <button class="mobile-nav-item" type="button" data-page="rooms"><span class="nav-symbol">♠</span><span>Карты</span></button>
+    <button class="mobile-nav-item" type="button" data-page="tarot"><span class="nav-symbol">✦</span><span>Таро</span></button>
     <button class="mobile-nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
-    <button class="mobile-nav-item" type="button" data-page="market"><svg><use href="/assets/icons.svg#market"></use></svg><span>Площадка</span></button>
-    <button class="mobile-nav-item" type="button" data-page="community"><svg><use href="/assets/icons.svg#profile"></use></svg><span>Ещё</span></button>
-    <button class="mobile-nav-item" type="button" data-page="activation"><svg><use href="/assets/icons.svg#key"></use></svg><span>Код</span></button>
-    <button class="mobile-nav-item admin-nav" type="button" data-page="admin" hidden><svg><use href="/assets/icons.svg#settings"></use></svg><span>Админ</span></button>
   </nav>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>

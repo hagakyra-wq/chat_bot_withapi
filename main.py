@@ -144,11 +144,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
         "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
         "/assets/api.js": ("api.js", "text/javascript; charset=utf-8"),
-        "/assets/profile.js": ("profile.js", "text/javascript; charset=utf-8"),
-        "/assets/market.js": ("market.js", "text/javascript; charset=utf-8"),
-        "/assets/activation.js": ("activation.js", "text/javascript; charset=utf-8"),
-        "/assets/admin.js": ("admin.js", "text/javascript; charset=utf-8"),
-        "/assets/community.js": ("community.js", "text/javascript; charset=utf-8"),
+        "/assets/games.js": ("games.js", "text/javascript; charset=utf-8"),
         "/assets/wheel.js": ("wheel.js", "text/javascript; charset=utf-8"),
         "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
     }
@@ -282,7 +278,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
         parsed_url = urlsplit(self.path)
         if parsed_url.path == "/api/session" and method == "POST":
-            coroutine = miniapp_api.get_session(user_id, first_name)
+            coroutine = miniapp_api.get_session(user_id, first_name, username)
         else:
             coroutine = miniapp_api.dispatch(
                 method,

@@ -1,32 +1,18 @@
 import { apiRequest, showToast } from "./api.js";
-import { initActivation } from "./activation.js";
-import { initAdmin, loadAdmin } from "./admin.js";
-import { initCommunity } from "./community.js";
-import { initMarket, loadMarket } from "./market.js";
-import { loadProfile } from "./profile.js";
+import { initGames, loadRooms, loadTarot, setGamesPageActive } from "./games.js";
 import { initWheel, loadWheel } from "./wheel.js";
 
 const webApp = window.Telegram?.WebApp;
 const pageTitles = {
-  home: "Главная",
-  profile: "Профиль",
+  home: "Игры",
+  rooms: "Карточная комната",
+  tarot: "Таро дня",
   wheel: "Колесо удачи",
-  market: "Площадка",
-  community: "Сообщество",
-  activation: "Активация",
-  admin: "Управление",
 };
-
-let isAdmin = false;
 let activePage = "home";
-let marketInitialized = false;
-let wheelInitialized = false;
-let activationInitialized = false;
-let adminInitialized = false;
-let communityInitialized = false;
 
 function showPage(pageName) {
-  if (!pageTitles[pageName] || (pageName === "admin" && !isAdmin)) return;
+  if (!pageTitles[pageName]) return;
   activePage = pageName;
   for (const [name] of Object.entries(pageTitles)) {
     const page = document.getElementById(`page-${name}`);
@@ -40,21 +26,19 @@ function showPage(pageName) {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
+  setGamesPageActive(pageName === "rooms");
   if (webApp?.BackButton) {
     if (pageName === "home") webApp.BackButton.hide();
     else webApp.BackButton.show();
   }
 
   const loaders = {
-    profile: loadProfile,
+    rooms: loadRooms,
+    tarot: loadTarot,
     wheel: loadWheel,
-    market: loadMarket,
-    admin: loadAdmin,
   };
   const loader = loaders[pageName];
-  if (loader) {
-    loader().catch((error) => showToast(error.message, true));
-  }
+  if (loader) loader().catch((error) => showToast(error.message, true));
 }
 
 async function connectTelegram() {
@@ -72,15 +56,7 @@ async function connectTelegram() {
       body: { initData: webApp.initData },
     });
     accountName.textContent = session.first_name || `ID ${session.user_id}`;
-    isAdmin = session.role === "admin";
-    accountRole.textContent = isAdmin ? "Администратор" : "Пользователь";
-    if (isAdmin) {
-      document.querySelectorAll(".admin-nav, .admin-card").forEach((item) => {
-        item.hidden = false;
-      });
-      initAdmin();
-      adminInitialized = true;
-    }
+    accountRole.textContent = "Игровой профиль";
   } catch (error) {
     accountName.textContent = "Не удалось проверить";
     accountRole.textContent = "Открой Mini App из Telegram";
@@ -88,44 +64,15 @@ async function connectTelegram() {
   }
 }
 
-function initNavigation() {
-  document.querySelectorAll("[data-page]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      const pageName = button.dataset.page;
-      if (pageName === "market" && !marketInitialized) {
-        initMarket();
-        marketInitialized = true;
-      }
-      if (pageName === "wheel" && !wheelInitialized) {
-        initWheel();
-        wheelInitialized = true;
-      }
-      if (pageName === "activation" && !activationInitialized) {
-        initActivation();
-        activationInitialized = true;
-      }
-      if (pageName === "community" && !communityInitialized) {
-        initCommunity();
-        communityInitialized = true;
-      }
-      if (pageName === "admin" && (!isAdmin || !adminInitialized)) return;
-      showPage(pageName);
-    });
-  });
-  webApp?.BackButton?.onClick(() => showPage("home"));
-}
-
 webApp?.ready();
 webApp?.expand();
-initNavigation();
+initGames();
+initWheel();
+document.querySelectorAll("[data-page]").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    showPage(button.dataset.page);
+  });
+});
+webApp?.BackButton?.onClick(() => showPage("home"));
 connectTelegram();
-window.addEventListener("miniapp:market-updated", () => {
-  if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
-});
-window.addEventListener("miniapp:casino-updated", () => {
-  if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
-});
-window.addEventListener("miniapp:profile-updated", () => {
-  if (activePage === "profile") loadProfile().catch((error) => showToast(error.message, true));
-});

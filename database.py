@@ -328,6 +328,32 @@ async def initialize() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_bonus_claims_user
                     ON bonus_claims(user_id, claim_id DESC);
+                CREATE TABLE IF NOT EXISTS minigame_rooms (
+                    room_code TEXT PRIMARY KEY,
+                    owner_id INTEGER NOT NULL,
+                    max_players INTEGER NOT NULL CHECK(max_players BETWEEN 2 AND 4),
+                    status TEXT NOT NULL CHECK(status IN ('lobby', 'playing', 'finished')),
+                    state_json TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+                );
+                CREATE TABLE IF NOT EXISTS minigame_room_players (
+                    room_code TEXT NOT NULL REFERENCES minigame_rooms(room_code) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL,
+                    PRIMARY KEY (room_code, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_minigame_room_players_user
+                    ON minigame_room_players(user_id, room_code);
+                CREATE TABLE IF NOT EXISTS tarot_readings (
+                    user_id INTEGER NOT NULL,
+                    reading_date TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    cards_json TEXT NOT NULL,
+                    interpretation TEXT,
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'complete')),
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                    PRIMARY KEY (user_id, reading_date)
+                );
                 CREATE TRIGGER IF NOT EXISTS dirty_banner_items_insert
                 AFTER INSERT ON banner_items BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
@@ -1748,6 +1774,343 @@ async def find_user_id_by_username(username: str) -> int | None:
         )
         row = await cursor.fetchone()
     return int(row["user_id"]) if row is not None else None
+
+
+async def upsert_global_profile_identity(
+    user_id: int,
+    username: str | None,
+    display_name: str,
+) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            changed = False
+            if username is not None:
+                cursor = await db.execute(
+                    """
+                    UPDATE global_profiles SET username = NULL
+                    WHERE lower(username) = lower(?) AND user_id != ?
+                    """,
+                    (username, user_id),
+                )
+                changed = cursor.rowcount > 0
+            cursor = await db.execute(
+                """
+                INSERT INTO global_profiles(user_id, username, display_name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    display_name = COALESCE(excluded.display_name, global_profiles.display_name)
+                WHERE
+                    global_profiles.username IS NOT excluded.username
+                    OR (excluded.display_name IS NOT NULL
+                        AND global_profiles.display_name IS NOT excluded.display_name)
+                """,
+                (user_id, username, display_name),
+            )
+            await db.commit()
+        if changed or cursor.rowcount:
+            _record_write()
+
+
+async def create_minigame_room(
+    room_code: str,
+    owner_id: int,
+    max_players: int,
+    state: dict[str, Any],
+) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO minigame_rooms(
+                        room_code, owner_id, max_players, status, state_json
+                    ) VALUES (?, ?, ?, 'lobby', ?)
+                    """,
+                    (room_code, owner_id, max_players, json.dumps(state)),
+                )
+                await db.execute(
+                    "INSERT INTO minigame_room_players(room_code, user_id) VALUES (?, ?)",
+                    (room_code, owner_id),
+                )
+                await db.commit()
+            except sqlite3.IntegrityError:
+                await db.rollback()
+                return False
+        _record_write()
+    return True
+
+
+async def get_minigame_room(room_code: str) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT room_code, owner_id, max_players, status, state_json, version
+            FROM minigame_rooms WHERE room_code = ?
+            """,
+            (room_code,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "room_code": str(row["room_code"]),
+        "owner_id": int(row["owner_id"]),
+        "max_players": int(row["max_players"]),
+        "status": str(row["status"]),
+        "state": json.loads(str(row["state_json"])),
+        "version": int(row["version"]),
+    }
+
+
+async def list_minigame_rooms(user_id: int) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT r.room_code, r.owner_id, r.max_players, r.status,
+                   r.state_json, r.version
+            FROM minigame_rooms r
+            JOIN minigame_room_players p ON p.room_code = r.room_code
+            WHERE p.user_id = ? AND r.status != 'finished'
+            ORDER BY r.created_at DESC
+            """,
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+    return [
+        {
+            "room_code": str(row["room_code"]),
+            "owner_id": int(row["owner_id"]),
+            "max_players": int(row["max_players"]),
+            "status": str(row["status"]),
+            "state": json.loads(str(row["state_json"])),
+            "version": int(row["version"]),
+        }
+        for row in rows
+    ]
+
+
+async def join_minigame_room(
+    room_code: str,
+    user_id: int,
+    display_name: str,
+    username: str | None,
+) -> tuple[str, dict[str, Any] | None]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                SELECT max_players, status, state_json, version
+                FROM minigame_rooms WHERE room_code = ?
+                """,
+                (room_code,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await db.rollback()
+                return "missing", None
+            if row["status"] != "lobby":
+                await db.rollback()
+                return "started", None
+            state = json.loads(str(row["state_json"]))
+            if any(int(player["user_id"]) == user_id for player in state["players"]):
+                await db.rollback()
+                return "already_joined", {
+                    "state": state,
+                    "version": int(row["version"]),
+                    "status": str(row["status"]),
+                }
+            if len(state["players"]) >= int(row["max_players"]):
+                await db.rollback()
+                return "full", None
+            state["players"].append(
+                {
+                    "user_id": user_id,
+                    "display_name": display_name[:80],
+                    "username": username,
+                    "hand": [],
+                }
+            )
+            await db.execute(
+                """
+                UPDATE minigame_rooms
+                SET state_json = ?, version = version + 1
+                WHERE room_code = ?
+                """,
+                (json.dumps(state), room_code),
+            )
+            await db.execute(
+                "INSERT INTO minigame_room_players(room_code, user_id) VALUES (?, ?)",
+                (room_code, user_id),
+            )
+            await db.commit()
+        _record_write()
+    return "joined", {
+        "state": state,
+        "version": int(row["version"]) + 1,
+        "status": str(row["status"]),
+    }
+
+
+async def update_minigame_room(
+    room_code: str,
+    user_id: int,
+    version: int,
+    status: str,
+    state: dict[str, Any],
+) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                SELECT version FROM minigame_rooms
+                WHERE room_code = ?
+                  AND EXISTS (
+                      SELECT 1 FROM minigame_room_players
+                      WHERE room_code = ? AND user_id = ?
+                  )
+                """,
+                (room_code, room_code, user_id),
+            )
+            row = await cursor.fetchone()
+            if row is None or int(row["version"]) != version:
+                await db.rollback()
+                return False
+            cursor = await db.execute(
+                """
+                UPDATE minigame_rooms
+                SET state_json = ?, status = ?, version = version + 1
+                WHERE room_code = ? AND version = ?
+                """,
+                (json.dumps(state), status, room_code, version),
+            )
+            await db.commit()
+        if cursor.rowcount:
+            _record_write()
+    return cursor.rowcount == 1
+
+
+async def reserve_tarot_reading(
+    user_id: int,
+    reading_date: str,
+    question: str,
+    cards: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any]]:
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute(
+                """
+                DELETE FROM tarot_readings
+                WHERE reading_date < ?
+                   OR (status = 'pending'
+                       AND created_at < datetime('now', '+3 hours', '-10 minutes'))
+                """,
+                (reading_date,),
+            )
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO tarot_readings(
+                        user_id, reading_date, question, cards_json, status
+                    ) VALUES (?, ?, ?, ?, 'pending')
+                    """,
+                    (user_id, reading_date, question, json.dumps(cards, ensure_ascii=False)),
+                )
+                await db.commit()
+                created = True
+                row = None
+            except sqlite3.IntegrityError:
+                await db.rollback()
+                cursor = await db.execute(
+                    """
+                    SELECT question, cards_json, interpretation, status, reading_date
+                    FROM tarot_readings WHERE user_id = ? AND reading_date = ?
+                    """,
+                    (user_id, reading_date),
+                )
+                row = await cursor.fetchone()
+                created = False
+        if created:
+            _record_write()
+    if created:
+        return True, {
+            "question": question,
+            "cards": cards,
+            "interpretation": None,
+            "status": "pending",
+            "reading_date": reading_date,
+        }
+    if row is None:
+        raise sqlite3.DatabaseError("Не удалось прочитать сохранённый расклад Таро.")
+    return False, {
+        "question": str(row["question"]),
+        "cards": json.loads(str(row["cards_json"])),
+        "interpretation": row["interpretation"],
+        "status": str(row["status"]),
+        "reading_date": str(row["reading_date"]),
+    }
+
+
+async def get_tarot_reading(
+    user_id: int,
+    reading_date: str,
+) -> dict[str, Any] | None:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT question, cards_json, interpretation, status, reading_date
+            FROM tarot_readings WHERE user_id = ? AND reading_date = ?
+            """,
+            (user_id, reading_date),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "question": str(row["question"]),
+        "cards": json.loads(str(row["cards_json"])),
+        "interpretation": row["interpretation"],
+        "status": str(row["status"]),
+        "reading_date": str(row["reading_date"]),
+    }
+
+
+async def complete_tarot_reading(
+    user_id: int,
+    reading_date: str,
+    interpretation: str,
+) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE tarot_readings SET interpretation = ?, status = 'complete'
+                WHERE user_id = ? AND reading_date = ? AND status = 'pending'
+                """,
+                (interpretation, user_id, reading_date),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise sqlite3.DatabaseError("Расклад Таро больше недоступен для завершения.")
+            await db.commit()
+        _record_write()
+
+
+async def remove_pending_tarot_reading(user_id: int, reading_date: str) -> None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                DELETE FROM tarot_readings
+                WHERE user_id = ? AND reading_date = ? AND status = 'pending'
+                """,
+                (user_id, reading_date),
+            )
+            await db.commit()
+        if cursor.rowcount:
+            _record_write()
 
 
 async def ensure_user(
