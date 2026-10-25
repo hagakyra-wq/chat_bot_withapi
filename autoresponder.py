@@ -27,6 +27,9 @@ _DEFAULT_NIGHT_MESSAGE = (
 _application: Application | None = None
 _private_event_builders: dict[int, events.NewMessage] = {}
 _private_event_handlers: dict[int, Any] = {}
+_outgoing_event_builders: dict[int, events.NewMessage] = {}
+_outgoing_event_handlers: dict[int, Any] = {}
+_last_global_outgoing: dict[int, datetime] = {}
 _night_job_running = False
 _night_job_lock = asyncio.Lock()
 _private_chat_locks: dict[int, asyncio.Lock] = {}
@@ -126,6 +129,36 @@ async def _last_outgoing_message(
     async for message in client.iter_messages(chat_id, limit=1, from_user="me"):
         return _message_datetime(message)
     return None
+
+
+async def _last_global_outgoing_message(
+    client: TelegramClient,
+    now_utc: datetime,
+) -> datetime | None:
+    cutoff = now_utc - _PRIVATE_REPLY_INTERVAL
+    latest_outgoing: datetime | None = None
+    async for dialog in client.iter_dialogs(limit=None):
+        latest_message = dialog.message
+        if latest_message is None or _message_datetime(latest_message) < cutoff:
+            continue
+        outgoing = await _last_outgoing_message(client, dialog.id)
+        if outgoing is None or outgoing < cutoff or outgoing > now_utc:
+            continue
+        if latest_outgoing is None or outgoing > latest_outgoing:
+            latest_outgoing = outgoing
+    return latest_outgoing
+
+
+async def _on_outgoing_message(
+    user_id: int,
+    event: events.NewMessage.Event,
+) -> None:
+    if not event.out:
+        return
+    message_date = _message_datetime(event.message)
+    last_outgoing = _last_global_outgoing.get(user_id)
+    if last_outgoing is None or message_date > last_outgoing:
+        _last_global_outgoing[user_id] = message_date
 
 
 async def _evening_user_messages(
@@ -327,13 +360,14 @@ async def _on_private_message(
                 return
 
             now_utc = datetime.now(timezone.utc)
-            last_outgoing = await _last_outgoing_message(client, chat_id)
+            last_outgoing = _last_global_outgoing.get(user_id)
             if (
                 last_outgoing is not None
                 and now_utc - last_outgoing <= _PRIVATE_REPLY_INTERVAL
             ):
                 logging.info(
-                    "Автоответ пропущен: исходящее сообщение в этом чате было %s "
+                    "Автоответ пропущен: последнее исходящее сообщение аккаунта "
+                    "в Telegram было %s "
                     "минут назад user_id=%s chat_id=%s.",
                     round((now_utc - last_outgoing).total_seconds() / 60, 2),
                     user_id,
@@ -365,13 +399,43 @@ async def _on_private_message(
 
 
 async def refresh_user_client(user_id: int = ADMIN_ID) -> None:
-    """Подключает обработчик личных входящих для активной user-сессии."""
+    """Подключает обработчики глобальной активности для активной user-сессии."""
     client = personal_account.get_authorized_client(user_id)
     if client is None:
         await stop_user_client(user_id)
         return
-    if user_id in _private_event_handlers:
+    if (
+        user_id in _private_event_handlers
+        and user_id in _outgoing_event_handlers
+    ):
         return
+    if user_id in _private_event_handlers or user_id in _outgoing_event_handlers:
+        await stop_user_client(user_id)
+    outgoing_handler = partial(_on_outgoing_message, user_id)
+    outgoing_builder = events.NewMessage(outgoing=True)
+    client.add_event_handler(outgoing_handler, outgoing_builder)
+    _outgoing_event_handlers[user_id] = outgoing_handler
+    _outgoing_event_builders[user_id] = outgoing_builder
+    try:
+        last_outgoing = await _last_global_outgoing_message(
+            client,
+            datetime.now(timezone.utc),
+        )
+    except Exception:
+        client.remove_event_handler(outgoing_handler, outgoing_builder)
+        _outgoing_event_handlers.pop(user_id, None)
+        _outgoing_event_builders.pop(user_id, None)
+        raise
+    observed_outgoing = _last_global_outgoing.get(user_id)
+    if observed_outgoing is not None and (
+        last_outgoing is None or observed_outgoing > last_outgoing
+    ):
+        last_outgoing = observed_outgoing
+    if last_outgoing is None:
+        _last_global_outgoing.pop(user_id, None)
+    else:
+        _last_global_outgoing[user_id] = last_outgoing
+
     handler = partial(_on_private_message, user_id)
     builder = events.NewMessage(incoming=True)
     client.add_event_handler(handler, builder)
@@ -385,6 +449,11 @@ async def stop_user_client(user_id: int = ADMIN_ID) -> None:
     builder = _private_event_builders.pop(user_id, None)
     if client is not None and handler is not None and builder is not None:
         client.remove_event_handler(handler, builder)
+    outgoing_handler = _outgoing_event_handlers.pop(user_id, None)
+    outgoing_builder = _outgoing_event_builders.pop(user_id, None)
+    if client is not None and outgoing_handler is not None and outgoing_builder is not None:
+        client.remove_event_handler(outgoing_handler, outgoing_builder)
+    _last_global_outgoing.pop(user_id, None)
 
 
 async def initialize(application: Application) -> None:
@@ -408,7 +477,13 @@ async def initialize(application: Application) -> None:
                 await personal_account.connect_saved_session(user_id)
             except Exception:
                 logging.exception("Не удалось подключить user-сессию user_id=%s.", user_id)
-            await refresh_user_client(user_id)
+            try:
+                await refresh_user_client(user_id)
+            except Exception:
+                logging.exception(
+                    "Не удалось включить обработчики автоответчика user_id=%s.",
+                    user_id,
+                )
 
 
 async def shutdown() -> None:
