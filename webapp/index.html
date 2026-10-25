@@ -15,116 +15,266 @@
       --muted: var(--tg-theme-hint-color, #9ca3af);
       --accent: var(--tg-theme-button-color, #8b5cf6);
       --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --border: rgb(255 255 255 / 8%);
     }
 
     * { box-sizing: border-box; }
 
     body {
-      margin: 0;
       min-height: 100vh;
-      padding: max(24px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom));
+      margin: 0;
+      padding: max(18px, env(safe-area-inset-top)) 16px calc(88px + env(safe-area-inset-bottom));
       background:
-        radial-gradient(ellipse at 50% -10%, rgb(139 92 246 / 28%), transparent 55%),
+        radial-gradient(ellipse at 50% -10%, rgb(139 92 246 / 24%), transparent 55%),
         var(--bg);
       color: var(--text);
       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
     }
 
-    main { width: min(100%, 520px); margin: 0 auto; }
-
-    .hero {
-      padding: 30px 24px;
-      border: 1px solid rgb(255 255 255 / 8%);
-      border-radius: 28px;
-      background: linear-gradient(145deg, rgb(139 92 246 / 22%), var(--surface));
-      text-align: center;
-    }
-
-    .logo {
-      display: grid;
-      width: 72px;
-      height: 72px;
-      margin: 0 auto 16px;
-      place-items: center;
+    button { color: inherit; font: inherit; }
+    .app { width: min(100%, 560px); margin: 0 auto; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .brand { display: flex; gap: 10px; align-items: center; font-weight: 800; font-size: 19px; }
+    .brand-icon { display: grid; width: 40px; height: 40px; place-items: center; border-radius: 14px; background: var(--accent); }
+    .identity { max-width: 56%; color: var(--muted); font-size: 13px; text-align: right; }
+    .identity strong { color: var(--text); }
+    h1 { margin: 0; font-size: 27px; letter-spacing: -0.04em; }
+    h2 { margin: 26px 2px 12px; font-size: 18px; }
+    p { margin: 8px 0 0; }
+    .muted { color: var(--muted); }
+    .page[hidden], [hidden] { display: none !important; }
+    .hero, .panel {
+      padding: 22px;
+      border: 1px solid var(--border);
       border-radius: 24px;
-      background: var(--accent);
-      font-size: 36px;
+      background: linear-gradient(145deg, rgb(139 92 246 / 18%), var(--surface));
     }
-
-    h1 { margin: 0; font-size: 28px; letter-spacing: -0.04em; }
-    .intro { max-width: 360px; margin: 10px auto 0; color: var(--muted); }
-    h2 { margin: 28px 4px 12px; font-size: 18px; }
-
-    .features { display: grid; gap: 10px; }
-
-    .feature {
+    .hero p { max-width: 420px; color: var(--muted); }
+    .section-heading { margin: 0 0 5px; font-size: 22px; }
+    .grid { display: grid; gap: 10px; }
+    .tile {
       display: flex;
+      width: 100%;
+      min-height: 76px;
       gap: 14px;
       align-items: center;
-      padding: 15px;
-      border: 1px solid rgb(255 255 255 / 7%);
+      padding: 14px;
+      border: 1px solid var(--border);
       border-radius: 18px;
       background: var(--surface);
+      text-align: left;
+      cursor: pointer;
     }
-
-    .icon { font-size: 25px; }
-    .feature strong { display: block; }
-    .feature span:last-child { color: var(--muted); font-size: 14px; }
-
-    button {
+    .tile-icon { font-size: 26px; }
+    .tile-copy { display: grid; gap: 2px; }
+    .tile-copy strong { font-size: 15px; }
+    .tile-copy span { color: var(--muted); font-size: 13px; }
+    .placeholder {
+      margin-top: 18px;
+      padding: 18px;
+      border: 1px dashed rgb(255 255 255 / 18%);
+      border-radius: 18px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .placeholder-icon { display: block; margin-bottom: 8px; font-size: 32px; }
+    .primary {
       width: 100%;
-      margin-top: 22px;
-      padding: 14px 18px;
+      margin-top: 18px;
+      padding: 13px 16px;
       border: 0;
-      border-radius: 16px;
+      border-radius: 15px;
       background: var(--accent);
       color: var(--accent-text);
-      font: inherit;
       font-weight: 700;
       cursor: pointer;
     }
-
-    .note { margin: 14px 8px 0; color: var(--muted); font-size: 13px; text-align: center; }
+    .bottom-nav {
+      position: fixed;
+      z-index: 2;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      display: flex;
+      justify-content: center;
+      gap: 4px;
+      padding: 8px 10px max(8px, env(safe-area-inset-bottom));
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .nav-button {
+      display: grid;
+      flex: 1;
+      width: auto;
+      min-height: 54px;
+      max-width: 100px;
+      place-content: center;
+      gap: 1px;
+      border: 0;
+      border-radius: 14px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .nav-button span:first-child { font-size: 20px; }
+    .nav-button[aria-current="page"] { background: var(--surface); color: var(--text); }
+    @media (min-width: 480px) {
+      .grid.two-column { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <section class="hero">
-      <div class="logo" aria-hidden="true">🌙</div>
-      <h1>Юбара</h1>
-      <p class="intro">Твоя игровая вселенная в Telegram — профили, баннеры и удача.</p>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-icon" aria-hidden="true">🌙</span><span>Юбара</span></div>
+      <div class="identity" id="identity" aria-live="polite">Проверяем аккаунт…</div>
+    </header>
+
+    <section class="page" id="page-home" aria-labelledby="home-title">
+      <div class="hero">
+        <h1 id="home-title">Твоя игровая вселенная</h1>
+        <p>Профиль, коллекция баннеров и приключения — в одном месте.</p>
+      </div>
+      <h2>Разделы</h2>
+      <div class="grid two-column">
+        <button class="tile" type="button" data-page="profile">
+          <span class="tile-icon" aria-hidden="true">👤</span>
+          <span class="tile-copy"><strong>Профиль</strong><span>Информация и статистика</span></span>
+        </button>
+        <button class="tile" type="button" data-page="inventory">
+          <span class="tile-icon" aria-hidden="true">🎨</span>
+          <span class="tile-copy"><strong>Баннеры</strong><span>Твоя коллекция</span></span>
+        </button>
+        <button class="tile" type="button" data-page="market">
+          <span class="tile-icon" aria-hidden="true">🛍️</span>
+          <span class="tile-copy"><strong>Площадка</strong><span>Предметы и обмен</span></span>
+        </button>
+        <button class="tile" type="button" data-page="fortune">
+          <span class="tile-icon" aria-hidden="true">🎡</span>
+          <span class="tile-copy"><strong>Колесо удачи</strong><span>Игры и награды</span></span>
+        </button>
+        <button class="tile" id="admin-tile" type="button" data-page="admin" hidden>
+          <span class="tile-icon" aria-hidden="true">🛠️</span>
+          <span class="tile-copy"><strong>Админ-панель</strong><span>Управление ботом</span></span>
+        </button>
+      </div>
     </section>
 
-    <h2>Что можно делать</h2>
-    <section class="features" aria-label="Возможности бота">
-      <article class="feature">
-        <span class="icon" aria-hidden="true">👤</span>
-        <span><strong>Профиль</strong><span>Статистика и информация о тебе</span></span>
-      </article>
-      <article class="feature">
-        <span class="icon" aria-hidden="true">🎨</span>
-        <span><strong>Баннеры</strong><span>Собирай и настраивай свою коллекцию</span></span>
-      </article>
-      <article class="feature">
-        <span class="icon" aria-hidden="true">🎡</span>
-        <span><strong>Колесо удачи</strong><span>Испытай удачу и получи награды</span></span>
-      </article>
+    <section class="page" id="page-profile" aria-labelledby="profile-title" hidden>
+      <h1 class="section-heading" id="profile-title">Профиль</h1>
+      <p class="muted">Информация о твоём аккаунте.</p>
+      <div class="placeholder"><span class="placeholder-icon" aria-hidden="true">👤</span>Здесь появятся карточка профиля, баланс и статистика.</div>
+      <button class="primary" type="button" data-bot-command="profile">Открыть профиль в чате</button>
     </section>
 
-    <button id="close-app" type="button">Вернуться в чат</button>
-    <p class="note">Разделы пока открываются командами и кнопками в чате с ботом.</p>
+    <section class="page" id="page-inventory" aria-labelledby="inventory-title" hidden>
+      <h1 class="section-heading" id="inventory-title">Мои баннеры</h1>
+      <p class="muted">Коллекция и активный баннер.</p>
+      <div class="placeholder"><span class="placeholder-icon" aria-hidden="true">🎨</span>Здесь появятся предметы инвентаря и действия с ними.</div>
+      <button class="primary" type="button" data-bot-command="inventory">Открыть инвентарь в чате</button>
+    </section>
+
+    <section class="page" id="page-market" aria-labelledby="market-title" hidden>
+      <h1 class="section-heading" id="market-title">Площадка</h1>
+      <p class="muted">Покупка, продажа и обмен предметов.</p>
+      <div class="placeholder"><span class="placeholder-icon" aria-hidden="true">🛍️</span>Здесь появятся каталог, поиск и твои объявления.</div>
+      <button class="primary" type="button" data-bot-command="market">Открыть площадку в чате</button>
+    </section>
+
+    <section class="page" id="page-fortune" aria-labelledby="fortune-title" hidden>
+      <h1 class="section-heading" id="fortune-title">Колесо удачи</h1>
+      <p class="muted">Попробуй удачу и получи награду.</p>
+      <div class="placeholder"><span class="placeholder-icon" aria-hidden="true">🎡</span>Здесь появятся колесо, стоимость игры и результат.</div>
+      <button class="primary" type="button" data-bot-command="fortuna">Играть в чате</button>
+    </section>
+
+    <section class="page" id="page-admin" aria-labelledby="admin-title" hidden>
+      <h1 class="section-heading" id="admin-title">Админ-панель</h1>
+      <p class="muted">Инструменты управления ботом.</p>
+      <div class="placeholder"><span class="placeholder-icon" aria-hidden="true">🛠️</span>Сюда можно добавить управление доступом, ключами и настройками.</div>
+      <button class="primary" type="button" data-bot-command="adm">Открыть админ-панель в чате</button>
+    </section>
   </main>
+
+  <nav class="bottom-nav" aria-label="Основная навигация">
+    <button class="nav-button" type="button" data-page="home" aria-current="page"><span aria-hidden="true">🏠</span><span>Главная</span></button>
+    <button class="nav-button" type="button" data-page="profile"><span aria-hidden="true">👤</span><span>Профиль</span></button>
+    <button class="nav-button" type="button" data-page="inventory"><span aria-hidden="true">🎨</span><span>Баннеры</span></button>
+    <button class="nav-button" type="button" data-page="market"><span aria-hidden="true">🛍️</span><span>Площадка</span></button>
+    <button class="nav-button" type="button" data-page="fortune"><span aria-hidden="true">🎡</span><span>Удача</span></button>
+    <button class="nav-button" id="admin-nav" type="button" data-page="admin" aria-current="false" hidden><span aria-hidden="true">🛠️</span><span>Админ</span></button>
+  </nav>
+
   <script>
     const webApp = window.Telegram?.WebApp;
+    const identity = document.getElementById("identity");
+    const pageIds = ["home", "profile", "inventory", "market", "fortune", "admin"];
+    let isAdmin = false;
+
     webApp?.ready();
     webApp?.expand();
-    document.getElementById("close-app").addEventListener("click", () => {
-      if (webApp) {
-        webApp.close();
-      } else {
-        window.history.back();
+
+    function showPage(pageId) {
+      if (!pageIds.includes(pageId) || (pageId === "admin" && !isAdmin)) return;
+      for (const id of pageIds) {
+        document.getElementById(`page-${id}`).hidden = id !== pageId;
       }
+      document.querySelectorAll(".nav-button[data-page]").forEach((button) => {
+        if (button.hidden) return;
+        if (button.dataset.page === pageId) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      });
+      if (webApp?.BackButton) {
+        if (pageId === "home") webApp.BackButton.hide();
+        else webApp.BackButton.show();
+      }
+    }
+
+    document.querySelectorAll("[data-page]").forEach((button) => {
+      button.addEventListener("click", () => showPage(button.dataset.page));
     });
+
+    webApp?.BackButton?.onClick(() => showPage("home"));
+
+    document.querySelectorAll("[data-bot-command]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const command = button.dataset.botCommand;
+        const message = `Этот раздел пока не подключён. Сейчас используй команду /${command} в чате с ботом.`;
+        if (webApp?.showAlert) webApp.showAlert(message);
+        else identity.textContent = message;
+      });
+    });
+
+    if (!webApp?.initData) {
+      identity.textContent = "Откройте приложение через Telegram.";
+    } else {
+      fetch("/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: webApp.initData }),
+      })
+        .then((response) => {
+          if (!response.ok) throw new Error("Telegram identity verification failed.");
+          return response.json();
+        })
+        .then((session) => {
+          const role = session.role === "admin" ? "администратор" : "пользователь";
+          const name = session.first_name ? `${session.first_name} · ` : "";
+          identity.replaceChildren(
+            document.createTextNode(name),
+            Object.assign(document.createElement("strong"), { textContent: role }),
+          );
+          isAdmin = session.role === "admin";
+          if (isAdmin) {
+            document.getElementById("admin-tile").hidden = false;
+            document.getElementById("admin-nav").hidden = false;
+          }
+        })
+        .catch(() => {
+          identity.textContent = "Не удалось подтвердить аккаунт Telegram.";
+        });
+    }
   </script>
 </body>
 </html>

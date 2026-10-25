@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -9,11 +10,13 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Awaitable
 from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl
 
 from cryptography.fernet import Fernet
 from telegram import MessageReactionUpdated, Update
@@ -84,6 +87,52 @@ from images import create_profile_card, on_image_callback, stop_image_jobs
 from banner_store import stop_banner_render_queue
 
 
+def _validate_web_app_init_data(init_data: str) -> tuple[int, str]:
+    if not init_data or len(init_data) > 4096:
+        raise ValueError("Invalid Telegram initData.")
+
+    try:
+        fields_list = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+        fields = dict(fields_list)
+        if len(fields) != len(fields_list):
+            raise ValueError("Duplicate Telegram initData fields.")
+        received_hash = fields.pop("hash")
+        auth_date = int(fields["auth_date"])
+        user = json.loads(fields["user"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid Telegram initData.") from exc
+
+    if len(received_hash) != 64:
+        raise ValueError("Invalid Telegram initData hash.")
+    try:
+        int(received_hash, 16)
+    except ValueError as exc:
+        raise ValueError("Invalid Telegram initData hash.") from exc
+
+    data_check_string = "\n".join(
+        f"{key}={value}" for key, value in sorted(fields.items())
+    )
+    secret_key = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+    expected_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(received_hash, expected_hash):
+        raise ValueError("Invalid Telegram initData signature.")
+
+    now = int(time.time())
+    if auth_date > now + 60 or now - auth_date > 86_400:
+        raise ValueError("Expired Telegram initData.")
+    if not isinstance(user, dict) or type(user.get("id")) is not int:
+        raise ValueError("Invalid Telegram user.")
+
+    first_name = user.get("first_name", "")
+    if not isinstance(first_name, str):
+        first_name = ""
+    return user["id"], first_name
+
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path in ("/", "/index.html"):
@@ -108,6 +157,53 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_POST(self) -> None:
+        if self.path != "/api/session":
+            self.send_error(404)
+            return
+        if self.headers.get_content_type() != "application/json":
+            self.send_error(415, "Expected application/json")
+            return
+
+        content_length = self.headers.get("Content-Length")
+        try:
+            body_length = int(content_length or "")
+        except ValueError:
+            self.send_error(400, "Invalid Content-Length")
+            return
+        if not 1 <= body_length <= 8192:
+            self.send_error(413, "Invalid request size")
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(body_length))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_error(400, "Invalid JSON")
+            return
+        if not isinstance(payload, dict) or not isinstance(payload.get("initData"), str):
+            self.send_error(400, "Missing Telegram initData")
+            return
+
+        try:
+            user_id, first_name = _validate_web_app_init_data(payload["initData"])
+        except ValueError:
+            self.send_error(401, "Telegram identity could not be verified")
+            return
+
+        response = json.dumps(
+            {
+                "role": "admin" if user_id == ADMIN_ID else "user",
+                "first_name": first_name,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(response)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(response)
 
     def log_message(self, _format: str, *_args: object) -> None:
         del _format, _args
