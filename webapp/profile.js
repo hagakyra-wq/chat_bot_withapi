@@ -13,6 +13,18 @@ let inventoryItems = [];
 let inventoryIndex = 0;
 let inventoryBalanceCents = 0;
 
+function setInventoryLoading(isLoading) {
+  const carousel = document.getElementById("inventory-carousel");
+  if (carousel) carousel.classList.toggle("is-loading", isLoading);
+
+  const controls = document.querySelectorAll(
+    "#inventory-prev, #inventory-next, #inventory-activate, #inventory-recycle, #inventory-transfer-submit",
+  );
+  controls.forEach((control) => {
+    control.disabled = isLoading || control.dataset.forceDisabled === "true";
+  });
+}
+
 function confirmRecycle(message) {
   const webApp = window.Telegram?.WebApp;
   if (!webApp?.showConfirm) return Promise.resolve(window.confirm(message));
@@ -72,6 +84,8 @@ function renderInventory() {
   art.classList.add(`rarity-${item.level}`);
   const image = document.createElement("img");
   image.src = item.image_url;
+  image.loading = "lazy";
+  image.decoding = "async";
   image.alt = item.animated
     ? `Анимированный баннер: ${rarityNames[item.level]}`
     : `Баннер: ${rarityNames[item.level]}`;
@@ -190,54 +204,59 @@ function addDetail(container, label, value) {
 }
 
 export async function loadProfile() {
-  const profile = await apiRequest("/api/v1/profile");
-  const previousItemId = inventoryItems[inventoryIndex]?.item_id;
-  inventoryItems = profile.inventory || [];
-  inventoryBalanceCents = profile.balance_cents;
-  const previousIndex = inventoryItems.findIndex((item) => item.item_id === previousItemId);
-  inventoryIndex = previousIndex >= 0
-    ? previousIndex
-    : Math.max(0, inventoryItems.findIndex((item) => item.is_active));
-  if (inventoryIndex < 0) inventoryIndex = 0;
-  document.getElementById("profile-name").textContent =
-    profile.callsign || profile.display_name || "Профиль";
-  document.getElementById("profile-username").textContent =
-    profile.username ? `@${profile.username.replace(/^@/, "")}` : `ID ${profile.user_id}`;
-  document.getElementById("profile-balance").textContent =
-    formatCoinAmount(profile.balance_cents);
+  setInventoryLoading(true);
+  try {
+    const profile = await apiRequest("/api/v1/profile");
+    const previousItemId = inventoryItems[inventoryIndex]?.item_id;
+    inventoryItems = profile.inventory || [];
+    inventoryBalanceCents = profile.balance_cents;
+    const previousIndex = inventoryItems.findIndex((item) => item.item_id === previousItemId);
+    inventoryIndex = previousIndex >= 0
+      ? previousIndex
+      : Math.max(0, inventoryItems.findIndex((item) => item.is_active));
+    if (inventoryIndex < 0) inventoryIndex = 0;
+    document.getElementById("profile-name").textContent =
+      profile.callsign || profile.display_name || "Профиль";
+    document.getElementById("profile-username").textContent =
+      profile.username ? `@${profile.username.replace(/^@/, "")}` : `ID ${profile.user_id}`;
+    document.getElementById("profile-balance").textContent =
+      formatCoinAmount(profile.balance_cents);
 
-  const details = document.getElementById("profile-details");
-  details.replaceChildren();
-  addDetail(details, "Возраст", profile.age ? `${profile.age}` : "");
-  addDetail(details, "Пол", profile.gender === "неизвестен" ? "" : profile.gender);
-  const notes = String(profile.notes || "").split("\n").map((note) => note.trim()).filter(Boolean);
-  addDetail(details, "Факты", notes.length ? `${notes.length}` : "Пока нет");
-  const notesPanel = document.getElementById("profile-notes");
-  const notesList = document.getElementById("profile-note-list");
-  notesList.replaceChildren();
-  notesPanel.hidden = notes.length === 0;
-  for (const note of notes) {
-    const item = document.createElement("li");
-    item.textContent = note;
-    notesList.append(item);
-  }
+    const details = document.getElementById("profile-details");
+    details.replaceChildren();
+    addDetail(details, "Возраст", profile.age ? `${profile.age}` : "");
+    addDetail(details, "Пол", profile.gender === "неизвестен" ? "" : profile.gender);
+    const notes = String(profile.notes || "").split("\n").map((note) => note.trim()).filter(Boolean);
+    addDetail(details, "Факты", notes.length ? `${notes.length}` : "Пока нет");
+    const notesPanel = document.getElementById("profile-notes");
+    const notesList = document.getElementById("profile-note-list");
+    notesList.replaceChildren();
+    notesPanel.hidden = notes.length === 0;
+    for (const note of notes) {
+      const item = document.createElement("li");
+      item.textContent = note;
+      notesList.append(item);
+    }
 
-  const activity = document.getElementById("profile-activity");
-  activity.replaceChildren();
-  for (const [period, label] of [["d", "Сегодня"], ["w", "За неделю"], ["m", "За месяц"]]) {
-    const card = document.createElement("article");
-    card.className = "panel stat-card";
-    const title = document.createElement("span");
-    title.className = "stat-label";
-    title.textContent = label;
-    const value = document.createElement("strong");
-    value.className = "stat-value";
-    value.textContent = Number(profile.activity?.[period] || 0).toLocaleString("ru-RU");
-    card.append(title, value);
-    activity.append(card);
+    const activity = document.getElementById("profile-activity");
+    activity.replaceChildren();
+    for (const [period, label] of [["d", "Сегодня"], ["w", "За неделю"], ["m", "За месяц"]]) {
+      const card = document.createElement("article");
+      card.className = "panel stat-card";
+      const title = document.createElement("span");
+      title.className = "stat-label";
+      title.textContent = label;
+      const value = document.createElement("strong");
+      value.className = "stat-value";
+      value.textContent = Number(profile.activity?.[period] || 0).toLocaleString("ru-RU");
+      card.append(title, value);
+      activity.append(card);
+    }
+    renderInventory();
+    renderTransfers(profile.pending_transfers);
+  } finally {
+    setInventoryLoading(false);
   }
-  renderInventory();
-  renderTransfers(profile.pending_transfers);
 }
 
 function initInventory() {
@@ -259,6 +278,7 @@ function initInventory() {
     }
     const button = document.getElementById("inventory-transfer-submit");
     button.disabled = true;
+    setInventoryLoading(true);
     try {
       const result = await apiRequest("/api/v1/inventory/transfer", {
         method: "POST",
@@ -270,6 +290,8 @@ function initInventory() {
     } catch (error) {
       showToast(error.message, true);
       renderInventory();
+    } finally {
+      setInventoryLoading(false);
     }
   });
   for (const containerId of ["incoming-transfers", "outgoing-transfers"]) {
@@ -281,6 +303,7 @@ function initInventory() {
       const action = button.dataset.action;
       if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
       button.disabled = true;
+      setInventoryLoading(true);
       try {
         const endpoint = action === "cancel"
           ? "/api/v1/inventory/transfer/cancel"
@@ -294,6 +317,8 @@ function initInventory() {
       } catch (error) {
         showToast(error.message, true);
         button.disabled = false;
+      } finally {
+        setInventoryLoading(false);
       }
     });
   }
@@ -302,6 +327,7 @@ function initInventory() {
     if (!item || item.is_active || item.is_transfer_pending) return;
     const button = event.currentTarget;
     button.disabled = true;
+    setInventoryLoading(true);
     try {
       const result = await apiRequest("/api/v1/inventory/activate", {
         method: "POST",
@@ -312,6 +338,8 @@ function initInventory() {
     } catch (error) {
       showToast(error.message, true);
       button.disabled = false;
+    } finally {
+      setInventoryLoading(false);
     }
   });
   document.getElementById("inventory-recycle").addEventListener("click", async (event) => {
@@ -324,6 +352,7 @@ function initInventory() {
     if (!accepted) return;
     const button = event.currentTarget;
     button.disabled = true;
+    setInventoryLoading(true);
     try {
       const result = await apiRequest("/api/v1/inventory/recycle", {
         method: "POST",
@@ -334,6 +363,8 @@ function initInventory() {
     } catch (error) {
       showToast(error.message, true);
       button.disabled = false;
+    } finally {
+      setInventoryLoading(false);
     }
   });
 }
