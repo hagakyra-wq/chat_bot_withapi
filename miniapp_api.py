@@ -109,8 +109,13 @@ async def _update_profile(
     fields: dict[str, Any] = {}
     callsign = payload.get("callsign")
     if callsign is not None:
-        if not isinstance(callsign, str) or len(callsign.strip()) > 80:
-            return 400, {"error": "Кличка должна содержать не более 80 символов."}
+        if (
+            not isinstance(callsign, str)
+            or len(callsign.strip()) > 80
+            or "\n" in callsign
+            or "\r" in callsign
+        ):
+            return 400, {"error": "Кличка должна быть в одну строку и содержать не более 80 символов."}
         if callsign.strip():
             fields["callsign"] = callsign.strip()
 
@@ -128,8 +133,13 @@ async def _update_profile(
 
     note = payload.get("note")
     if note is not None:
-        if not isinstance(note, str) or len(note.strip()) > 500:
-            return 400, {"error": "Факт должен содержать не более 500 символов."}
+        if (
+            not isinstance(note, str)
+            or len(note.strip()) > 500
+            or "\n" in note
+            or "\r" in note
+        ):
+            return 400, {"error": "Факт должен быть в одну строку и содержать не более 500 символов."}
         if note.strip():
             fields["note"] = note.strip()
     if not fields:

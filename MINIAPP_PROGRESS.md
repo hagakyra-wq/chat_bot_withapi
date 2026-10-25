@@ -72,6 +72,9 @@ with access to the backup channel.
 - Duels require a second participant and their consent.
 - Auto-responder controls, personal Telegram account authorization, group
   management, and history exports remain in their existing bot conversations.
+- Owner-only service shutdown and full data reset, plus personal-account
+  credentials and banner-pattern administration, are intentionally not exposed
+  in the Mini App.
 - Image prompts can be submitted in Mini App, but generation configuration and
   final delivery still take place in the private bot chat.
 - Deleting profile data does not remove archived message contents; it removes
