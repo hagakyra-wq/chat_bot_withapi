@@ -119,8 +119,11 @@ def _night_cycle_date(local_now: datetime) -> str:
     return night_date.isoformat()
 
 
-async def _last_outgoing_message(client: TelegramClient) -> datetime | None:
-    async for message in client.iter_messages(None, limit=1, from_user="me"):
+async def _last_outgoing_message(
+    client: TelegramClient,
+    chat_id: int,
+) -> datetime | None:
+    async for message in client.iter_messages(chat_id, limit=1, from_user="me"):
         return _message_datetime(message)
     return None
 
@@ -277,8 +280,19 @@ async def _on_private_message(
 ) -> None:
     if not event.is_private or event.out or event.chat_id is None:
         return
+    logging.info(
+        "Входящее личное сообщение user_id=%s chat_id=%s message_id=%s.",
+        user_id,
+        event.chat_id,
+        event.id,
+    )
     if user_id != ADMIN_ID and not await database.is_admin_user(user_id):
         if not await database.is_feature_authorized(user_id, "autoresponder"):
+            logging.info(
+                "Автоответ пропущен: нет доступа user_id=%s chat_id=%s.",
+                user_id,
+                event.chat_id,
+            )
             await stop_user_client(user_id)
             personal_account.set_enabled(False, user_id)
             await personal_account.disconnect(user_id)
@@ -288,21 +302,43 @@ async def _on_private_message(
     async with chat_lock:
         client = personal_account.get_authorized_client(user_id)
         if client is None or not personal_account.is_enabled(user_id):
+            logging.info(
+                "Автоответ пропущен: user-сессия отключена user_id=%s chat_id=%s.",
+                user_id,
+                chat_id,
+            )
             return
         try:
             _, _, private_enabled = await database.get_autoresponder_settings(user_id)
             if not private_enabled:
+                logging.info(
+                    "Автоответ пропущен: режим ЛС выключен user_id=%s chat_id=%s.",
+                    user_id,
+                    chat_id,
+                )
                 return
             sender = await event.get_sender()
             if getattr(sender, "bot", False):
+                logging.info(
+                    "Автоответ пропущен: отправитель является ботом user_id=%s chat_id=%s.",
+                    user_id,
+                    chat_id,
+                )
                 return
 
             now_utc = datetime.now(timezone.utc)
-            last_outgoing = await _last_outgoing_message(client)
+            last_outgoing = await _last_outgoing_message(client, chat_id)
             if (
                 last_outgoing is not None
                 and now_utc - last_outgoing <= _PRIVATE_REPLY_INTERVAL
             ):
+                logging.info(
+                    "Автоответ пропущен: исходящее сообщение в этом чате было %s "
+                    "минут назад user_id=%s chat_id=%s.",
+                    round((now_utc - last_outgoing).total_seconds() / 60, 2),
+                    user_id,
+                    chat_id,
+                )
                 return
 
             private_text = await database.get_autoresponder_private_text(user_id)
@@ -312,12 +348,19 @@ async def _on_private_message(
                 parse_mode=None,
                 formatting_entities=_spoiler_entities(private_text),
             )
-            logging.info("Автоответ user-аккаунта отправлен в личный чат %s.", chat_id)
+            logging.info(
+                "Автоответ отправлен user_id=%s chat_id=%s message_id=%s.",
+                user_id,
+                chat_id,
+                event.id,
+            )
         except Exception:
             logging.exception(
                 "Не удалось обработать входящее сообщение user-аккаунта "
-                "в личном чате %s.",
+                "user_id=%s chat_id=%s message_id=%s.",
+                user_id,
                 chat_id,
+                event.id,
             )
 
 

@@ -705,8 +705,9 @@ def build_application() -> Application:
     application.add_handler(
         CallbackQueryHandler(
             on_game_callback,
-            pattern=r"^(?:casino:|inv:|menu:inv|mkt:|bonus:)",
-        )
+            pattern=r"^(?:casino:|inv:|menu:|mkt:|bonus:)",
+        ),
+        group=1,
     )
     application.add_handler(
         CallbackQueryHandler(
@@ -715,7 +716,8 @@ def build_application() -> Application:
         )
     )
     application.add_handler(
-        CallbackQueryHandler(on_profile_callback, pattern=r"^profile:")
+        CallbackQueryHandler(on_profile_callback, pattern=r"^profile:"),
+        group=1,
     )
     application.add_handler(
         CallbackQueryHandler(on_welcome_callback, pattern=r"^(?:wg|wa):")

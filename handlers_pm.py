@@ -36,9 +36,9 @@ import autoresponder
 import personal_account
 from banner_store import get_profile_banner, send_banner
 from casino import (
+    handle_activation_message,
     handle_coin_promo_message,
     handle_game_message,
-    remove_legacy_reply_menu,
 )
 from config import (
     ADMIN_ID,
@@ -80,8 +80,11 @@ WAIT_ADMIN_PRIVATE_TEXT = 29
 WAIT_HISTORY_GROUP = 30
 WAIT_DELETE_ALL_CONFIRMATION = 31
 WAIT_CREATE_COIN_PROMO = 32
+WAIT_CREATE_PENALTY = 33
+WAIT_REVOKE_PENALTY = 34
 COIN_PROMO_MAX_CENTS = 10_000_000
 _COIN_PROMO_AMOUNT_RE = re.compile(r"^\s*(\d{1,6})(?:[,.](\d{1,2}))?\s*$")
+_PENALTY_AMOUNT_RE = re.compile(r"^\s*(\d{1,18})(?:[,.](\d{1,2}))?\s*$")
 ADMIN_PANEL_USERS: set[int] = set()
 _USERBOT_LOGIN_KEYS = (
     "userbot_phone",
@@ -98,7 +101,7 @@ ACCESS_DURATIONS = {
 ACCESS_MESSAGE = (
     "Чтобы пользоваться Юбарой в ЛС, вступи в группу, где есть бот, "
     "и отправь там любое сообщение, на которое Юбара ответит. "
-    "Либо запроси пароль доступа у @BIGBACA."
+    "Или запроси у администратора одноразовый ключ и активируй его командой /activate КОД."
 )
 _GROUP_ID_RE = re.compile(r"^-?\d{1,20}$")
 
@@ -315,7 +318,6 @@ async def on_profile_callback(
         or query.message.chat_id != user.id
     ):
         return
-    await remove_legacy_reply_menu(query.message, context)
 
     action = query.data or ""
     if action == "profile:cancel":
@@ -624,6 +626,10 @@ def _admin_access_keyboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("👥 Список людей", callback_data="admin:people")],
             [InlineKeyboardButton("💰 Промокод на монеты", callback_data="admin:create_coin_promo")],
+            [
+                InlineKeyboardButton("➖ Штрафной ключ", callback_data="admin:create_penalty"),
+                InlineKeyboardButton("🗑 Отозвать штрафной", callback_data="admin:revoke_penalty"),
+            ],
             [
                 InlineKeyboardButton("🚫 Отозвать доступ", callback_data="admin:revoke_user"),
                 InlineKeyboardButton("🚫 Отозвать админа", callback_data="admin:revoke_admin"),
@@ -1022,8 +1028,8 @@ async def personal_autoresponder_start(
         if not await _has_autoresponder_access(user.id):
             if update.effective_message is not None:
                 await update.effective_message.reply_text(
-                    "Для доступа к личному автоответчику активируй ключ автоответчика, "
-                    "отправив его боту."
+                    "Для доступа к личному автоответчику запроси ключ у администратора "
+                    "и активируй его командой /activate КОД."
                 )
             return ConversationHandler.END
         context.user_data["autoresponder_menu"] = True
@@ -1618,6 +1624,33 @@ async def admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return ConversationHandler.END
 
 
+async def admin_leave_for_user_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is not None:
+        ADMIN_PANEL_USERS.discard(user.id)
+        await _cancel_userbot_login(user.id, context)
+    return ConversationHandler.END
+
+
+async def admin_user_command_fallback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    if user is not None:
+        ADMIN_PANEL_USERS.discard(user.id)
+        await _cancel_userbot_login(user.id, context)
+    if await handle_activation_message(update):
+        return ConversationHandler.END
+    if await handle_coin_promo_message(update):
+        return ConversationHandler.END
+    await on_private_message(update, context)
+    return ConversationHandler.END
+
+
 async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     user = update.effective_user
@@ -1673,6 +1706,16 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             ),
         )
         return WAIT_CREATE_COIN_PROMO
+    if action == "admin:create_penalty":
+        await query.edit_message_text(
+            "Введи положительную сумму штрафа в монетах (можно с копейками). "
+            "Одноразовый код спишет эту сумму и может увести баланс в минус.\n"
+            "Для отмены нажми кнопку или отправь /cancel.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ Отмена", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_CREATE_PENALTY
     if action == "admin:access":
         await _show_admin_section(
             update,
@@ -2123,6 +2166,30 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return WAIT_REVOKE_KEY
+    if action == "admin:revoke_penalty":
+        codes = [
+            item
+            for item in await database.list_coin_penalty_codes()
+            if item["redeemed_by"] is None
+        ]
+        context.user_data["revoke_penalty_codes"] = codes
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"{_format_coin_amount(int(item['amount_cents']))} монет · {item['code'][-8:]}",
+                    callback_data=f"admin:revoke_penalty:{index}",
+                )
+            ]
+            for index, item in enumerate(codes[:80])
+        ]
+        buttons.append([InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")])
+        await query.edit_message_text(
+            "Выбери неиспользованный штрафной ключ для отзыва:"
+            if codes
+            else "Неиспользованных штрафных ключей нет.",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return WAIT_REVOKE_PENALTY
     if action == "admin:people":
         users = await database.list_authorized_users(access_level="user")
         admins = await database.list_authorized_users(access_level="admin")
@@ -3084,7 +3151,8 @@ async def create_coin_promo_input(
             f"Создан промокод на {_format_coin_amount(amount_cents)} монет:\n"
             f"`{code}`\n\n"
             "Передай его пользователю лично. Он одноразовый — активировать может "
-            "только один человек командой `/coinpromo CODE` в ЛС бота.",
+            "только один человек командами `/coinpromo CODE` или `/activate CODE` "
+            "в ЛС бота.",
             parse_mode="Markdown",
         )
         await _show_admin_menu(update)
@@ -3093,6 +3161,60 @@ async def create_coin_promo_input(
         logging.exception("Не удалось создать промокод монет для user_id=%s.", user.id)
         await message.reply_text("Не удалось создать промокод. Попробуй ещё раз.")
         return WAIT_CREATE_COIN_PROMO
+
+
+async def create_penalty_key_input(
+    update: Update,
+    _context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    user = update.effective_user
+    message = update.effective_message
+    if user is None or not await _is_admin(user.id):
+        if user is not None:
+            ADMIN_PANEL_USERS.discard(user.id)
+        return ConversationHandler.END
+    if message is None or message.text is None:
+        return WAIT_CREATE_PENALTY
+    match = _PENALTY_AMOUNT_RE.fullmatch(message.text)
+    if match is None:
+        await message.reply_text(
+            "Введи положительную сумму в монетах, например 25 или 12.50."
+        )
+        return WAIT_CREATE_PENALTY
+    amount_cents = int(match.group(1)) * 100 + int(
+        (match.group(2) or "0").ljust(2, "0")
+    )
+    if not 1 <= amount_cents <= 9_223_372_036_854_775_807:
+        await message.reply_text("Сумма должна быть положительной и помещаться в баланс.")
+        return WAIT_CREATE_PENALTY
+    try:
+        code = ""
+        for _ in range(3):
+            candidate = f"YUBARA-PEN-{secrets.token_hex(6).upper()}"
+            if await database.create_coin_penalty_code(
+                candidate,
+                amount_cents,
+                user.id,
+            ):
+                code = candidate
+                break
+        if not code:
+            raise RuntimeError("Не удалось сгенерировать уникальный штрафной ключ.")
+        await message.reply_text(
+            f"Создан одноразовый штрафной ключ на {_format_coin_amount(amount_cents)} монет:\n"
+            f"`{code}`\n\n"
+            "При активации он спишет сумму с баланса пользователя; баланс может стать "
+            "отрицательным. Команда активации: `/activate CODE`.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+            ),
+        )
+        return ADMIN_MENU
+    except Exception:
+        logging.exception("Не удалось создать штрафной ключ admin_id=%s.", user.id)
+        await message.reply_text("Не удалось создать штрафной ключ. Попробуй ещё раз.")
+        return WAIT_CREATE_PENALTY
 
 
 def _format_coin_amount(amount_cents: int) -> str:
@@ -3133,6 +3255,49 @@ async def revoke_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         logging.exception("Ошибка отзыва ключа")
         await query.edit_message_text("Не удалось отозвать ключ из-за ошибки базы данных.")
         return WAIT_REVOKE_KEY
+
+
+async def revoke_penalty_key_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None:
+        return WAIT_REVOKE_PENALTY
+    await query.answer()
+    if user is None or not await _is_admin(user.id):
+        if user is not None:
+            ADMIN_PANEL_USERS.discard(user.id)
+        return ConversationHandler.END
+    try:
+        index = int((query.data or "").rsplit(":", 1)[1])
+        codes = context.user_data.get("revoke_penalty_codes", [])
+        code = str(codes[index]["code"])
+        revoked = await database.revoke_coin_penalty_code(code)
+        await query.edit_message_text(
+            "Штрафной ключ отозван."
+            if revoked
+            else "Ключ уже использован или больше не активен.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_REVOKE_PENALTY
+    except (ValueError, IndexError, TypeError, KeyError):
+        await query.edit_message_text(
+            "Выбранный штрафной ключ больше недоступен.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("↩️ В меню", callback_data="admin:menu")]]
+            ),
+        )
+        return WAIT_REVOKE_PENALTY
+    except Exception:
+        logging.exception("Ошибка отзыва штрафного ключа admin_id=%s.", user.id)
+        await query.edit_message_text(
+            "Не удалось отозвать штрафной ключ из-за ошибки базы данных."
+        )
+        return WAIT_REVOKE_PENALTY
 
 
 async def key_duration_callback(
@@ -3245,6 +3410,13 @@ def build_admin_conversation_handler() -> ConversationHandler:
                     create_coin_promo_input,
                 ),
             ],
+            WAIT_CREATE_PENALTY: [
+                back,
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    create_penalty_key_input,
+                ),
+            ],
             WAIT_KEY_DURATION: [
                 back,
                 CallbackQueryHandler(key_duration_callback, pattern=r"^admin:duration:"),
@@ -3252,6 +3424,13 @@ def build_admin_conversation_handler() -> ConversationHandler:
             WAIT_REVOKE_KEY: [
                 back,
                 CallbackQueryHandler(revoke_key_callback, pattern=r"^admin:revoke:"),
+            ],
+            WAIT_REVOKE_PENALTY: [
+                back,
+                CallbackQueryHandler(
+                    revoke_penalty_key_callback,
+                    pattern=r"^admin:revoke_penalty:",
+                ),
             ],
             WAIT_REVOKE_USER: [
                 back,
@@ -3328,7 +3507,33 @@ def build_admin_conversation_handler() -> ConversationHandler:
                 ),
             ],
         },
-        fallbacks=[CommandHandler("cancel", admin_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", admin_cancel),
+            CommandHandler(
+                [
+                    "start",
+                    "help",
+                    "adminhelp",
+                    "helpadmin",
+                    "activate",
+                    "coinpromo",
+                    "casino",
+                    "slots",
+                    "inventory",
+                    "inv",
+                    "market",
+                    "fees",
+                    "recycle",
+                    "banner",
+                    "profile",
+                ],
+                admin_user_command_fallback,
+            ),
+            CallbackQueryHandler(
+                admin_leave_for_user_menu,
+                pattern=r"^(?:casino:|inv:|menu:|mkt:|bonus:|profile:)",
+            ),
+        ],
         allow_reentry=True,
         per_message=False,
     )
@@ -3634,15 +3839,8 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         or message.text is None
     ):
         return
-    if user.id in ADMIN_PANEL_USERS:
-        try:
-            if await _is_admin(user.id):
-                return
-        except Exception:
-            logging.exception("Не удалось проверить право администратора в личном чате")
-            return
-        ADMIN_PANEL_USERS.discard(user.id)
-    await remove_legacy_reply_menu(message, context)
+    if await handle_activation_message(update):
+        return
     if await handle_coin_promo_message(update):
         return
     try:
@@ -3663,6 +3861,7 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("market_search_waiting", None)
         context.user_data.pop("market_listing_item", None)
         context.user_data.pop("market_listing_title_item", None)
+        context.user_data.pop("inventory_transfer_item_id", None)
         context.user_data.pop("market_listing_price_cents", None)
         await message.reply_text(
             "Текущий шаг отменён.",

@@ -55,6 +55,7 @@ _MOSCOW_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "messages": ("created_at",),
     "group_promo_codes": ("created_at",),
     "coin_promo_codes": ("created_at", "redeemed_at"),
+    "coin_penalty_codes": ("created_at", "redeemed_at"),
     "access_keys": ("created_at",),
     "authorized_users": ("authorized_at",),
     "user_features": ("authorized_at",),
@@ -172,6 +173,14 @@ async def initialize() -> None:
                     created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
                 );
                 CREATE TABLE IF NOT EXISTS coin_promo_codes (
+                    code TEXT PRIMARY KEY,
+                    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                    redeemed_by INTEGER,
+                    redeemed_at TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS coin_penalty_codes (
                     code TEXT PRIMARY KEY,
                     amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
                     created_by INTEGER NOT NULL,
@@ -444,6 +453,21 @@ async def initialize() -> None:
                 END;
                 CREATE TRIGGER IF NOT EXISTS dirty_coin_promo_codes_update
                 AFTER UPDATE ON coin_promo_codes BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_coin_penalty_codes_insert
+                AFTER INSERT ON coin_penalty_codes BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_coin_penalty_codes_update
+                AFTER UPDATE ON coin_penalty_codes BEGIN
+                    INSERT INTO meta(key, value) VALUES ('dirty', '1')
+                    ON CONFLICT(key) DO UPDATE SET value = '1';
+                END;
+                CREATE TRIGGER IF NOT EXISTS dirty_coin_penalty_codes_delete
+                AFTER DELETE ON coin_penalty_codes BEGIN
                     INSERT INTO meta(key, value) VALUES ('dirty', '1')
                     ON CONFLICT(key) DO UPDATE SET value = '1';
                 END;
@@ -1121,6 +1145,136 @@ async def redeem_coin_promo_code(
             await db.commit()
         _record_write()
     return "redeemed", int(promo["amount_cents"]), balance
+
+
+async def create_coin_penalty_code(
+    code: str,
+    amount_cents: int,
+    created_by: int,
+) -> bool:
+    normalized = code.strip().upper()
+    if not re.fullmatch(r"YUBARA-PEN-[A-F0-9]{12}", normalized):
+        raise ValueError("Штрафной ключ имеет неверный формат.")
+    if not 1 <= amount_cents <= 9_223_372_036_854_775_807:
+        raise ValueError("Сумма штрафа должна быть положительным числом.")
+    async with _write_lock:
+        async with _connect() as db:
+            try:
+                await db.execute(
+                    "INSERT INTO coin_penalty_codes(code, amount_cents, created_by) "
+                    "VALUES (?, ?, ?)",
+                    (normalized, amount_cents, created_by),
+                )
+            except aiosqlite.IntegrityError:
+                await db.rollback()
+                return False
+            await db.commit()
+        _record_write()
+    return True
+
+
+async def list_coin_penalty_codes() -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT code, amount_cents, created_by, redeemed_by
+            FROM coin_penalty_codes ORDER BY created_at, code
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def revoke_coin_penalty_code(code: str) -> bool:
+    normalized = code.strip().upper()
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM coin_penalty_codes WHERE code = ? AND redeemed_by IS NULL",
+                (normalized,),
+            )
+            await db.commit()
+            deleted = cursor.rowcount > 0
+        if deleted:
+            _record_write()
+        return deleted
+
+
+async def redeem_coin_penalty_code(
+    code: str,
+    user_id: int,
+    username: str | None,
+) -> tuple[str, int | None, int | None]:
+    normalized = code.strip().upper()
+    if not re.fullmatch(r"YUBARA-PEN-[A-F0-9]{12}", normalized):
+        return "invalid", None, None
+    today_text = _moscow_date().isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT amount_cents, redeemed_by FROM coin_penalty_codes WHERE code = ?",
+                (normalized,),
+            )
+            penalty = await cursor.fetchone()
+            if penalty is None:
+                await db.rollback()
+                return "invalid", None, None
+            if penalty["redeemed_by"] is not None:
+                await db.rollback()
+                return "used", None, None
+            await db.execute(
+                "INSERT OR IGNORE INTO duel_players("
+                "user_id, username, balance_cents, last_mined_on, is_bot"
+                ") VALUES (?, ?, 0, ?, 0)",
+                (user_id, username, today_text),
+            )
+            amount_cents = int(penalty["amount_cents"])
+            cursor = await db.execute(
+                "UPDATE duel_players SET username = COALESCE(?, username), "
+                "balance_cents = balance_cents - ? WHERE user_id = ?",
+                (username, amount_cents, user_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise sqlite3.DatabaseError(
+                    f"Не удалось списать штраф с user_id={user_id}."
+                )
+            cursor = await db.execute(
+                "UPDATE coin_penalty_codes SET redeemed_by = ?, "
+                "redeemed_at = datetime('now', '+3 hours') "
+                "WHERE code = ? AND redeemed_by IS NULL",
+                (user_id, normalized),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "used", None, None
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            balance_row = await cursor.fetchone()
+            if balance_row is None:
+                await db.rollback()
+                raise sqlite3.DatabaseError(
+                    f"Не удалось прочитать баланс user_id={user_id} после штрафа."
+                )
+            balance = int(balance_row["balance_cents"])
+            await db.commit()
+        _record_write()
+    return "redeemed", amount_cents, balance
+
+
+async def find_user_id_by_username(username: str) -> int | None:
+    normalized = username.strip().lstrip("@").casefold()
+    if not normalized:
+        return None
+    async with _connect() as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM global_profiles WHERE lower(username) = ?",
+            (normalized,),
+        )
+        row = await cursor.fetchone()
+    return int(row["user_id"]) if row is not None else None
 
 
 async def ensure_user(
@@ -3221,6 +3375,58 @@ async def get_banner_item(item_id: int) -> dict[str, Any] | None:
         cursor = await db.execute("SELECT * FROM banner_items WHERE item_id = ?", (item_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def transfer_banner_item(
+    sender_id: int,
+    recipient_id: int,
+    item_id: int,
+) -> str:
+    if sender_id == recipient_id:
+        return "same_user"
+    async with _write_lock:
+        async with _connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT user_id, source FROM banner_items WHERE item_id = ?",
+                (item_id,),
+            )
+            item = await cursor.fetchone()
+            if item is None or int(item["user_id"]) != sender_id:
+                await db.rollback()
+                return "missing"
+            if item["source"] == "owner":
+                await db.rollback()
+                return "owner_item"
+            cursor = await db.execute(
+                "SELECT 1 FROM market_lots WHERE item_id = ? AND status = 'open'",
+                (item_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await db.rollback()
+                return "listed"
+            cursor = await db.execute(
+                "SELECT 1 FROM global_profiles WHERE user_id = ?",
+                (recipient_id,),
+            )
+            if await cursor.fetchone() is None:
+                await db.rollback()
+                return "recipient_not_found"
+            cursor = await db.execute(
+                """
+                UPDATE banner_items
+                SET user_id = ?, is_active = 0,
+                    obtained_at = datetime('now', '+3 hours')
+                WHERE item_id = ? AND user_id = ?
+                """,
+                (recipient_id, item_id, sender_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return "missing"
+            await db.commit()
+        _record_write()
+    return "transferred"
 
 
 async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:

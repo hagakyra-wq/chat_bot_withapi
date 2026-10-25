@@ -12,7 +12,6 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaAnimation,
     InputMediaPhoto,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ChatType
@@ -50,6 +49,9 @@ _COIN_PROMO_RE = re.compile(
     r"^/coinpromo(?:@\w+)?\s+(YUBARA-COIN-[A-F0-9]{12})$",
     re.IGNORECASE,
 )
+_ACTIVATE_CODE_RE = re.compile(r"^/activate(?:@\w+)?(?:\s+(.+))?$", re.IGNORECASE)
+_TRANSFER_RECIPIENT_RE = re.compile(r"^@?([a-z0-9_]{5,32})$", re.IGNORECASE)
+_TRANSFER_USER_ID_RE = re.compile(r"^\d{1,20}$")
 _RECYCLE_COMMAND_RE = re.compile(
     r"^(?:/recycle(?:@\w+)?|переработ(?:ка|ай))\s+"
     r"(?P<rarity>[\w-]+)\s+(?P<quantity>\d+)$",
@@ -124,22 +126,6 @@ def _menu_button() -> InlineKeyboardButton:
     return InlineKeyboardButton("↩️ В меню", callback_data="casino:home")
 
 
-async def remove_legacy_reply_menu(
-    message: Any,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    if (
-        message.chat.type != ChatType.PRIVATE
-        or context.user_data.get("legacy_reply_menu_removed")
-    ):
-        return
-    await message.reply_text(
-        "Перешла на inline-меню под сообщениями.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    context.user_data["legacy_reply_menu_removed"] = True
-
-
 def _casino_button(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardButton:
     username = getattr(context.bot, "username", None)
     url = f"https://t.me/{username}?start=casino" if username else "https://t.me/"
@@ -210,6 +196,16 @@ def _main_menu_keyboard(
             ]
         )
     rows.append([InlineKeyboardButton("🎁 Бонус 20💰", callback_data="bonus:go")])
+    if private:
+        rows.append(
+            [
+                InlineKeyboardButton("🔑 Активировать код", callback_data="menu:activate"),
+                InlineKeyboardButton("❓ Помощь", callback_data="menu:help"),
+            ]
+        )
+        rows.append(
+            [InlineKeyboardButton("🎁 Передать баннер", callback_data="menu:transfer")]
+        )
     return InlineKeyboardMarkup(rows)
 
 
@@ -257,7 +253,6 @@ async def open_main_menu(
     if message is None:
         return
     private = message.chat.type == ChatType.PRIVATE
-    await remove_legacy_reply_menu(message, context)
     await message.reply_text(
         "Главное меню Юбары. Выбери раздел кнопкой ниже:",
         reply_markup=_main_menu_keyboard(context, private=private),
@@ -340,49 +335,63 @@ async def _show_admin_help(
     try:
         is_bot_admin = user.id == ADMIN_ID or await database.is_admin_user(user.id)
         is_group_admin = False
-        if not is_bot_admin and message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
             member = await context.bot.get_chat_member(message.chat_id, user.id)
             status = getattr(member.status, "value", member.status)
             is_group_admin = status in ("creator", "administrator")
     except TelegramError:
         logging.exception(
-            "Не удалось проверить права для справки администратора user_id=%s.",
+            "Не удалось проверить права для справки user_id=%s chat_id=%s.",
             user.id,
+            message.chat_id,
         )
-        await message.reply_text("Не удалось проверить права администратора. Попробуй позже.")
+        await message.reply_text("Не удалось проверить права в этой группе. Попробуй позже.")
         return
     except Exception:
         logging.exception(
-            "Ошибка проверки прав для справки администратора user_id=%s.",
+            "Ошибка проверки прав для справки user_id=%s chat_id=%s.",
             user.id,
+            message.chat_id,
         )
         await message.reply_text("Не удалось открыть справку. Попробуй позже.")
         return
 
-    if not is_bot_admin and not is_group_admin:
-        await message.reply_text("Справка предназначена для администраторов бота или группы.")
-        return
-
+    sections = [
+        "👤 Помощь пользователю\n"
+        "• /start — открыть inline-меню; /help — эта справка.\n"
+        "• /casino — колесо удачи; /inventory — инвентарь баннеров.\n"
+        "• «баланс» — посмотреть монеты; «топ монет» — рейтинг.\n"
+        "• /activate КОД — активировать ключ или штрафной ключ в личном чате.\n"
+        "• /coinpromo КОД — активировать промокод на монеты в личном чате.\n"
+        "• /cancel — отменить текущий ввод."
+    ]
+    if is_group_admin:
+        sections.append(
+            "🛡 Помощь администратору группы\n"
+            "• /activategroup КОД — подключить эту группу одноразовым кодом.\n"
+            "• Ответь «дэл» на сообщение, чтобы удалить его.\n"
+            "• «дэл N» — удалить последние N сообщений Юбары "
+            "(ответь на сообщение Юбары).\n"
+            "• «дэл чат N» — удалить последние N сообщений чата."
+        )
+    if is_bot_admin:
+        sections.append(
+            "⚙️ Помощь администратору бота\n"
+            "• /adm — панель групп, доступов, ключей, штрафных кодов и настроек.\n"
+            "• /addacc — подключение Telegram-аккаунта и настройка автоответчика.\n"
+            "• /gethistori — выбрать группу и получить файл истории "
+            "(нужны членство и права администратора в группе).\n"
+            "• /fees — накопленная комиссия площадки; /break — штатная остановка.\n"
+            "• /cancel — отменить ввод или закрыть админ-панель."
+        )
+        if user.id == ADMIN_ID:
+            sections.append(
+                "👑 Только владелец бота\n"
+                "• /deletealldata — необратимый сброс данных после подтверждения."
+            )
     await message.reply_text(
-        "🛠 Команды для администраторов\n\n"
-        "Администраторы бота:\n"
-        "• /adm — панель управления группами, доступом и настройками; "
-        "в разделе «Доступ и ключи» создаются промокоды на монеты.\n"
-        "• /addacc — подключение личного аккаунта и настройка автоответчика.\n"
-        "• /gethistori — выбрать группу и получить файл истории "
-        "(доступны только группы, где ты состоишь и имеешь права администратора).\n"
-        "• /fees — посмотреть накопленную комиссию площадки.\n"
-        "• /break — штатно остановить бота.\n"
-        "• /cancel — отменить текущий шаг или закрыть админ-панель.\n\n"
-        "Только владелец бота:\n"
-        "• /deletealldata — полный необратимый сброс данных после подтверждения.\n\n"
-        "Администраторы группы:\n"
-        "• /activategroup КОД — подключить группу одноразовым промокодом.\n"
-        "• Ответь «дэл» на сообщение, чтобы удалить его.\n"
-        "• «дэл N» — удалить последние N сообщений Юбары "
-        "(команда должна быть ответом на сообщение Юбары).\n"
-        "• «дэл чат N» — удалить последние N сообщений чата без reply-to.\n\n"
-        "Справка: /adminhelp"
+        "\n\n".join(sections),
+        reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
     )
 
 
@@ -757,6 +766,9 @@ async def _show_inventory(
             InlineKeyboardButton("♻️ Переработать", callback_data=f"inv:r:{item_id}"),
             InlineKeyboardButton("🏷 Продать", callback_data=f"mkt:l:{item_id}"),
         ]
+    )
+    rows.append(
+        [InlineKeyboardButton("🎁 Передать", callback_data=f"inv:t:{item_id}")]
     )
     rows.append(
         [
@@ -1271,21 +1283,53 @@ async def on_game_callback(
     await query.answer()
     if user is None or query.message is None:
         return
-    await remove_legacy_reply_menu(query.message, context)
     action = query.data or ""
-    if action == "casino:home":
-        await _return_to_main_menu(update, context)
-        return
-    if action == "casino:cancel":
+    if action in ("casino:home", "menu:home", "casino:cancel"):
         for key in (
             "market_search_waiting",
             "market_search_query",
             "market_listing_item",
             "market_listing_title_item",
             "market_listing_price_cents",
+            "inventory_transfer_item_id",
         ):
             context.user_data.pop(key, None)
         await _return_to_main_menu(update, context)
+        return
+    if action == "menu:help":
+        await _show_admin_help(update, context)
+        return
+    if action == "menu:activate":
+        await query.message.reply_text(
+            "Отправь в личном чате команду /activate КОД. "
+            "Так активируются ключи доступа и одноразовые штрафные коды. "
+            "Промокод на монеты можно активировать командой /coinpromo КОД.",
+            reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+        )
+        return
+    if action == "menu:transfer":
+        await query.message.reply_text(
+            "Передача доступна для баннеров из инвентаря: открой его "
+            "и нажми «🎁 Передать» под нужным предметом.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv")],
+                    [_menu_button()],
+                ]
+            ),
+        )
+        return
+    if action == "inv:tcancel":
+        context.user_data.pop("inventory_transfer_item_id", None)
+        await query.message.reply_text(
+            "Передача отменена.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv")],
+                    [_menu_button()],
+                ]
+            ),
+        )
         return
     if action in ("inv:noop", "mkt:noop"):
         return
@@ -1407,6 +1451,32 @@ async def on_game_callback(
             reply_markup=InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("🎒 Открыть инвентарь", callback_data="menu:inv")],
+                    [_menu_button()],
+                ]
+            ),
+        )
+    elif action.startswith("inv:t:"):
+        item_id = await _parse_callback_int(query, action.split(":")[2])
+        if item_id is None:
+            return
+        item = await database.get_banner_item(item_id)
+        if item is None or int(item["user_id"]) != user.id:
+            await query.message.reply_text("Этот предмет больше недоступен.")
+            return
+        if item["source"] == "owner":
+            await query.message.reply_text(
+                "Служебный баннер передавать нельзя."
+            )
+            return
+        context.user_data["inventory_transfer_item_id"] = item_id
+        await query.message.reply_text(
+            f"Кому передать баннер #{item_id}? Отправь @username или Telegram ID. "
+            "Получатель должен хотя бы раз взаимодействовать с Юбарой. "
+            "При передаче активного баннера он станет неактивным. "
+            "Для отмены нажми кнопку или отправь /cancel.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("❌ Отмена", callback_data="inv:tcancel")],
                     [_menu_button()],
                 ]
             ),
@@ -1818,6 +1888,203 @@ async def _handle_recycle_command(
     return True
 
 
+async def _activate_code(update: Update, code: str | None) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await message.reply_text("Ключи и промокоды активируются только в личном чате с Юбарой.")
+        return
+    if not code:
+        await message.reply_text("Формат команды: /activate КОД")
+        return
+
+    try:
+        access = await database.consume_access_key(code, user.id, user.username)
+        if access is not None:
+            level = str(access["access_level"])
+            logging.info(
+                "Ключ доступа активирован user_id=%s access_level=%s.",
+                user.id,
+                level,
+            )
+            descriptions = {
+                "admin": "Доступ администратора активирован.",
+                "autoresponder": (
+                    "Ключ автоответчика активирован. Открой /addacc, "
+                    "чтобы подключить Telegram-аккаунт."
+                ),
+                "user": "Доступ к боту активирован.",
+            }
+            await message.reply_text(
+                descriptions.get(level, "Ключ доступа активирован."),
+                reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+            )
+            return
+        if code.upper().startswith("YUBARA-COIN-"):
+            result, amount, balance = await database.redeem_coin_promo_code(
+                code,
+                user.id,
+                user.username,
+            )
+            if result == "redeemed" and amount is not None and balance is not None:
+                logging.info(
+                    "Промокод монет активирован user_id=%s amount_cents=%s balance_cents=%s.",
+                    user.id,
+                    amount,
+                    balance,
+                )
+                await message.reply_text(
+                    f"Промокод активирован: +{_coins(amount)} монет. "
+                    f"Баланс: {_coins(balance)}.",
+                    reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+                )
+                return
+            if result == "used":
+                await message.reply_text("Этот промокод уже использован.")
+                return
+        elif code.upper().startswith("YUBARA-PEN-"):
+            result, amount, balance = await database.redeem_coin_penalty_code(
+                code,
+                user.id,
+                user.username,
+            )
+            if result == "redeemed" and amount is not None and balance is not None:
+                logging.info(
+                    "Штрафной ключ активирован user_id=%s amount_cents=%s balance_cents=%s.",
+                    user.id,
+                    amount,
+                    balance,
+                )
+                await message.reply_text(
+                    f"Штрафной ключ активирован: −{_coins(amount)} монет. "
+                    f"Новый баланс: {_coins(balance)}.",
+                    reply_markup=InlineKeyboardMarkup([[_menu_button()]]),
+                )
+                return
+            if result == "used":
+                await message.reply_text("Этот штрафной ключ уже активирован.")
+                return
+    except Exception:
+        logging.exception(
+            "Не удалось активировать ключ/промокод user_id=%s.",
+            user.id,
+        )
+        await message.reply_text("Не удалось активировать код. Попробуй позже.")
+        return
+    await message.reply_text("Код не найден или указан неверно.")
+
+
+async def handle_activation_message(update: Update) -> bool:
+    message = update.effective_message
+    if message is None or message.text is None:
+        return False
+    match = _ACTIVATE_CODE_RE.fullmatch(message.text.strip())
+    if match is None:
+        return False
+    code = match.group(1).strip() if match.group(1) else None
+    await _activate_code(update, code)
+    return True
+
+
+async def _handle_inventory_transfer_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    item_id_value = context.user_data.get("inventory_transfer_item_id")
+    if (
+        item_id_value is None
+        or message is None
+        or user is None
+        or message.text is None
+        or message.chat.type != ChatType.PRIVATE
+    ):
+        return False
+    text = message.text.strip()
+    if text.casefold() in {"отмена", "отменить", "/cancel"}:
+        context.user_data.pop("inventory_transfer_item_id", None)
+        await message.reply_text(
+            "Передача отменена.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv")],
+                    [_menu_button()],
+                ]
+            ),
+        )
+        return True
+
+    recipient_id: int | None = None
+    if _TRANSFER_USER_ID_RE.fullmatch(text):
+        recipient_id = int(text)
+    else:
+        match = _TRANSFER_RECIPIENT_RE.fullmatch(text)
+        if match is not None:
+            try:
+                recipient_id = await database.find_user_id_by_username(match.group(1))
+            except Exception:
+                logging.exception(
+                    "Не удалось найти получателя баннера user_id=%s.",
+                    user.id,
+                )
+                await message.reply_text("Не удалось найти получателя. Попробуй позже.")
+                return True
+    if recipient_id is None:
+        await message.reply_text(
+            "Не удалось распознать получателя. Отправь @username или Telegram ID "
+            "пользователя, который уже взаимодействовал с Юбарой."
+        )
+        return True
+    try:
+        result = await database.transfer_banner_item(
+            user.id,
+            recipient_id,
+            int(item_id_value),
+        )
+    except Exception:
+        logging.exception(
+            "Ошибка передачи баннера item_id=%s sender_id=%s recipient_id=%s.",
+            item_id_value,
+            user.id,
+            recipient_id,
+        )
+        await message.reply_text("Не удалось передать баннер. Попробуй позже.")
+        return True
+    if result == "transferred":
+        context.user_data.pop("inventory_transfer_item_id", None)
+        logging.info(
+            "Передан баннер item_id=%s sender_id=%s recipient_id=%s.",
+            item_id_value,
+            user.id,
+            recipient_id,
+        )
+        await message.reply_text(
+            f"Баннер #{item_id_value} передан пользователю {recipient_id}.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🎒 Инвентарь", callback_data="menu:inv")],
+                    [_menu_button()],
+                ]
+            ),
+        )
+    else:
+        explanations = {
+            "same_user": "Нельзя передать баннер самому себе.",
+            "missing": "Этот баннер больше не принадлежит тебе.",
+            "owner_item": "Служебный баннер передавать нельзя.",
+            "listed": "Сначала сними баннер с площадки.",
+            "recipient_not_found": (
+                "Получатель не найден. Он должен сначала открыть бота "
+                "или написать в группу с Юбарой."
+            ),
+        }
+        await message.reply_text(explanations.get(result, "Передача не выполнена."))
+    return True
+
+
 async def handle_game_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1826,6 +2093,8 @@ async def handle_game_message(
     user = update.effective_user
     if message is None or user is None or message.text is None:
         return False
+    if await _handle_inventory_transfer_input(update, context):
+        return True
     if await _handle_listing_title(update, context):
         return True
     if await _handle_listing_price(update, context):
@@ -1837,6 +2106,8 @@ async def handle_game_message(
     text = message.text.strip().casefold()
     if re.fullmatch(r"/(?:help|adminhelp|helpadmin)(?:@\w+)?", text):
         await _show_admin_help(update, context)
+        return True
+    if await handle_activation_message(update):
         return True
     start_match = re.fullmatch(r"/start(?:@\w+)?(?:\s+(\w+))?", text)
     if start_match and start_match.group(1) == "inventory":

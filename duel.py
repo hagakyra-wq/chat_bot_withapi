@@ -54,7 +54,9 @@ def is_balance_request(text: str) -> bool:
 
 
 def _format_coins(balance_cents: int) -> str:
-    return f"{balance_cents // 100}.{balance_cents % 100:02d}"
+    sign = "-" if balance_cents < 0 else ""
+    value = abs(balance_cents)
+    return f"{sign}{value // 100}.{value % 100:02d}"
 
 
 def _pending_player_duels(context: ContextTypes.DEFAULT_TYPE) -> dict[str, PlayerDuelChallenge]:

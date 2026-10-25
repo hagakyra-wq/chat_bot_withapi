@@ -39,10 +39,16 @@ async def send_channel_event(bot: Bot, text: str) -> None:
 
 
 class TelegramChannelLogHandler(logging.Handler):
-    """Пересылает WARNING и ERROR в канал без traceback и ссылок с данными."""
+    """Пересылает WARNING и ERROR в канал с временем и traceback."""
 
     def __init__(self, bot: Bot) -> None:
         super().__init__(level=logging.WARNING)
+        self.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
         self.bot = bot
         self.loop = asyncio.get_running_loop()
 
@@ -50,9 +56,7 @@ class TelegramChannelLogHandler(logging.Handler):
         if record.name == _LOGGER_NAME or record.name.startswith(_LOGGER_NAME + "."):
             return
         try:
-            text = _safe_message(
-                f"⚠️ {record.levelname}: {record.name}: {record.getMessage()}"
-            )
+            text = _safe_message(f"⚠️ {self.format(record)}")
             self.loop.call_soon_threadsafe(self._schedule_send, text)
         except (RuntimeError, ValueError):
             self.handleError(record)
