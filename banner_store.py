@@ -4,6 +4,7 @@ import asyncio
 import itertools
 import io
 import logging
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -14,7 +15,7 @@ from telegram.error import TelegramError
 
 import database
 from config import BACKUP_CHANNEL_ID, BANNER_SALT
-from yubari_banner import clean_text, content_hash, make_banner
+from yubari_banner import clean_text, content_hash, make_banner, make_digest, pick_preset
 from yubari_banner.bn_common import font
 
 _ACTIVE_REFRESH_SECONDS = 10 * 60
@@ -158,6 +159,7 @@ async def _render_and_backup(
     *,
     priority: int,
     force: bool = False,
+    replace_design: bool = False,
 ) -> dict[str, Any]:
     user_id = int(item["user_id"])
     design_user_id = int(item.get("design_user_id") or user_id)
@@ -265,13 +267,25 @@ async def _render_and_backup(
             raise RuntimeError("Telegram принял изображение без данных photo.")
         new_file_id = sent.photo[-1].file_id
 
-    await database.set_banner_item_rendering(
-        int(item["item_id"]),
-        file_id=new_file_id,
-        backup_msg_id=sent.message_id,
-        content_hash=digest,
-        design_user_id=design_user_id,
-    )
+    try:
+        await database.set_banner_item_rendering(
+            int(item["item_id"]),
+            file_id=new_file_id,
+            backup_msg_id=sent.message_id,
+            content_hash=digest,
+            design_user_id=design_user_id,
+            replace_design=replace_design,
+            owner_user_id=user_id if replace_design else None,
+            seed=str(item["seed"]) if replace_design else None,
+            preset=item.get("preset") if replace_design else None,
+        )
+    except Exception:
+        await _delete_replaced_backup(
+            bot,
+            sent.message_id,
+            f"неприменённого рендера баннера item_id={item['item_id']}",
+        )
+        raise
     await _delete_replaced_backup(
         bot,
         int(old_backup_id) if old_backup_id else None,
@@ -295,6 +309,42 @@ async def ensure_banner_file(
     except Exception:
         logging.exception("Не удалось подготовить баннер item_id=%s.", item.get("item_id"))
         raise
+
+
+async def reroll_active_banner(
+    bot: Any,
+    user_id: int,
+) -> tuple[str, dict[str, Any] | None]:
+    item = await database.get_active_banner_item(user_id)
+    if item is None:
+        return "no_active", None
+    status = await database.get_banner_reroll_status(user_id, int(item["item_id"]))
+    if status != "ok":
+        return status, None
+    if BACKUP_CHANNEL_ID is None:
+        raise RuntimeError("Для переделки баннера настройте BACKUP_CHANNEL_ID.")
+
+    seed = secrets.token_hex(16)
+    preset = (
+        pick_preset(make_digest(int(item.get("design_user_id") or user_id), item_seed=seed))
+        if int(item["level"]) == 6
+        else None
+    )
+    rerolled_item = {
+        **item,
+        "seed": seed,
+        "preset": preset,
+        "file_id": None,
+        "content_hash": None,
+    }
+    updated = await _render_and_backup(
+        bot,
+        rerolled_item,
+        priority=0,
+        force=True,
+        replace_design=True,
+    )
+    return "rerolled", updated
 
 
 async def ensure_market_banner_file(

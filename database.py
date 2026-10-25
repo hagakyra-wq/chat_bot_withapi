@@ -4015,6 +4015,36 @@ async def get_active_banner_item(user_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+async def get_banner_reroll_status(user_id: int, item_id: int) -> str:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT item.source,
+                   EXISTS(
+                       SELECT 1 FROM pending_banner_transfers transfer
+                       WHERE transfer.item_id = item.item_id
+                   ) AS is_transfer_pending,
+                   EXISTS(
+                       SELECT 1 FROM market_lots lot
+                       WHERE lot.item_id = item.item_id AND lot.status = 'open'
+                   ) AS is_listed
+            FROM banner_items item
+            WHERE item.item_id = ? AND item.user_id = ? AND item.is_active = 1
+            """,
+            (item_id, user_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return "missing"
+        if row["source"] == "owner":
+            return "owner_item"
+        if row["is_transfer_pending"]:
+            return "transfer_pending"
+        if row["is_listed"]:
+            return "listed"
+        return "ok"
+
+
 async def get_user_banner_items(
     user_id: int,
     *,
@@ -4092,27 +4122,69 @@ async def set_banner_item_rendering(
     backup_msg_id: int,
     content_hash: str,
     design_user_id: int,
+    replace_design: bool = False,
+    owner_user_id: int | None = None,
+    seed: str | None = None,
+    preset: str | None = None,
 ) -> None:
     async with _write_lock:
         async with _connect() as db:
-            cursor = await db.execute(
-                """
-                UPDATE banner_items
-                SET file_id = ?, backup_msg_id = ?, content_hash = ?, rendered_at = ?,
-                    design_user_id = COALESCE(design_user_id, ?)
-                WHERE item_id = ?
-                """,
-                (
-                    file_id,
-                    backup_msg_id,
-                    content_hash,
-                    time.time(),
-                    design_user_id,
-                    item_id,
-                ),
-            )
+            if replace_design:
+                if owner_user_id is None or not seed:
+                    raise ValueError(
+                        "Для замены дизайна нужны owner_user_id и seed."
+                    )
+                cursor = await db.execute(
+                    """
+                    UPDATE banner_items
+                    SET seed = ?, preset = ?, file_id = ?, backup_msg_id = ?,
+                        content_hash = ?, rendered_at = ?,
+                        design_user_id = COALESCE(design_user_id, ?)
+                    WHERE item_id = ? AND user_id = ? AND is_active = 1
+                      AND source != 'owner'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pending_banner_transfers
+                          WHERE pending_banner_transfers.item_id = banner_items.item_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM market_lots
+                          WHERE market_lots.item_id = banner_items.item_id
+                            AND market_lots.status = 'open'
+                      )
+                    """,
+                    (
+                        seed,
+                        preset,
+                        file_id,
+                        backup_msg_id,
+                        content_hash,
+                        time.time(),
+                        design_user_id,
+                        item_id,
+                        owner_user_id,
+                    ),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    UPDATE banner_items
+                    SET file_id = ?, backup_msg_id = ?, content_hash = ?, rendered_at = ?,
+                        design_user_id = COALESCE(design_user_id, ?)
+                    WHERE item_id = ?
+                    """,
+                    (
+                        file_id,
+                        backup_msg_id,
+                        content_hash,
+                        time.time(),
+                        design_user_id,
+                        item_id,
+                    ),
+                )
             if cursor.rowcount != 1:
-                raise sqlite3.DatabaseError(f"Баннер item_id={item_id} не найден.")
+                raise sqlite3.DatabaseError(
+                    f"Баннер item_id={item_id} не найден или его нельзя переделать."
+                )
             await db.commit()
         _record_write()
 

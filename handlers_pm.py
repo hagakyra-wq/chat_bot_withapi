@@ -20,7 +20,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction, ChatType
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationHandlerStop,
     CallbackQueryHandler,
@@ -34,7 +34,7 @@ from telegram.ext import (
 import database
 import autoresponder
 import personal_account
-from banner_store import get_profile_banner, send_banner
+from banner_store import get_profile_banner, reroll_active_banner, send_banner
 from casino import (
     handle_activation_message,
     handle_coin_promo_message,
@@ -196,6 +196,10 @@ def _profile_keyboard(
     )
 
 
+def _is_message_not_modified(error: BadRequest) -> bool:
+    return "message is not modified" in str(error).casefold()
+
+
 async def _send_profile_card(
     message: Message,
     user_id: int,
@@ -232,7 +236,11 @@ async def _send_profile_card(
             if animated
             else InputMediaPhoto(media=payload, caption=caption, parse_mode="HTML")
         )
-        await edit_message.edit_media(media=media_input, reply_markup=keyboard)
+        try:
+            await edit_message.edit_media(media=media_input, reply_markup=keyboard)
+        except BadRequest as exc:
+            if not _is_message_not_modified(exc):
+                raise
         message_id = edit_message.message_id
     else:
         sent = await send_banner(
@@ -308,6 +316,18 @@ async def _refresh_profile_card(
                 reply_markup=_profile_keyboard(profile, stats_period),
             )
             return
+        except BadRequest as exc:
+            if _is_message_not_modified(exc):
+                logging.debug(
+                    "Карточка профиля user_id=%s уже содержит актуальные данные.",
+                    user_id,
+                )
+                return
+            logging.warning(
+                "Не удалось обновить старое сообщение профиля user_id=%s; отправляю новую карточку.",
+                user_id,
+                exc_info=True,
+            )
         except TelegramError:
             logging.warning(
                 "Не удалось обновить старое сообщение профиля user_id=%s; отправляю новую карточку.",
@@ -450,23 +470,44 @@ async def on_profile_callback(
         return
 
     if action == "profile:banner":
+        progress = await query.message.reply_text("⏳ Переделываю баннер профиля…")
         try:
             active_item = await database.get_active_banner_item(user.id)
             if active_item is not None:
-                await query.message.reply_text(
-                    "Баннеры меняются в твоём инвентаре.",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🎒 Открыть инвентарь", callback_data="menu:inv")]]
-                    ),
+                status, _ = await reroll_active_banner(
+                    context.bot,
+                    user.id,
                 )
-                return
+                if status == "owner_item":
+                    await progress.edit_text(
+                        "Служебный баннер нельзя переделать.",
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("↩️ К профилю", callback_data="profile:show")]]
+                        ),
+                    )
+                    return
+                if status == "transfer_pending":
+                    await progress.edit_text(
+                        "Сначала отмени или заверши передачу этого баннера.",
+                    )
+                    return
+                if status == "listed":
+                    await progress.edit_text(
+                        "Сначала сними баннер с продажи, затем переделывай его.",
+                    )
+                    return
+                if status != "rerolled":
+                    raise RuntimeError(
+                        f"Не удалось переделать активный баннер: status={status}."
+                    )
+            else:
+                await database.set_meta(
+                    f"profile_decoration:{user.id}",
+                    secrets.token_hex(32),
+                )
             profile = await database.get_global_profile(user.id)
             if profile is None:
                 raise RuntimeError(f"Профиль пользователя {user.id} отсутствует.")
-            await database.set_meta(
-                f"profile_decoration:{user.id}",
-                secrets.token_hex(32),
-            )
             await _send_profile_card(
                 query.message,
                 user.id,
@@ -474,9 +515,10 @@ async def on_profile_callback(
                 context,
                 edit_message=query.message,
             )
+            await progress.edit_text("✅ Баннер профиля переделан.")
         except Exception:
             logging.exception("Не удалось переделать баннер профиля пользователя %s.", user.id)
-            await query.message.reply_text("Не удалось обновить баннер. Попробуй позже.")
+            await progress.edit_text("Не удалось обновить баннер. Попробуй позже.")
         return
 
     if action == "profile:skip:name":
