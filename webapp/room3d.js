@@ -294,7 +294,7 @@ export function createRoomScene(container, handlers) {
   fillLight.position.set(3, 3.8, -2);
   scene.add(fillLight);
 
-  const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 40);
+  const camera = new THREE.PerspectiveCamera(54, 1, 0.1, 40);
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.7));
   renderer.shadowMap.enabled = true;
@@ -328,7 +328,7 @@ export function createRoomScene(container, handlers) {
     const height = Math.max(1, container.clientHeight);
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
-    camera.fov = width / height < 0.78 ? 66 : 58;
+    camera.fov = width / height < 0.78 ? 62 : 54;
     camera.updateProjectionMatrix();
   }
 
@@ -337,11 +337,11 @@ export function createRoomScene(container, handlers) {
   resize();
 
   function positionCamera() {
-    const normal = new THREE.Vector3(0, 1.62, 2.2);
-    const close = new THREE.Vector3(0, 1.4, 1.9);
+    const normal = new THREE.Vector3(0, 2.35, 3.3);
+    const close = new THREE.Vector3(0, 2.05, 2.85);
     leanAmount += ((leaning ? 1 : 0) - leanAmount) * 0.12;
     camera.position.lerpVectors(normal, close, leanAmount);
-    camera.lookAt(0, 0.96 - leanAmount * 0.12, 0);
+    camera.lookAt(0, 0.96 - leanAmount * 0.08, 0);
   }
 
   function createSeat(player) {
@@ -507,20 +507,17 @@ export function createRoomScene(container, handlers) {
 
     const activeKeys = new Set();
     const hand = game?.your_hand || [];
-    const ownAngle = 0;
-    const ownCenterX = Math.sin(ownAngle) * 1.52;
-    const ownCenterZ = Math.cos(ownAngle) * 1.52;
     hand.forEach((card, index) => {
       const key = `face:${cardKey(card)}`;
       activeKeys.add(key);
       const mesh = getCard(key, card);
       const offset = index - (hand.length - 1) / 2;
       const position = new THREE.Vector3(
-        ownCenterX + offset * 0.29,
-        index === selectedHandIndex ? 1.68 : 1.5,
-        ownCenterZ,
+        offset * 0.31,
+        index === selectedHandIndex ? 1.2 : 1.095,
+        1.12,
       );
-      mesh.rotation.set(0.05, 0, -offset * 0.045);
+      mesh.rotation.set(-Math.PI / 2, 0, -offset * 0.035);
       mesh.position.copy(position);
       mesh.scale.setScalar(1);
       setCardAction(mesh, { kind: "hand", card, index });
@@ -650,8 +647,8 @@ export function createRoomScene(container, handlers) {
         * Math.tan((camera.fov * Math.PI) / 360)) / renderer.domElement.clientHeight;
       mesh.position.x += (event.clientX - drag.lastX) * unitsPerPixel;
       mesh.position.y -= (event.clientY - drag.lastY) * unitsPerPixel;
-      mesh.position.y = Math.max(1.15, mesh.position.y);
-      mesh.scale.setScalar(1.12);
+      mesh.position.y = Math.max(1.095, mesh.position.y);
+      mesh.scale.setScalar(1.06);
       drag.lastX = event.clientX;
       drag.lastY = event.clientY;
       drag.moved = Math.abs(dx) + Math.abs(dy) > 8;
@@ -685,7 +682,7 @@ export function createRoomScene(container, handlers) {
           handlers.onToast("Сейчас не твой ход.");
         }
       } else if (moved && mesh) {
-        mesh.position.y = 1.5;
+        mesh.position.y = 1.095;
         mesh.scale.setScalar(1);
         handlers.onSelectCard(hit.index);
       } else {
@@ -702,7 +699,7 @@ export function createRoomScene(container, handlers) {
     if (drag) {
       const mesh = cards.get(`face:${cardKey(drag.hit.card)}`);
       if (mesh) {
-        mesh.position.y = 1.5;
+        mesh.position.y = 1.095;
         mesh.scale.setScalar(1);
       }
       drag = null;
