@@ -10,6 +10,9 @@ const SUIT_LABELS = {
 const RANK_LABELS = { 11: "В", 12: "Д", 13: "К", 14: "Т" };
 const CARD_WIDTH = 0.46;
 const CARD_HEIGHT = 0.66;
+const HAND_CARD_SCALE = 0.34;
+const HAND_CARD_SPACING = 0.075;
+const HAND_CARD_DISTANCE = 0.8;
 
 function useSrgb(texture) {
   if ("colorSpace" in texture) texture.colorSpace = THREE.SRGBColorSpace;
@@ -41,7 +44,7 @@ function makeCardTexture(card, back = false) {
   canvas.width = 256;
   canvas.height = 358;
   const context = canvas.getContext("2d");
-  context.fillStyle = back ? "#252033" : "#fffaf0";
+  context.fillStyle = back ? "#252033" : "#f3ead6";
   roundedRect(context, 4, 4, 248, 350, 22);
   context.fill();
   context.strokeStyle = back ? "#d8bc8b" : "#c3a070";
@@ -231,7 +234,7 @@ function createRoomModel(scene) {
       color: 0xd7b783,
       metalness: 0.56,
       roughness: 0.3,
-      emissive: 0x3a2913,
+      emissive: 0x110c05,
     }),
   );
   inlay.rotation.x = Math.PI / 2;
@@ -240,13 +243,13 @@ function createRoomModel(scene) {
 
   const centerMark = new THREE.Mesh(
     new THREE.TorusGeometry(0.43, 0.009, 6, 48),
-    new THREE.MeshBasicMaterial({ color: 0xbba0c5, transparent: true, opacity: 0.6 }),
+    new THREE.MeshBasicMaterial({ color: 0x8c788d, transparent: true, opacity: 0.32 }),
   );
   centerMark.rotation.x = Math.PI / 2;
   centerMark.position.y = 1.078;
   scene.add(centerMark);
 
-  const ceilingLight = new THREE.PointLight(0xf3dfbd, 4.5, 16, 2);
+  const ceilingLight = new THREE.PointLight(0xf3dfbd, 1.15, 16, 2);
   ceilingLight.position.set(0, 5.4, 0);
   scene.add(ceilingLight);
 
@@ -284,13 +287,13 @@ export function createRoomScene(container, handlers) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x17161e);
   scene.fog = new THREE.Fog(0x17161e, 12, 28);
-  scene.add(new THREE.HemisphereLight(0xfff4e6, 0x31273c, 1.45));
-  const keyLight = new THREE.DirectionalLight(0xffe8c7, 2.3);
+  scene.add(new THREE.HemisphereLight(0xfff4e6, 0x31273c, 0.9));
+  const keyLight = new THREE.DirectionalLight(0xffe8c7, 1.1);
   keyLight.position.set(-3, 7, 5);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.set(1024, 1024);
   scene.add(keyLight);
-  const fillLight = new THREE.PointLight(0x987ed0, 2.6, 10, 2);
+  const fillLight = new THREE.PointLight(0x987ed0, 0.45, 10, 2);
   fillLight.position.set(3, 3.8, -2);
   scene.add(fillLight);
 
@@ -311,7 +314,6 @@ export function createRoomScene(container, handlers) {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const clock = new THREE.Clock();
-  const target = new THREE.Vector3(0, 0.88, 0);
   let room;
   let roomSignature = "";
   let drag = null;
@@ -337,11 +339,11 @@ export function createRoomScene(container, handlers) {
   resize();
 
   function positionCamera() {
-    const normal = new THREE.Vector3(0, 2.35, 3.3);
-    const close = new THREE.Vector3(0, 2.05, 2.85);
+    const normal = new THREE.Vector3(0, 1.85, 3);
+    const leaned = new THREE.Vector3(0, 1.95, 2.7);
     leanAmount += ((leaning ? 1 : 0) - leanAmount) * 0.12;
-    camera.position.lerpVectors(normal, close, leanAmount);
-    camera.lookAt(0, 0.96 - leanAmount * 0.08, 0);
+    camera.position.lerpVectors(normal, leaned, leanAmount);
+    camera.lookAt(0, 1.03 - leanAmount * 0.31, -0.2 + leanAmount * 0.05);
   }
 
   function createSeat(player) {
@@ -387,7 +389,7 @@ export function createRoomScene(container, handlers) {
   function disposeCard(key) {
     const mesh = cards.get(key);
     if (!mesh) return;
-    scene.remove(mesh);
+    mesh.parent?.remove(mesh);
     mesh.traverse((object) => {
       if (!object.isMesh) return;
       object.geometry.dispose();
@@ -435,6 +437,14 @@ export function createRoomScene(container, handlers) {
       cards.set(key, mesh);
     }
     return mesh;
+  }
+
+  function attachToHand(mesh) {
+    if (mesh.parent !== camera) camera.add(mesh);
+  }
+
+  function attachToTable(mesh) {
+    if (mesh.parent !== scene) scene.attach(mesh);
   }
 
   function setCardAction(mesh, action) {
@@ -511,15 +521,16 @@ export function createRoomScene(container, handlers) {
       const key = `face:${cardKey(card)}`;
       activeKeys.add(key);
       const mesh = getCard(key, card);
+      attachToHand(mesh);
       const offset = index - (hand.length - 1) / 2;
       const position = new THREE.Vector3(
-        offset * 0.31,
-        index === selectedHandIndex ? 1.2 : 1.095,
-        1.12,
+        offset * HAND_CARD_SPACING,
+        -0.36 + (index === selectedHandIndex ? 0.05 : 0),
+        -HAND_CARD_DISTANCE + index * 0.0015,
       );
-      mesh.rotation.set(-Math.PI / 2, 0, -offset * 0.035);
+      mesh.rotation.set(0, 0, -offset * 0.055);
       mesh.position.copy(position);
-      mesh.scale.setScalar(1);
+      mesh.scale.setScalar(HAND_CARD_SCALE);
       setCardAction(mesh, { kind: "hand", card, index });
     });
 
@@ -537,6 +548,7 @@ export function createRoomScene(container, handlers) {
         const key = `face:${cardKey(card)}`;
         activeKeys.add(key);
         const mesh = getCard(key, card);
+        attachToTable(mesh);
         const selected = selectedTarget === index && type === "attack";
         const position = new THREE.Vector3(x + dx, selected ? 1.13 : 1.09, z + dz);
         mesh.rotation.set(-Math.PI / 2, 0, type === "defense" ? 0.12 : -0.08);
@@ -559,6 +571,7 @@ export function createRoomScene(container, handlers) {
       const key = `deck:${index}`;
       activeKeys.add(key);
       const mesh = getCard(key, null, true);
+      attachToTable(mesh);
       mesh.position.set(-1.12 + index * 0.008, 1.08 + index * 0.004, -0.23);
       mesh.rotation.set(-Math.PI / 2, 0, 0);
       mesh.scale.setScalar(0.8);
@@ -575,6 +588,7 @@ export function createRoomScene(container, handlers) {
         const key = `back:${player.user_id}:${cardIndex}`;
         activeKeys.add(key);
         const mesh = getCard(key, null, true);
+        attachToTable(mesh);
         const offset = cardIndex - (count - 1) / 2;
         mesh.position.set(
           centerX + Math.sin(angle + Math.PI / 2) * offset * 0.11,
@@ -614,12 +628,14 @@ export function createRoomScene(container, handlers) {
     if (!room?.game) return;
     const hit = hitTest(event);
     if (hit?.kind === "hand") {
+      const mesh = cards.get(`face:${cardKey(hit.card)}`);
       drag = {
         hit,
         startX: event.clientX,
         startY: event.clientY,
         lastX: event.clientX,
         lastY: event.clientY,
+        startPosition: mesh.position.clone(),
         moved: false,
       };
       renderer.domElement.setPointerCapture(event.pointerId);
@@ -643,12 +659,12 @@ export function createRoomScene(container, handlers) {
       if (!mesh) return;
       const dx = event.clientX - drag.startX;
       const dy = event.clientY - drag.startY;
-      const unitsPerPixel = (2 * camera.position.distanceTo(target)
+      const unitsPerPixel = (2 * HAND_CARD_DISTANCE
         * Math.tan((camera.fov * Math.PI) / 360)) / renderer.domElement.clientHeight;
       mesh.position.x += (event.clientX - drag.lastX) * unitsPerPixel;
       mesh.position.y -= (event.clientY - drag.lastY) * unitsPerPixel;
-      mesh.position.y = Math.max(1.095, mesh.position.y);
-      mesh.scale.setScalar(1.06);
+      mesh.position.y = Math.max(-0.36, mesh.position.y);
+      mesh.scale.setScalar(HAND_CARD_SCALE * 1.06);
       drag.lastX = event.clientX;
       drag.lastY = event.clientY;
       drag.moved = Math.abs(dx) + Math.abs(dy) > 8;
@@ -666,26 +682,40 @@ export function createRoomScene(container, handlers) {
     window.clearTimeout(leanTimer);
     if (drag) {
       const movementY = drag.startY - event.clientY;
-      const { hit, moved } = drag;
+      const { hit, moved, startPosition } = drag;
       const mesh = cards.get(`face:${cardKey(hit.card)}`);
       drag = null;
       if (movementY > renderer.domElement.clientHeight * 0.09) {
         if (room.game.can_attack) {
+          if (mesh) mesh.scale.setScalar(HAND_CARD_SCALE);
           handlers.onAction("play", hit.index);
         } else if (room.game.stage === "defend" && room.game.is_your_turn) {
           if (selectedTarget === undefined || selectedTarget === null) {
+            if (mesh) {
+              mesh.position.copy(startPosition);
+              mesh.scale.setScalar(HAND_CARD_SCALE);
+            }
             handlers.onToast("Сначала выбери карту на столе, которую нужно отбить.");
           } else {
+            if (mesh) mesh.scale.setScalar(HAND_CARD_SCALE);
             handlers.onAction("defend", hit.index);
           }
         } else {
+          if (mesh) {
+            mesh.position.copy(startPosition);
+            mesh.scale.setScalar(HAND_CARD_SCALE);
+          }
           handlers.onToast("Сейчас не твой ход.");
         }
       } else if (moved && mesh) {
-        mesh.position.y = 1.095;
-        mesh.scale.setScalar(1);
+        mesh.position.copy(startPosition);
+        mesh.scale.setScalar(HAND_CARD_SCALE);
         handlers.onSelectCard(hit.index);
       } else {
+        if (mesh) {
+          mesh.position.copy(startPosition);
+          mesh.scale.setScalar(HAND_CARD_SCALE);
+        }
         handlers.onSelectCard(hit.index);
       }
       event.preventDefault();
@@ -699,8 +729,8 @@ export function createRoomScene(container, handlers) {
     if (drag) {
       const mesh = cards.get(`face:${cardKey(drag.hit.card)}`);
       if (mesh) {
-        mesh.position.y = 1.095;
-        mesh.scale.setScalar(1);
+        mesh.position.copy(drag.startPosition);
+        mesh.scale.setScalar(HAND_CARD_SCALE);
       }
       drag = null;
     }

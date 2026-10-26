@@ -51,8 +51,8 @@ export function createBuddy(onPhotoColor) {
     parent.add(mesh);
     return mesh;
   };
-  const ghostMaterial = material(0xb3a6f5, 0x6d59b1, 0.22);
-  const handMaterial = material(0xfaf7ff, 0x9a92d8, 0.2);
+  const ghostMaterial = material(0xb3a6f5, 0x6d59b1, 0.06);
+  const handMaterial = material(0xfaf7ff, 0x9a92d8, 0.05);
   const faceMaterial = material(0x241d39, 0x000000, 0, 0.32);
 
   const profile = [
@@ -87,7 +87,7 @@ export function createBuddy(onPhotoColor) {
     add(sphere(0.2), faceMaterial, [0, 0, 0], [1, 1.3, 0.5], eye);
     add(sphere(0.06), material(0xffffff), [0.06, 0.14, 0.075], [1, 1, 0.3], eye);
     eyes.push(eye);
-    const cheek = add(sphere(0.2), material(0xf18eaf, 0xf18eaf, 0.15), [side * 0.73, 1.82, 0.785], [0.8, 0.32, 0.12]);
+    const cheek = add(sphere(0.2),     material(0xf18eaf, 0xf18eaf, 0.04), [side * 0.73, 1.82, 0.785], [0.8, 0.32, 0.12]);
     cheeks.push(cheek);
   }
   const mouth = add(sphere(0.2), material(0x4a1030), [0, 1.78, 1], [1.1, 0.14, 0.5]);
@@ -109,7 +109,7 @@ export function createBuddy(onPhotoColor) {
   body.add(photo);
   const photoRim = new THREE.Mesh(
     new THREE.TorusGeometry(0.38, 0.025, 8, 40),
-    material(0xe4c395, 0x8d6c38, 0.22, 0.3),
+    material(0xe4c395, 0x8d6c38, 0.05, 0.3),
   );
   photoRim.position.copy(photo.position);
   photoRim.visible = false;
@@ -154,9 +154,9 @@ export function createBuddy(onPhotoColor) {
       vertexColors[index * 3 + 2] = vertex.b;
     }
     geometry.attributes.color.needsUpdate = true;
-    ghostMaterial.emissive.copy(color).multiplyScalar(0.55);
+    ghostMaterial.emissive.copy(color).multiplyScalar(0.12);
     handMaterial.color.copy(highlight);
-    handMaterial.emissive.copy(color).multiplyScalar(0.2);
+    handMaterial.emissive.copy(color).multiplyScalar(0.05);
     onPhotoColor?.(color);
   };
 
