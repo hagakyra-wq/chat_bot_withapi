@@ -905,6 +905,18 @@ async def dispatch(
         if not isinstance(room_code, str):
             return 400, {"error": "Укажи код комнаты."}
         return await mini_games.leave_room(room_code, user_id)
+    if path == "/api/v1/games/rooms/close" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        room = await database.get_minigame_room(room_code.strip().upper())
+        if room is None:
+            return 404, {"error": "Комната не найдена."}
+        is_owner = room["owner_id"] == user_id
+        is_admin = user_id == ADMIN_ID or await database.is_admin_user(user_id)
+        if not (is_owner or is_admin):
+            return 403, {"error": "Закрыть комнату могут только создатель или администратор."}
+        return await mini_games.close_room(room_code, user_id, force=is_admin)
     if path == "/api/v1/games/rooms/messages" and method == "POST":
         room_code = payload.get("room_code")
         if not isinstance(room_code, str):

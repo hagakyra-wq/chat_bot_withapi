@@ -51,8 +51,9 @@ async function connectTelegram() {
       method: "POST",
       body: { initData: webApp.initData },
     });
+    window.userRole = session.role || "user";
     accountName.textContent = session.first_name || `ID ${session.user_id}`;
-    accountRole.textContent = "Игровой профиль";
+    accountRole.textContent = window.userRole === "admin" ? "Администратор" : "Игровой профиль";
     const startParam = webApp.initDataUnsafe?.start_param || "";
     const roomMatch = /^room_([A-HJ-NP-Z2-9]{6})$/i.exec(startParam);
     if (roomMatch) {

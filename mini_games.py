@@ -398,6 +398,63 @@ async def _expire_room_if_needed(room: dict[str, Any]) -> None:
     )
 
 
+async def close_room(room_code: str, user_id: int, *, force: bool = False) -> tuple[int, dict[str, Any]]:
+    room = await database.get_minigame_room(room_code.strip().upper())
+    if room is None:
+        return 404, {"error": "Комната не найдена."}
+    await _expire_room_if_needed(room)
+    room = await database.get_minigame_room(room_code.strip().upper())
+    if room is None:
+        return 404, {"error": "Комната не найдена."}
+    if room["status"] == "finished":
+        return 409, {"error": "Комната уже закрыта."}
+    if room["owner_id"] != user_id and not force:
+        return 403, {"error": "Закрыть комнату может только создатель комнаты."}
+    database_user_id = room["owner_id"] if force and room["owner_id"] != user_id else user_id
+    finish_reason = "admin_closed" if force and room["owner_id"] != user_id else "owner_closed"
+    if room["status"] == "playing":
+        state = room["state"]
+        state["finish_reason"] = finish_reason
+        if state.get("game"):
+            game = state["game"]
+            game["status"] = "finished"
+            game["stage"] = "finished"
+            game["finish_reason"] = finish_reason
+            game["winners"] = []
+            game["losers"] = []
+        if int(state.get("stake_cents", 0)):
+            payouts = _room_payouts(room, timeout=True)
+            state["settlement_payouts"] = payouts
+            state["settlement_reason"] = "timeout"
+        else:
+            payouts = None
+        updated = await database.update_minigame_room(
+            room["room_code"],
+            database_user_id,
+            room["version"],
+            "finished",
+            state,
+            payouts=payouts,
+            settlement_reason="timeout" if payouts else None,
+        )
+        if not updated:
+            return 409, {"error": "Комната изменилась. Обнови её и попробуй снова."}
+        return 200, {"status": "closed", "finish_reason": finish_reason}
+
+    state = room["state"]
+    state["finish_reason"] = finish_reason
+    updated = await database.update_minigame_room(
+        room["room_code"],
+        database_user_id,
+        room["version"],
+        "finished",
+        state,
+    )
+    if not updated:
+        return 409, {"error": "Комната изменилась. Обнови её и попробуй снова."}
+    return 200, {"status": "closed", "finish_reason": state["finish_reason"]}
+
+
 async def leave_room(room_code: str, user_id: int) -> tuple[int, dict[str, Any]]:
     room = await database.get_minigame_room(room_code.strip().upper())
     if room is None:

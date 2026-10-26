@@ -165,9 +165,6 @@ async def room_invite_command(
         await message.reply_text("Использование: `/room КОД_КОМНАТЫ`.", parse_mode="Markdown")
         return
     room = await database.get_minigame_room(code)
-    if room is not None:
-        await mini_games.get_room(code, user.id)
-        room = await database.get_minigame_room(code)
     if room is None or room["status"] != "lobby":
         await message.reply_text("Открытая комната не найдена или уже началась.")
         return

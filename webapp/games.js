@@ -303,8 +303,11 @@ function renderRoom(room) {
   const inviteForm = document.getElementById("room-invite-form");
   inviteForm.hidden = !ownerInLobby;
   const startButton = document.getElementById("room-start");
+  const closeButton = document.getElementById("room-close");
   startButton.hidden = !ownerInLobby;
   startButton.disabled = !full;
+  closeButton.hidden = !(room.is_owner || window.userRole === "admin");
+  closeButton.disabled = room.status === "finished";
   document.getElementById("room-share").hidden = room.status !== "lobby";
   document.getElementById("room-chat-form").hidden = room.status === "finished";
   document.getElementById("room-help").textContent = room.status === "lobby"
@@ -328,6 +331,10 @@ function renderRoom(room) {
       winner.textContent = "Время ожидания вышло. Комната закрыта, ставка не списывалась.";
     } else if (room.finish_reason === "owner_left") {
       winner.textContent = "Создатель покинул комнату. Комната закрыта.";
+    } else if (room.finish_reason === "owner_closed") {
+      winner.textContent = "Создатель закрыл комнату.";
+    } else if (room.finish_reason === "admin_closed") {
+      winner.textContent = "Администратор закрыл комнату.";
     } else if (!game) {
       winner.textContent = "Комната завершена.";
     } else {
@@ -555,6 +562,32 @@ export function initGames() {
       );
     } else if (currentRoom.status !== "playing" || window.confirm("Выйти из комнаты?")) {
       leave();
+    }
+  });
+  document.getElementById("room-close").addEventListener("click", async () => {
+    if (!currentRoom) return;
+    const confirmText = currentRoom.is_owner
+      ? "Закрыть комнату и завершить текущую сессию?"
+      : "Закрыть комнату как администратор?";
+    const shouldClose = window.Telegram?.WebApp?.showConfirm
+      ? await new Promise((resolve) => {
+          window.Telegram.WebApp.showConfirm(confirmText, resolve);
+        })
+      : window.confirm(confirmText);
+    if (!shouldClose) return;
+    try {
+      const result = await apiRequest("/api/v1/games/rooms/close", {
+        method: "POST",
+        body: { room_code: currentRoom.room_code },
+      });
+      showToast(result.message || "Комната закрыта.");
+      currentRoom = null;
+      window.clearInterval(roomClockTimer);
+      document.getElementById("room-view").hidden = true;
+      document.getElementById("room-lobby").hidden = false;
+      await loadRooms();
+    } catch (error) {
+      showToast(error.message, true);
     }
   });
   document.getElementById("room-chat-form").addEventListener("submit", async (event) => {
