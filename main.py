@@ -18,10 +18,16 @@ from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, parse_qs, urlsplit
+from urllib.parse import parse_qsl, parse_qs, urlencode, urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageReactionUpdated, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MessageReactionUpdated,
+    Update,
+    WebAppInfo,
+)
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -56,6 +62,7 @@ from config import (
     DATABASE_PATH,
     HISTORY_ENCRYPTION_KEY,
     LOGS_CHAT,
+    MINI_APP_URL,
     MOSCOW_TIMEZONE,
     PORT,
     TELEGRAM_TOKEN,
@@ -145,6 +152,90 @@ def _validate_web_app_init_data(
     return user["id"], first_name, username, photo_url
 
 
+def _room_app_url(room_code: str) -> str | None:
+    if not MINI_APP_URL:
+        return None
+    try:
+        parsed = urlsplit(MINI_APP_URL)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
+        logging.error("MINI_APP_URL содержит некорректный адрес.")
+        return None
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        logging.error("MINI_APP_URL должен быть HTTPS URL без логина/пароля.")
+        return None
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query["room"] = [room_code]
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path or "/",
+        urlencode(query, doseq=True),
+        "",
+    ))
+
+
+async def room_start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None or update.effective_chat is None:
+        return
+    if update.effective_chat.type != "private":
+        return
+
+    argument = context.args[0].strip().upper() if context.args else ""
+    match = re.fullmatch(r"ROOM_([A-HJ-NP-Z2-9]{6})", argument)
+    if match is None:
+        await on_private_message(update, context)
+        return
+
+    code = match.group(1)
+    room = await database.get_minigame_room(code)
+    if room is None or room["status"] == "finished":
+        await message.reply_text(
+            f"Комната {code} уже закрыта или не найдена. "
+            "Попроси друзей прислать новое приглашение."
+        )
+        return
+    players = room["state"].get("players", [])
+    is_player = any(int(player["user_id"]) == user.id for player in players)
+    if room["status"] != "lobby" and not is_player:
+        await message.reply_text("Игра уже началась — новые игроки войти не могут.")
+        return
+    if not is_player and len(players) >= int(room["max_players"]):
+        await message.reply_text("В этой комнате уже заняты все места.")
+        return
+
+    app_url = _room_app_url(code)
+    if app_url:
+        button = InlineKeyboardButton(
+            "Открыть комнату",
+            web_app=WebAppInfo(url=app_url),
+        )
+        hint = "Нажми кнопку, чтобы открыть Mini App и занять свободное место."
+    else:
+        await message.reply_text(
+            f"Комната {code} открыта. Открой Mini App Юбары из меню бота "
+            "и введи этот код. Для открытия по кнопке администратору нужно "
+            "задать MINI_APP_URL в Render."
+        )
+        return
+    await message.reply_text(
+        f"Приглашение в комнату «Дурак» · {code}\n{hint}",
+        reply_markup=InlineKeyboardMarkup([[button]]),
+    )
+
+
 async def room_invite_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -175,12 +266,17 @@ async def room_invite_command(
         if not username:
             raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
         invite_url = f"https://t.me/{username}?startapp=room_{code}"
+        fallback_url = f"https://t.me/{username}?start=room_{code}"
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Войти в комнату", url=invite_url)]],
+            [
+                [InlineKeyboardButton("Войти в комнату", url=invite_url)],
+                [InlineKeyboardButton("Если не открылось — сюда", url=fallback_url)],
+            ],
         )
         await message.reply_text(
             f"Комната Юбары · «Дурак» · {code}\n"
-            "Первый игрок, который войдёт по кнопке, займёт свободное место.",
+            "Первый игрок, который войдёт, займёт свободное место. "
+            "Если первая кнопка не открылась — используй запасную.",
             reply_markup=keyboard,
         )
         return
@@ -208,8 +304,12 @@ async def room_invite_command(
     if not username:
         raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
     invite_url = f"https://t.me/{username}?startapp=room_{code}"
+    fallback_url = f"https://t.me/{username}?start=room_{code}"
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Войти в комнату", url=invite_url)]]
+        [
+            [InlineKeyboardButton("Войти в комнату", url=invite_url)],
+            [InlineKeyboardButton("Если не открылось — сюда", url=fallback_url)],
+        ]
     )
     await message.reply_text(
         f"Комната Юбары · «Дурак»\n"
@@ -226,6 +326,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
         "/assets/api.js": ("api.js", "text/javascript; charset=utf-8"),
         "/assets/games.js": ("games.js", "text/javascript; charset=utf-8"),
+        "/assets/sounds.js": ("sounds.js", "text/javascript; charset=utf-8"),
         "/assets/buddy3d.js": ("buddy3d.js", "text/javascript; charset=utf-8"),
         "/assets/room3d.js": ("room3d.js", "text/javascript; charset=utf-8"),
         "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
@@ -234,7 +335,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         request_path = urlsplit(self.path).path
-        if self.path in ("/", "/index.html"):
+        if request_path in ("/", "/index.html"):
             page_path = Path(__file__).resolve().parent / "webapp" / "index.html"
             try:
                 page = page_path.read_bytes()
@@ -248,8 +349,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(page)
             return
-        if self.path in self._static_assets:
-            asset_name, content_type = self._static_assets[self.path]
+        if request_path in self._static_assets:
+            asset_name, content_type = self._static_assets[request_path]
             asset_path = Path(__file__).resolve().parent / "webapp" / asset_name
             try:
                 asset = asset_path.read_bytes()
@@ -419,13 +520,34 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         init_data = self.headers.get("X-Telegram-Init-Data", "")
         if self.path == "/api/session" and method == "POST":
             init_data = payload.get("initData", "")
-        if not isinstance(init_data, str) or len(init_data) > 4096:
-            self.send_error(401, "Telegram identity could not be verified")
+        if not isinstance(init_data, str):
+            self._send_json_error(
+                401,
+                "Telegram не передал данные авторизации. Открой Mini App кнопкой внутри Telegram.",
+            )
+            return
+        if len(init_data) > 4096:
+            self._send_json_error(
+                401,
+                "Данные Telegram имеют некорректный размер. Закрой Mini App и открой его заново.",
+            )
             return
         try:
             user_id, first_name, username, photo_url = _validate_web_app_init_data(init_data)
-        except ValueError:
-            self.send_error(401, "Telegram identity could not be verified")
+        except ValueError as error:
+            if not init_data:
+                reason = (
+                    "Telegram не передал данные авторизации. "
+                    "Открой Mini App кнопкой внутри Telegram."
+                )
+            elif "Expired" in str(error):
+                reason = "Срок данных Telegram истёк. Закрой Mini App и открой его заново."
+            else:
+                reason = (
+                    "Не удалось проверить данные Telegram. "
+                    "Открой Mini App заново кнопкой внутри Telegram."
+                )
+            self._send_json_error(401, reason)
             return
 
         parsed_url = urlsplit(self.path)
@@ -465,6 +587,15 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             return
 
         body = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_json_error(self, status: int, message: str) -> None:
+        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1153,6 +1284,9 @@ def build_application() -> Application:
     application.add_handler(build_delete_all_data_handler())
     application.add_handler(build_history_conversation_handler())
     application.add_handler(build_personal_autoresponder_conversation_handler())
+    application.add_handler(
+        CommandHandler("start", room_start_command, filters=filters.ChatType.PRIVATE)
+    )
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,

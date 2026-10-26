@@ -1,4 +1,10 @@
 import { apiRequest, formatCoinAmount, showToast } from "./api.js";
+import {
+  isGameSoundEnabled,
+  playGameSound,
+  setGameSoundEnabled,
+  unlockGameAudio,
+} from "./sounds.js";
 
 let currentRoom;
 let selectedHandIndex = null;
@@ -14,6 +20,60 @@ let room3dErrorRoom = null;
 let inviteGroupsRoomCode = null;
 let inviteGroupsError = null;
 let gamesPageActive = false;
+
+async function enterRoomFullscreen(notify = false) {
+  const webApp = window.Telegram?.WebApp;
+  let lastError;
+  try {
+    if (webApp?.requestFullscreen && !webApp.isFullscreen) {
+      await webApp.requestFullscreen();
+      if (webApp.isFullscreen) return;
+    }
+  } catch (error) {
+    lastError = error;
+  }
+  if (document.fullscreenElement) return;
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+      if (document.fullscreenElement) return;
+    }
+  } catch (error) {
+    lastError = error;
+  }
+  if (webApp?.expand) {
+    webApp.expand();
+    if (!notify) return;
+  }
+  if (lastError) console.warn("Не удалось включить полноэкранный режим.", lastError);
+  if (notify) showToast("Полноэкранный режим недоступен. Mini App раскрыт насколько позволяет Telegram.", true);
+}
+
+async function exitRoomFullscreen() {
+  const webApp = window.Telegram?.WebApp;
+  if (webApp?.isFullscreen && webApp.exitFullscreen) {
+    await webApp.exitFullscreen();
+  } else if (document.fullscreenElement && document.exitFullscreen) {
+    await document.exitFullscreen();
+  } else {
+    webApp?.expand();
+  }
+}
+
+function updateFullscreenButton() {
+  const button = document.getElementById("room-fullscreen");
+  if (!button) return;
+  const active = Boolean(
+    window.Telegram?.WebApp?.isFullscreen || document.fullscreenElement,
+  );
+  button.textContent = active ? "Свернуть" : "На весь экран";
+  button.setAttribute("aria-label", active ? "Выйти из полного экрана" : "На весь экран");
+}
+
+function updateSoundButton() {
+  const button = document.getElementById("room-sound");
+  if (button) button.textContent = isGameSoundEnabled() ? "Звук: вкл." : "Звук: выкл.";
+}
 
 const suitLabels = {
   clubs: ["♣", "clubs"],
@@ -299,16 +359,31 @@ function renderTable(room) {
 }
 
 function renderRoom(room) {
+  const previousRoom = currentRoom;
   const sameRoom = currentRoom?.room_code === room.room_code;
   if (!sameRoom || currentRoom.version !== room.version) {
     selectedHandIndex = null;
     selectedTarget = null;
   }
   currentRoom = room;
+  const hasGameScene = room.status === "playing" || (room.status === "finished" && Boolean(room.game));
+  const wasPlaying = previousRoom?.room_code === room.room_code
+    && (previousRoom.status === "playing" || previousRoom.status === "finished");
+  document.querySelector(".app-shell").classList.toggle("is-room-playing", hasGameScene);
+  document.body.classList.toggle("is-room-playing", hasGameScene);
+  if (hasGameScene && !wasPlaying) void enterRoomFullscreen();
+  if (wasPlaying && previousRoom.status !== "finished" && room.status === "finished") {
+    playGameSound("win");
+  } else if (
+    wasPlaying
+    && room.status === "playing"
+    && JSON.stringify(previousRoom.game?.table) !== JSON.stringify(room.game?.table)
+  ) {
+    playGameSound("card");
+  }
   if (selectedTarget !== null && !room.game?.table[selectedTarget]) selectedTarget = null;
   document.getElementById("room-lobby").hidden = true;
   document.getElementById("room-view").hidden = false;
-  const hasGameScene = room.status === "playing" || (room.status === "finished" && Boolean(room.game));
   const roomContent = document.getElementById("room-content");
   const playerPanel = document.getElementById("room-player-panel");
   const chat = playerPanel.querySelector(".room-chat");
@@ -348,6 +423,8 @@ function renderRoom(room) {
   closeButton.disabled = room.status === "finished";
   document.getElementById("room-share").hidden = room.status !== "lobby";
   document.getElementById("room-chat-form").hidden = room.status === "finished";
+  document.getElementById("room-fullscreen").hidden = !hasGameScene;
+  document.getElementById("room-sound").hidden = !hasGameScene;
   document.getElementById("room-help").textContent = room.status === "lobby"
     ? full
       ? "Все места заняты. Создатель комнаты может начинать."
@@ -407,6 +484,11 @@ async function refreshRoom() {
   } catch (error) {
     if (error.message.includes("не найдена")) {
       currentRoom = null;
+      document.querySelector(".app-shell").classList.remove("is-room-playing");
+      document.body.classList.remove("is-room-playing");
+      void exitRoomFullscreen().catch((fullscreenError) => {
+        console.error("Не удалось выйти из полного экрана.", fullscreenError);
+      });
       syncRoomScene(null, false);
       document.getElementById("room-view").hidden = true;
       document.getElementById("room-lobby").hidden = false;
@@ -524,6 +606,8 @@ export function initGames() {
   });
   document.getElementById("room-start").addEventListener("click", async () => {
     if (!currentRoom) return;
+    unlockGameAudio();
+    void enterRoomFullscreen();
     try {
       const room = await apiRequest("/api/v1/games/rooms/start", {
         method: "POST",
@@ -575,6 +659,9 @@ export function initGames() {
     if (!currentRoom) return;
     if (currentRoom.status === "finished") {
       currentRoom = null;
+      document.querySelector(".app-shell").classList.remove("is-room-playing");
+      document.body.classList.remove("is-room-playing");
+      void exitRoomFullscreen().catch((error) => console.error("Не удалось выйти из полного экрана.", error));
       syncRoomScene(null, false);
       window.clearInterval(roomClockTimer);
       document.getElementById("room-view").hidden = true;
@@ -589,6 +676,9 @@ export function initGames() {
           body: { room_code: currentRoom.room_code },
         });
         currentRoom = null;
+        document.querySelector(".app-shell").classList.remove("is-room-playing");
+        document.body.classList.remove("is-room-playing");
+        void exitRoomFullscreen().catch((error) => console.error("Не удалось выйти из полного экрана.", error));
         syncRoomScene(null, false);
         window.clearInterval(roomClockTimer);
         document.getElementById("room-view").hidden = true;
@@ -628,6 +718,9 @@ export function initGames() {
       });
       showToast(result.message || "Комната закрыта.");
       currentRoom = null;
+      document.querySelector(".app-shell").classList.remove("is-room-playing");
+      document.body.classList.remove("is-room-playing");
+      void exitRoomFullscreen().catch((error) => console.error("Не удалось выйти из полного экрана.", error));
       syncRoomScene(null, false);
       window.clearInterval(roomClockTimer);
       document.getElementById("room-view").hidden = true;
@@ -657,4 +750,34 @@ export function initGames() {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action) submitAction(action);
   });
+  document.getElementById("room-join-form").addEventListener("submit", () => {
+    unlockGameAudio();
+    void enterRoomFullscreen();
+  }, { capture: true });
+  document.getElementById("room-fullscreen").addEventListener("click", async () => {
+    try {
+      if (window.Telegram?.WebApp?.isFullscreen || document.fullscreenElement) {
+        await exitRoomFullscreen();
+      } else {
+        await enterRoomFullscreen(true);
+      }
+    } catch (error) {
+      showToast("Не удалось изменить режим экрана.", true);
+      console.error("Не удалось изменить полноэкранный режим.", error);
+    }
+    updateFullscreenButton();
+  });
+  document.getElementById("room-sound").addEventListener("click", () => {
+    const enabled = !isGameSoundEnabled();
+    setGameSoundEnabled(enabled);
+    updateSoundButton();
+    if (enabled) {
+      void unlockGameAudio().then(() => playGameSound("join"));
+    }
+  });
+  document.getElementById("card-table").addEventListener("pointerdown", unlockGameAudio);
+  document.addEventListener("fullscreenchange", updateFullscreenButton);
+  window.Telegram?.WebApp?.onEvent?.("fullscreenChanged", updateFullscreenButton);
+  updateSoundButton();
+  updateFullscreenButton();
 }

@@ -294,7 +294,7 @@ export function createRoomScene(container, handlers) {
   fillLight.position.set(3, 3.8, -2);
   scene.add(fillLight);
 
-  const camera = new THREE.PerspectiveCamera(49, 1, 0.1, 40);
+  const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 40);
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.7));
   renderer.shadowMap.enabled = true;
@@ -328,7 +328,7 @@ export function createRoomScene(container, handlers) {
     const height = Math.max(1, container.clientHeight);
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
-    camera.fov = width / height < 0.78 ? 57 : 49;
+    camera.fov = width / height < 0.78 ? 66 : 58;
     camera.updateProjectionMatrix();
   }
 
@@ -337,11 +337,11 @@ export function createRoomScene(container, handlers) {
   resize();
 
   function positionCamera() {
-    const normal = new THREE.Vector3(0, 4.35, 6.8);
-    const close = new THREE.Vector3(0, 3.55, 4.7);
+    const normal = new THREE.Vector3(0, 1.62, 2.2);
+    const close = new THREE.Vector3(0, 1.4, 1.9);
     leanAmount += ((leaning ? 1 : 0) - leanAmount) * 0.12;
     camera.position.lerpVectors(normal, close, leanAmount);
-    camera.lookAt(target);
+    camera.lookAt(0, 0.96 - leanAmount * 0.12, 0);
   }
 
   function createSeat(player) {
@@ -481,6 +481,10 @@ export function createRoomScene(container, handlers) {
       const id = String(player.user_id);
       const seat = seats.get(id) || createSeat(player);
       seat.player = player;
+      const isLocalPlayer = Number(player.user_id) === Number(window.telegramUserId);
+      seat.seat.visible = !isLocalPlayer;
+      seat.buddy.group.visible = !isLocalPlayer;
+      seat.label.visible = !isLocalPlayer;
       seat.buddy.setState(
         player.user_id === game?.current_actor_id ? "talk" : "idle",
       );

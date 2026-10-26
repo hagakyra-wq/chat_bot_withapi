@@ -1,8 +1,9 @@
-const webApp = window.Telegram?.WebApp;
-
 export async function apiRequest(path, options = {}) {
+  const webApp = window.Telegram?.WebApp;
   if (!webApp?.initData) {
-    throw new Error("Открой Mini App через Telegram, чтобы подтвердить аккаунт.");
+    throw new Error(
+      "Telegram не передал данные авторизации. Закрой страницу и открой Mini App кнопкой в Telegram.",
+    );
   }
 
   const headers = new Headers(options.headers || {});

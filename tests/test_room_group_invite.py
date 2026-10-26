@@ -57,6 +57,12 @@ class RoomGroupInviteTests(unittest.IsolatedAsyncioTestCase):
         self.bot.send_message.assert_awaited_once()
         self.assertEqual(self.bot.send_message.await_args.kwargs["chat_id"], -100123)
         self.assertIn("Свободно мест: 1", self.bot.send_message.await_args.kwargs["text"])
+        keyboard = self.bot.send_message.await_args.kwargs["reply_markup"]
+        self.assertEqual(len(keyboard.inline_keyboard), 2)
+        self.assertIn(
+            "?start=room_ABC234",
+            keyboard.inline_keyboard[1][0].url,
+        )
 
     async def test_unconnected_group_is_rejected(self):
         with (
@@ -92,6 +98,31 @@ class RoomGroupInviteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 400)
         self.assertIn("подключённую группу", response["error"])
         self.bot.send_message.assert_not_awaited()
+
+    async def test_current_player_can_reopen_started_room_from_invite(self):
+        active_room = {
+            "status": "playing",
+            "state": {"players": [{"user_id": 10}]},
+        }
+        with (
+            patch(
+                "mini_games.database.get_minigame_room",
+                new=AsyncMock(return_value=active_room),
+            ),
+            patch("mini_games._expire_room_if_needed", new=AsyncMock()),
+            patch("mini_games._public_room", return_value={"status": "playing"}),
+            patch("mini_games.database.join_minigame_room", new=AsyncMock()) as join,
+        ):
+            status, response = await mini_games.join_room(
+                10,
+                "Player",
+                None,
+                {"room_code": "ABC234"},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response["status"], "playing")
+        join.assert_not_awaited()
 
     def test_photo_urls_are_limited_to_telegram_hosts(self):
         self.assertEqual(

@@ -40,13 +40,16 @@ function showPage(pageName) {
 async function connectTelegram() {
   const accountName = document.getElementById("account-name");
   const accountRole = document.getElementById("account-role");
-  if (!webApp?.initData) {
-    accountName.textContent = "Открой через Telegram";
-    accountRole.textContent = "Аккаунт не подтверждён";
-    return;
-  }
-
   try {
+    webApp?.ready();
+    for (let attempt = 0; webApp && !webApp.initData && attempt < 10; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+    if (!webApp?.initData) {
+      throw new Error(
+        "Telegram не передал данные авторизации. Закрой страницу и открой Mini App кнопкой внутри Telegram.",
+      );
+    }
     const session = await apiRequest("/api/session", {
       method: "POST",
       body: { initData: webApp.initData },
@@ -55,7 +58,9 @@ async function connectTelegram() {
     accountName.textContent = session.first_name || `ID ${session.user_id}`;
     accountRole.textContent = window.userRole === "admin" ? "Администратор" : "Игровой профиль";
     const startParam = webApp.initDataUnsafe?.start_param || "";
-    const roomMatch = /^room_([A-HJ-NP-Z2-9]{6})$/i.exec(startParam);
+    const queryRoom = new URLSearchParams(window.location.search).get("room") || "";
+    const roomMatch = /^room_([A-HJ-NP-Z2-9]{6})$/i.exec(startParam)
+      || /^([A-HJ-NP-Z2-9]{6})$/i.exec(queryRoom);
     if (roomMatch) {
       showPage("rooms");
       await joinRoomByCode(roomMatch[1]);
@@ -67,7 +72,6 @@ async function connectTelegram() {
   }
 }
 
-webApp?.ready();
 webApp?.expand();
 initGames();
 document.querySelectorAll("[data-page]").forEach((button) => {

@@ -238,6 +238,11 @@ async def join_room(
     room = await database.get_minigame_room(normalized)
     if room is None:
         return 409, {"error": "Комната не найдена. Проверь код и попробуй ещё раз."}
+    if room["status"] != "lobby":
+        response = _public_room(room, user_id)
+        if response is not None:
+            return 200, response
+        return 409, {"error": "Игра уже началась, присоединиться нельзя."}
     if room["state"].get("mode") == "coins":
         balance = await database.get_duel_balance(user_id, username)
         if balance < int(room["state"].get("stake_cents", 0)):
@@ -641,14 +646,23 @@ async def invite_room_to_group(
             raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
         invite_url = f"https://t.me/{username}?startapp=room_{normalized}"
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Войти в комнату", url=invite_url)]],
+            [
+                [InlineKeyboardButton("Войти в комнату", url=invite_url)],
+                [
+                    InlineKeyboardButton(
+                        "Если не открылось — открыть бота",
+                        url=f"https://t.me/{username}?start=room_{normalized}",
+                    )
+                ],
+            ],
         )
         await bot.send_message(
             chat_id=group_id,
             text=(
                 f"Комната Юбары · «Дурак» · {normalized}\n"
                 f"Свободно мест: {room['max_players'] - len(room['state']['players'])}. "
-                "Кто первым войдёт, тот и сыграет."
+                "Кто первым войдёт, тот и сыграет. Если Mini App не открылся, "
+                "нажми запасную кнопку и продолжи вход через бота."
             ),
             reply_markup=keyboard,
         )
