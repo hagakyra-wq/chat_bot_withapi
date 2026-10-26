@@ -8,6 +8,7 @@
   <title>Игровые комнаты — Юбара</title>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
@@ -65,7 +66,7 @@
       </section>
 
       <section class="page" id="page-rooms" aria-labelledby="rooms-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ОДИН ЧАС · СВОИ ПРАВИЛА</span><h2 id="rooms-title">Игровая комната</h2><p>Выбери игру, пригласи компанию и играй бесплатно или на монеты.</p></div>
+        <div class="page-intro"><span class="eyebrow">ОДИН ЧАС · СВОИ ПРАВИЛА</span><p id="rooms-title">Настрой комнату и собери игроков. До старта здесь лобби, после — игровой стол.</p></div>
         <div id="room-lobby">
           <div class="games-room-forms">
             <form class="panel game-form" id="room-create-form">
@@ -91,12 +92,12 @@
             <div><span class="eyebrow" id="room-status-label">КОМНАТА</span><h3>Стол <button class="room-code-copy" id="room-code-label" type="button" aria-label="Скопировать код комнаты"></button></h3></div>
             <div class="room-heading-actions"><button class="button button-quiet" id="room-share" type="button">Скопировать /room</button><button class="button button-quiet" id="room-exit" type="button">Выйти</button><button class="button button-quiet danger" id="room-close" type="button" hidden>Закрыть комнату</button></div>
           </div>
-          <div class="room-content">
-            <div>
+          <div class="room-content" id="room-content">
+            <div id="room-player-panel">
               <div class="room-players" id="room-players"></div>
               <form class="room-invite-form" id="room-invite-form">
-                <label class="select-field"><span>Пригласить по Telegram username</span><input name="username" type="text" maxlength="33" placeholder="@username" required></label>
-                <button class="button button-quiet" type="submit">Отправить приглашение</button>
+                <label class="select-field"><span>Поделиться комнатой в группе</span><select name="group_id" id="room-invite-group" required><option value="">Загружаем группы…</option></select></label>
+                <button class="button button-quiet" type="submit" disabled>Отправить приглашение</button>
               </form>
               <button class="button button-primary room-start-button" id="room-start" type="button" hidden>Начать игру</button>
               <p class="muted room-help" id="room-help">Поделись командой /room КОД в группе — первые игроки займут свободные места.</p>
@@ -110,15 +111,14 @@
               </section>
             </div>
             <div class="card-table" id="card-table" hidden aria-label="Круглый игровой стол">
-              <div class="table-lean-hint" aria-hidden="true">Удерживай стол, чтобы посмотреть на него</div>
-              <p class="table-idle" id="table-idle">Стол готов. Ждём игроков…</p>
-              <div class="table-meta"><span id="deck-count">Колода: —</span><span class="trump-badge" id="trump-badge"></span></div>
-              <div class="table-opponents" id="table-opponents"></div>
-              <div class="table-cards" id="table-cards"><p class="table-empty">Стол пока пуст</p></div>
+              <div class="scene-hud-top">
+                <span id="deck-count">Колода: —</span>
+                <span class="trump-badge" id="trump-badge"></span>
+              </div>
               <div class="table-turn" id="table-turn" aria-live="polite"></div>
-              <div class="player-hand" id="player-hand"></div>
-              <div class="table-actions" id="table-actions"></div>
+              <p class="table-swipe-hint" id="table-swipe-hint">Свайпни карту вверх, чтобы сыграть · удерживай стол, чтобы наклониться</p>
             </div>
+            <div class="table-actions" id="table-actions"></div>
           </div>
           <p class="room-winner" id="room-winner" hidden></p>
         </section>

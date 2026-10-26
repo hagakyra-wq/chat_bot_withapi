@@ -7,6 +7,13 @@ let roomPoll;
 let roomPollError = null;
 let initialized = false;
 let roomClockTimer;
+let room3d;
+let room3dRoomCode = null;
+let room3dLoadPromise;
+let room3dErrorRoom = null;
+let inviteGroupsRoomCode = null;
+let inviteGroupsError = null;
+let gamesPageActive = false;
 
 const suitLabels = {
   clubs: ["♣", "clubs"],
@@ -21,10 +28,6 @@ function element(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-}
-
-function cardLabel(card) {
-  return `${rankLabels[card.rank] || card.rank}${suitLabels[card.suit][0]}`;
 }
 
 function makePlayingCard(card, { selected = false, small = false } = {}) {
@@ -171,17 +174,105 @@ function addActionButton(container, label, action, disabled = false) {
   container.append(button);
 }
 
+async function loadRoomInviteGroups(roomCode) {
+  if (inviteGroupsRoomCode === roomCode) return;
+  inviteGroupsRoomCode = roomCode;
+  const select = document.getElementById("room-invite-group");
+  const submit = document.querySelector("#room-invite-form button[type=submit]");
+  select.disabled = true;
+  submit.disabled = true;
+  select.replaceChildren(element("option", "", "Загружаем группы…"));
+  try {
+    const { groups } = await apiRequest("/api/v1/community/groups");
+    if (currentRoom?.room_code !== roomCode) return;
+    select.replaceChildren();
+    if (!groups.length) {
+      select.append(element("option", "", "Нет подключённых групп"));
+      inviteGroupsRoomCode = roomCode;
+      return;
+    }
+    for (const group of groups) {
+      const option = element("option", "", group.title);
+      option.value = String(group.group_id);
+      select.append(option);
+    }
+    select.disabled = false;
+    submit.disabled = false;
+    inviteGroupsError = null;
+  } catch (error) {
+    inviteGroupsRoomCode = roomCode;
+    select.replaceChildren(element("option", "", "Не удалось загрузить группы"));
+    if (inviteGroupsError !== error.message) {
+      inviteGroupsError = error.message;
+      showToast(error.message, true);
+    }
+  }
+}
+
+function syncRoomScene(room, hasGameScene) {
+  const container = document.getElementById("card-table");
+  if (!hasGameScene || !room.game) {
+    room3d?.destroy();
+    room3d = null;
+    room3dRoomCode = null;
+    room3dErrorRoom = null;
+    return;
+  }
+  if (room3d && room3dRoomCode !== room.room_code) {
+    room3d.destroy();
+    room3d = null;
+  }
+  if (room3d) {
+    room3d.update(room, selectedTarget, selectedHandIndex);
+    return;
+  }
+  if (room3dLoadPromise || room3dErrorRoom === room.room_code) return;
+
+  const roomCode = room.room_code;
+  room3dLoadPromise = import("./room3d.js")
+    .then(({ createRoomScene }) => {
+      if (!currentRoom || currentRoom.room_code !== roomCode || !currentRoom.game) return;
+      room3d = createRoomScene(container, {
+        onAction: (action, cardIndex) => submitAction(action, cardIndex),
+        onSelectCard: (index) => {
+          selectedHandIndex = index;
+          renderRoom(currentRoom);
+        },
+        onTarget: (index) => {
+          selectedTarget = index;
+          renderRoom(currentRoom);
+        },
+        onToast: (message) => showToast(message, true),
+      });
+      room3dRoomCode = roomCode;
+      room3d.update(currentRoom, selectedTarget, selectedHandIndex);
+      room3d.setPaused(!gamesPageActive);
+    })
+    .catch((error) => {
+      room3dErrorRoom = roomCode;
+      console.error("Не удалось загрузить 3D-комнату.", error);
+      showToast(`Не удалось загрузить 3D-комнату: ${error.message}`, true);
+    })
+    .finally(() => {
+      room3dLoadPromise = null;
+      if (currentRoom?.game && currentRoom.room_code !== roomCode) {
+        syncRoomScene(currentRoom, true);
+      }
+    });
+}
+
 function renderTable(room) {
   const table = document.getElementById("card-table");
+  const actions = document.getElementById("table-actions");
   const game = room.game;
-  table.hidden = false;
-  const idle = document.getElementById("table-idle");
-  idle.hidden = Boolean(game);
-  for (const selector of [".table-meta", ".table-opponents", ".table-cards", ".table-turn", ".player-hand", ".table-actions"]) {
-    const node = table.querySelector(selector);
-    node.hidden = !game;
+  const hasGameScene = room.status === "playing" || (room.status === "finished" && Boolean(game));
+  table.hidden = !hasGameScene;
+  actions.hidden = !hasGameScene;
+  if (!hasGameScene || !game) {
+    actions.replaceChildren();
+    syncRoomScene(room, false);
+    return;
   }
-  if (!game) return;
 
   document.getElementById("deck-count").textContent = `В колоде: ${game.deck_count}`;
   const trump = document.getElementById("trump-badge");
@@ -189,74 +280,11 @@ function renderTable(room) {
   if (game.trump) trump.append(makePlayingCard(game.trump, { small: true }));
   else trump.append(element("strong", "", suitLabels[game.trump_suit][0]));
 
-  const opponents = document.getElementById("table-opponents");
-  opponents.replaceChildren();
-  for (const player of room.players) {
-    const node = element("div", "table-opponent");
-    if (player.user_id === window.telegramUserId) node.classList.add("is-self");
-    const avatar = makePlayerAvatar(player, true);
-    node.append(avatar, element("strong", "", player.display_name));
-    node.append(element("span", "", player.has_left ? "вышел" : `${player.cards_count} карт`));
-    if (player.user_id === game.current_actor_id) node.classList.add("is-active");
-    opponents.append(node);
-  }
-
-  const tableCards = document.getElementById("table-cards");
-  tableCards.replaceChildren();
-  if (!game.table.length) {
-    tableCards.append(element("p", "table-empty", "Стол пока пуст — пора атаковать"));
-  } else {
-    game.table.forEach((entry, index) => {
-      const pair = element("div", "table-card-pair");
-      const attack = makePlayingCard(entry.attack, {
-        small: true,
-        selected: selectedTarget === index,
-      });
-      if (game.is_your_turn && game.stage === "defend" && entry.defense === null) {
-        attack.classList.add("can-target");
-        attack.setAttribute("role", "button");
-        attack.setAttribute("tabindex", "0");
-        attack.addEventListener("click", () => {
-          selectedTarget = index;
-          renderRoom(room);
-        });
-        attack.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            selectedTarget = index;
-            renderRoom(room);
-          }
-        });
-      }
-      pair.append(attack);
-      if (entry.defense) pair.append(makePlayingCard(entry.defense, { small: true }));
-      tableCards.append(pair);
-    });
-  }
-
   let turnMessage = "Ход соперника";
   if (game.is_your_turn) turnMessage = game.stage === "defend" ? "Твой ход — отбивайся или забирай карты" : "Твой ход — атакуй";
   else if (game.can_finish) turnMessage = "Можно закончить отбиваться или принять подкид";
   document.getElementById("table-turn").textContent = turnMessage;
 
-  const hand = document.getElementById("player-hand");
-  hand.replaceChildren();
-  game.your_hand.forEach((card, index) => {
-    const button = element(
-      "button",
-      "hand-card-button",
-    );
-    button.type = "button";
-    button.setAttribute("aria-label", `${cardLabel(card)}${selectedHandIndex === index ? ", выбрана" : ""}`);
-    button.append(makePlayingCard(card, { selected: selectedHandIndex === index }));
-    button.addEventListener("click", () => {
-      selectedHandIndex = selectedHandIndex === index ? null : index;
-      renderRoom(room);
-    });
-    hand.append(button);
-  });
-
-  const actions = document.getElementById("table-actions");
   actions.replaceChildren();
   if (game.can_attack) {
     addActionButton(actions, game.stage === "attack" ? "Атаковать выбранной картой" : "Подкинуть карту", "play", selectedHandIndex === null);
@@ -267,6 +295,7 @@ function renderTable(room) {
   }
   if (game.can_take) addActionButton(actions, "Забрать карты", "take");
   if (game.can_finish) addActionButton(actions, "Закончить отбой", "finish");
+  syncRoomScene(room, hasGameScene);
 }
 
 function renderRoom(room) {
@@ -279,6 +308,14 @@ function renderRoom(room) {
   if (selectedTarget !== null && !room.game?.table[selectedTarget]) selectedTarget = null;
   document.getElementById("room-lobby").hidden = true;
   document.getElementById("room-view").hidden = false;
+  const hasGameScene = room.status === "playing" || (room.status === "finished" && Boolean(room.game));
+  const roomContent = document.getElementById("room-content");
+  const playerPanel = document.getElementById("room-player-panel");
+  const chat = playerPanel.querySelector(".room-chat");
+  roomContent.classList.toggle("is-playing", hasGameScene);
+  playerPanel.hidden = hasGameScene;
+  if (hasGameScene) roomContent.append(chat);
+  else playerPanel.append(chat);
   document.getElementById("room-code-label").textContent = room.room_code;
   document.getElementById("room-status-label").textContent =
     room.status === "lobby" ? "ОЖИДАНИЕ ИГРОКОВ" : room.status === "finished" ? "ПАРТИЯ ЗАВЕРШЕНА" : "ПАРТИЯ ИДЁТ";
@@ -302,11 +339,12 @@ function renderRoom(room) {
   const full = room.players.length === room.max_players;
   const inviteForm = document.getElementById("room-invite-form");
   inviteForm.hidden = !ownerInLobby;
+  if (ownerInLobby) loadRoomInviteGroups(room.room_code);
   const startButton = document.getElementById("room-start");
   const closeButton = document.getElementById("room-close");
   startButton.hidden = !ownerInLobby;
   startButton.disabled = !full;
-  closeButton.hidden = !(room.is_owner || window.userRole === "admin");
+  closeButton.hidden = !(room.is_owner || window.userRole === "admin") || room.status === "finished";
   closeButton.disabled = room.status === "finished";
   document.getElementById("room-share").hidden = room.status !== "lobby";
   document.getElementById("room-chat-form").hidden = room.status === "finished";
@@ -369,6 +407,7 @@ async function refreshRoom() {
   } catch (error) {
     if (error.message.includes("не найдена")) {
       currentRoom = null;
+      syncRoomScene(null, false);
       document.getElementById("room-view").hidden = true;
       document.getElementById("room-lobby").hidden = false;
       showToast(error.message, true);
@@ -379,12 +418,12 @@ async function refreshRoom() {
   }
 }
 
-async function submitAction(action) {
+async function submitAction(action, cardIndex = selectedHandIndex) {
   if (!currentRoom) return;
   const payload = { room_code: currentRoom.room_code, action };
   if (action === "play" || action === "defend") {
-    if (selectedHandIndex === null) return;
-    payload.card = currentRoom.game.your_hand[selectedHandIndex];
+    if (cardIndex === null || cardIndex < 0 || cardIndex >= currentRoom.game.your_hand.length) return;
+    payload.card = currentRoom.game.your_hand[cardIndex];
   }
   if (action === "defend") payload.target = selectedTarget;
   try {
@@ -420,6 +459,8 @@ export async function loadRooms() {
 }
 
 export function setGamesPageActive(active) {
+  gamesPageActive = active;
+  room3d?.setPaused(!active);
   window.clearInterval(roomPoll);
   if (active && window.Telegram?.WebApp?.initData) {
     roomPoll = window.setInterval(() => {
@@ -497,14 +538,17 @@ export function initGames() {
   document.getElementById("room-invite-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!currentRoom) return;
-    const username = new FormData(event.currentTarget).get("username");
+    const groupId = Number(new FormData(event.currentTarget).get("group_id"));
+    if (!Number.isSafeInteger(groupId)) {
+      showToast("Выбери подключённую группу.", true);
+      return;
+    }
     try {
-      const result = await apiRequest("/api/v1/games/rooms/invite", {
+      const result = await apiRequest("/api/v1/games/rooms/invite-group", {
         method: "POST",
-        body: { room_code: currentRoom.room_code, username },
+        body: { room_code: currentRoom.room_code, group_id: groupId },
       });
       showToast(result.message);
-      event.currentTarget.reset();
     } catch (error) {
       showToast(error.message, true);
     }
@@ -531,6 +575,7 @@ export function initGames() {
     if (!currentRoom) return;
     if (currentRoom.status === "finished") {
       currentRoom = null;
+      syncRoomScene(null, false);
       window.clearInterval(roomClockTimer);
       document.getElementById("room-view").hidden = true;
       document.getElementById("room-lobby").hidden = false;
@@ -544,6 +589,7 @@ export function initGames() {
           body: { room_code: currentRoom.room_code },
         });
         currentRoom = null;
+        syncRoomScene(null, false);
         window.clearInterval(roomClockTimer);
         document.getElementById("room-view").hidden = true;
         document.getElementById("room-lobby").hidden = false;
@@ -582,6 +628,7 @@ export function initGames() {
       });
       showToast(result.message || "Комната закрыта.");
       currentRoom = null;
+      syncRoomScene(null, false);
       window.clearInterval(roomClockTimer);
       document.getElementById("room-view").hidden = true;
       document.getElementById("room-lobby").hidden = false;
@@ -610,18 +657,4 @@ export function initGames() {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action) submitAction(action);
   });
-  const table = document.getElementById("card-table");
-  let leanTimer;
-  const stopLeaning = () => {
-    window.clearTimeout(leanTimer);
-    table.classList.remove("is-leaning");
-  };
-  table.addEventListener("pointerdown", () => {
-    window.clearTimeout(leanTimer);
-    leanTimer = window.setTimeout(() => table.classList.add("is-leaning"), 180);
-  });
-  for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
-    table.addEventListener(eventName, stopLeaning);
-  }
-  table.addEventListener("contextmenu", (event) => event.preventDefault());
 }

@@ -8,7 +8,9 @@ import secrets
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote, urlsplit
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 import card_game
@@ -38,7 +40,11 @@ def _public_room(room: dict[str, Any], user_id: int) -> dict[str, Any] | None:
             "user_id": int(player["user_id"]),
             "display_name": str(player["display_name"]),
             "username": player.get("username"),
-            "photo_url": player.get("photo_url"),
+            "photo_url": (
+                f"/media/telegram-photo?url={quote(player['photo_url'], safe='')}"
+                if _valid_photo_url(player.get("photo_url"))
+                else None
+            ),
             "cards_count": len(player["hand"]) if game else 0,
             "has_left": bool(player.get("forfeited")),
         }
@@ -143,7 +149,17 @@ async def get_room(room_code: str, user_id: int) -> tuple[int, dict[str, Any]]:
 def _valid_photo_url(value: Any) -> str | None:
     if not isinstance(value, str) or len(value) > 2048:
         return None
-    if not value.startswith(("https://t.me/", "https://telegram.org/")):
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in ("t.me", "telegram.org")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            return None
+    except ValueError:
         return None
     return value
 
@@ -589,6 +605,61 @@ async def invite_player(
         )
         return 502, {"error": "Бот не смог доставить приглашение. Игроку может быть закрыто ЛС."}
     return 200, {"message": f"Приглашение отправлено @{match.group(1)}."}
+
+
+async def invite_room_to_group(
+    room_code: str,
+    user_id: int,
+    group_id: Any,
+    bot: Any | None,
+) -> tuple[int, dict[str, Any]]:
+    if type(group_id) is not int:
+        return 400, {"error": "Выбери подключённую группу."}
+    normalized = room_code.strip().upper()
+    room = await database.get_minigame_room(normalized)
+    if room is None:
+        return 404, {"error": "Комната не найдена."}
+    await _expire_room_if_needed(room)
+    room = await database.get_minigame_room(normalized)
+    if room is None:
+        return 404, {"error": "Комната не найдена."}
+    if room["owner_id"] != user_id or room["status"] != "lobby":
+        return 403, {"error": "Приглашать игроков может создатель комнаты до старта."}
+    if len(room["state"]["players"]) >= room["max_players"]:
+        return 409, {"error": "В комнате больше нет свободных мест."}
+    memberships = set(await database.list_user_group_memberships(user_id))
+    if group_id not in memberships or not await database.is_group_allowed(group_id):
+        return 403, {"error": "Эта группа не подключена к твоему аккаунту."}
+    if bot is None:
+        return 503, {"error": "Не удалось связаться с ботом для отправки приглашения."}
+
+    try:
+        username = bot.username
+        if not username:
+            username = (await bot.get_me()).username
+        if not username:
+            raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
+        invite_url = f"https://t.me/{username}?startapp=room_{normalized}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Войти в комнату", url=invite_url)]],
+        )
+        await bot.send_message(
+            chat_id=group_id,
+            text=(
+                f"Комната Юбары · «Дурак» · {normalized}\n"
+                f"Свободно мест: {room['max_players'] - len(room['state']['players'])}. "
+                "Кто первым войдёт, тот и сыграет."
+            ),
+            reply_markup=keyboard,
+        )
+    except TelegramError:
+        logging.exception(
+            "Не удалось отправить приглашение в комнату=%s group_id=%s.",
+            normalized,
+            group_id,
+        )
+        return 502, {"error": "Бот не смог отправить приглашение в эту группу."}
+    return 200, {"message": "Приглашение отправлено в выбранную группу."}
 
 
 async def perform_action(

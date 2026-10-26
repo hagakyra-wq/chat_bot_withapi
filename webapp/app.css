@@ -890,3 +890,98 @@ svg { display: block; }
   .tarot-card-face { min-height: 190px; }
   .tarot-card-name { font-size: 10px; }
 }
+
+.room-content.is-playing { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.room-content.is-playing > #room-player-panel { display: none; }
+#card-table.card-table {
+  display: block;
+  width: 100%;
+  height: clamp(420px, 68vh, 680px);
+  min-height: 420px;
+  overflow: hidden;
+  padding: 0;
+  border-color: rgb(216 194 165 / 32%);
+  background: #17161e;
+  touch-action: none;
+}
+#card-table.card-table::before { display: none; }
+.room-3d-canvas { position: absolute; z-index: 0; inset: 0; display: block; width: 100%; height: 100%; }
+.scene-hud-top {
+  position: absolute !important;
+  z-index: 1 !important;
+  top: 12px;
+  right: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  pointer-events: none;
+}
+.scene-hud-top > span {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid rgb(228 195 149 / 23%);
+  border-radius: 11px;
+  background: rgb(16 15 23 / 78%);
+  color: var(--text);
+  font-size: 10px;
+  backdrop-filter: blur(8px);
+}
+.scene-hud-top .playing-card { width: 23px; height: 32px; padding: 3px; border-radius: 4px; }
+.scene-hud-top .playing-card-rank { font-size: 9px; }
+.scene-hud-top .playing-card-suit { font-size: 11px; }
+#card-table .table-turn {
+  position: absolute !important;
+  z-index: 1 !important;
+  right: 12px;
+  top: 57px;
+  left: 12px;
+  min-height: 0;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: rgb(16 15 23 / 72%);
+  color: #f0dfbd;
+  font-size: 11px;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+#card-table .table-swipe-hint {
+  position: absolute !important;
+  z-index: 1 !important;
+  right: 12px;
+  top: 88px;
+  left: 12px;
+  margin: 0;
+  color: rgb(245 241 255 / 72%);
+  font-size: 9px;
+  text-align: center;
+  pointer-events: none;
+}
+.room-content.is-playing > #table-actions {
+  justify-content: center;
+  margin: 0;
+  padding: 0 2px;
+}
+.room-content.is-playing > #table-actions .button {
+  min-height: 36px;
+  padding: 0 11px;
+  border-color: rgb(228 195 149 / 28%);
+  background: rgb(25 23 33 / 91%);
+  color: var(--text);
+  font-size: 10px;
+  backdrop-filter: blur(9px);
+}
+.room-content.is-playing > .room-chat { width: 100%; margin-top: 0; }
+
+@media (max-width: 700px) {
+  #card-table.card-table { height: min(65vh, 540px); min-height: 390px; border-radius: 18px; }
+  .room-content.is-playing { gap: 10px; }
+  .scene-hud-top { top: 8px; right: 8px; left: 8px; }
+  #card-table .table-turn { top: 51px; }
+  #card-table .table-swipe-hint { top: 82px; }
+  .room-content.is-playing > #table-actions .button { min-height: 34px; padding: 0 8px; font-size: 9px; }
+}

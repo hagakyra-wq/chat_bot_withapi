@@ -38,6 +38,7 @@ from telegram.ext import (
 import database
 import autoresponder
 import personal_account
+import mini_games
 from channel_log import (
     TelegramChannelLogHandler,
     install_channel_log_handler,
@@ -153,10 +154,34 @@ async def room_invite_command(
     if message is None or user is None:
         return
     if not context.args:
+        status, room = await mini_games.create_room(
+            user.id,
+            user.first_name,
+            user.username,
+            {
+                "game_type": "durak",
+                "max_players": 2,
+                "mode": "free",
+                "stake_cents": 0,
+            },
+        )
+        if status != 201:
+            await message.reply_text(room.get("error", "Не удалось создать комнату."))
+            return
+        code = room["room_code"]
+        username = context.bot.username
+        if not username:
+            username = (await context.bot.get_me()).username
+        if not username:
+            raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
+        invite_url = f"https://t.me/{username}?startapp=room_{code}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Войти в комнату", url=invite_url)]],
+        )
         await message.reply_text(
-            "Создай комнату в Mini App, затем отправь в группу "
-            "`/room КОД`, чтобы поделиться входом.",
-            parse_mode="Markdown",
+            f"Комната Юбары · «Дурак» · {code}\n"
+            "Первый игрок, который войдёт по кнопке, займёт свободное место.",
+            reply_markup=keyboard,
         )
         return
 
@@ -201,6 +226,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
         "/assets/api.js": ("api.js", "text/javascript; charset=utf-8"),
         "/assets/games.js": ("games.js", "text/javascript; charset=utf-8"),
+        "/assets/buddy3d.js": ("buddy3d.js", "text/javascript; charset=utf-8"),
+        "/assets/room3d.js": ("room3d.js", "text/javascript; charset=utf-8"),
         "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
     }
     bot: Any | None = None
@@ -239,6 +266,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             return
         if request_path.startswith(("/assets/images/", "/assets/music/")):
             self._handle_future_asset(request_path)
+            return
+        if request_path == "/media/telegram-photo":
+            self._handle_telegram_photo(parse_qs(urlsplit(self.path).query))
             return
         if request_path.startswith("/media/banner/"):
             self._handle_banner_media(request_path)
@@ -325,6 +355,35 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         if status == 200:
             self.send_header("Cache-Control", "private, max-age=300")
             self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_telegram_photo(self, query: dict[str, list[str]]) -> None:
+        loop = self.event_loop
+        if loop is None or loop.is_closed():
+            self.send_error(503, "API is unavailable")
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            miniapp_api.get_telegram_photo(query),
+            loop,
+        )
+        try:
+            status, body, content_type = future.result(timeout=10)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            self.send_error(504, "Photo request timed out")
+            return
+        except Exception:
+            logging.exception("Mini App Telegram profile photo request failed.")
+            self.send_error(500, "Photo request failed")
+            return
+
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if status == 200:
+            self.send_header("Cache-Control", "private, max-age=300")
         self.end_headers()
         self.wfile.write(body)
 

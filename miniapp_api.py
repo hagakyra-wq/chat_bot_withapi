@@ -28,6 +28,7 @@ from yubari_banner import PRESET_NAMES
 
 _MEDIA_LINK_LIFETIME_SECONDS = 600
 _MAX_BANNER_MEDIA_SIZE = 20 * 1024 * 1024
+_MAX_TELEGRAM_PHOTO_SIZE = 3 * 1024 * 1024
 _BANNER_ART_TASKS: set[asyncio.Task[None]] = set()
 _TRANSFER_USERNAME_RE = re.compile(r"@?([a-z0-9_]{5,32})", re.IGNORECASE)
 _TRANSFER_USER_ID_RE = re.compile(r"\d{1,19}")
@@ -55,6 +56,39 @@ async def _community_groups(user_id: int, bot: Any | None) -> list[dict[str, Any
                 )
         groups.append({"group_id": group_id, "title": title})
     return groups
+
+
+async def get_telegram_photo(
+    query: dict[str, list[str]],
+) -> tuple[int, bytes, str]:
+    source = query.get("url", [""])[0]
+    photo_url = mini_games._valid_photo_url(source)
+    if photo_url is None:
+        return 400, b"Invalid Telegram photo URL", "text/plain; charset=utf-8"
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(6.0, connect=3.0),
+            follow_redirects=False,
+        ) as client:
+            async with client.stream("GET", photo_url) as response:
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if response.status_code != 200:
+                    return 404, b"Telegram photo is unavailable", "text/plain; charset=utf-8"
+                if content_type not in ("image/jpeg", "image/png", "image/webp"):
+                    return 415, b"Unsupported Telegram photo format", "text/plain; charset=utf-8"
+                content_length = response.headers.get("content-length")
+                if content_length is not None and int(content_length) > _MAX_TELEGRAM_PHOTO_SIZE:
+                    return 413, b"Telegram photo is too large", "text/plain; charset=utf-8"
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(chunks) + len(chunk) > _MAX_TELEGRAM_PHOTO_SIZE:
+                        return 413, b"Telegram photo is too large", "text/plain; charset=utf-8"
+                    chunks.extend(chunk)
+                return 200, bytes(chunks), content_type
+    except (httpx.HTTPError, ValueError):
+        logging.warning("Не удалось получить фото Telegram для 3D-аватара.", exc_info=True)
+        return 502, b"Telegram photo could not be loaded", "text/plain; charset=utf-8"
 
 
 async def _community_leaderboard(
@@ -895,6 +929,16 @@ async def dispatch(
         if not isinstance(room_code, str):
             return 400, {"error": "Укажи код комнаты."}
         return await mini_games.invite_player(room_code, user_id, payload, bot)
+    if path == "/api/v1/games/rooms/invite-group" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        return await mini_games.invite_room_to_group(
+            room_code,
+            user_id,
+            payload.get("group_id"),
+            bot,
+        )
     if path == "/api/v1/games/rooms/action" and method == "POST":
         room_code = payload.get("room_code")
         if not isinstance(room_code, str):
