@@ -344,6 +344,24 @@ async def initialize() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_minigame_room_players_user
                     ON minigame_room_players(user_id, room_code);
+                CREATE TABLE IF NOT EXISTS minigame_room_messages (
+                    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    room_code TEXT NOT NULL REFERENCES minigame_rooms(room_code) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_minigame_room_messages_room
+                    ON minigame_room_messages(room_code, message_id DESC);
+                CREATE TABLE IF NOT EXISTS minigame_room_settlements (
+                    room_code TEXT NOT NULL REFERENCES minigame_rooms(room_code) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL,
+                    delta_cents INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                    PRIMARY KEY (room_code, user_id)
+                );
                 CREATE TABLE IF NOT EXISTS tarot_readings (
                     user_id INTEGER NOT NULL,
                     reading_date TEXT NOT NULL,
@@ -1895,6 +1913,7 @@ async def join_minigame_room(
     user_id: int,
     display_name: str,
     username: str | None,
+    photo_url: str | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     async with _write_lock:
         async with _connect() as db:
@@ -1929,6 +1948,7 @@ async def join_minigame_room(
                     "user_id": user_id,
                     "display_name": display_name[:80],
                     "username": username,
+                    "photo_url": photo_url,
                     "hand": [],
                 }
             )
@@ -1959,13 +1979,23 @@ async def update_minigame_room(
     version: int,
     status: str,
     state: dict[str, Any],
+    *,
+    stake_cents: int = 0,
+    payouts: list[dict[str, int]] | None = None,
+    settlement_reason: str | None = None,
+    remove_player: bool = False,
 ) -> bool:
+    if stake_cents < 0:
+        raise ValueError("Ставка не может быть отрицательной.")
+    if payouts is not None and settlement_reason not in ("completed", "timeout"):
+        raise ValueError("Для выплаты нужно указать причину завершения.")
+
     async with _write_lock:
         async with _connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
                 """
-                SELECT version FROM minigame_rooms
+                SELECT version, status, state_json FROM minigame_rooms
                 WHERE room_code = ?
                   AND EXISTS (
                       SELECT 1 FROM minigame_room_players
@@ -1978,6 +2008,86 @@ async def update_minigame_room(
             if row is None or int(row["version"]) != version:
                 await db.rollback()
                 return False
+
+            previous_state = json.loads(str(row["state_json"]))
+            if stake_cents:
+                if row["status"] != "lobby" or previous_state.get("stakes_escrowed"):
+                    await db.rollback()
+                    return False
+                participants = previous_state.get("players", [])
+                if not participants:
+                    await db.rollback()
+                    return False
+                for player in participants:
+                    cursor = await db.execute(
+                        """
+                        UPDATE duel_players
+                        SET balance_cents = balance_cents - ?, username = ?
+                        WHERE user_id = ? AND balance_cents >= ?
+                        """,
+                        (
+                            stake_cents,
+                            player.get("username"),
+                            int(player["user_id"]),
+                            stake_cents,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        await db.rollback()
+                        raise InsufficientMinigameBalanceError
+                state["stakes_escrowed"] = True
+
+            if payouts is not None:
+                if previous_state.get("stakes_settled"):
+                    await db.rollback()
+                    return False
+                if previous_state.get("stake_cents", 0) and not previous_state.get("stakes_escrowed"):
+                    await db.rollback()
+                    raise sqlite3.DatabaseError(
+                        f"Комната {room_code} пытается выплатить не удержанные ставки."
+                    )
+                participants = {
+                    int(player["user_id"]): player
+                    for player in previous_state.get("players", [])
+                }
+                payout_ids = {int(item["user_id"]) for item in payouts}
+                if payout_ids != set(participants):
+                    await db.rollback()
+                    raise ValueError("Список выплат не совпадает с участниками комнаты.")
+                for item in payouts:
+                    player_id = int(item["user_id"])
+                    delta_cents = int(item["delta_cents"])
+                    if delta_cents < 0:
+                        await db.rollback()
+                        raise ValueError("Размер выплаты не может быть отрицательным.")
+                    cursor = await db.execute(
+                        """
+                        UPDATE duel_players
+                        SET balance_cents = balance_cents + ?, username = ?
+                        WHERE user_id = ?
+                        """,
+                        (
+                            delta_cents,
+                            participants[player_id].get("username"),
+                            player_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        await db.rollback()
+                        raise sqlite3.DatabaseError(
+                            f"Не найден игровой профиль user_id={player_id}."
+                        )
+                    await db.execute(
+                        """
+                        INSERT INTO minigame_room_settlements(
+                            room_code, user_id, delta_cents, reason
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (room_code, player_id, delta_cents, settlement_reason),
+                    )
+                state["stakes_settled"] = True
+                state["settlement_reason"] = settlement_reason
+
             cursor = await db.execute(
                 """
                 UPDATE minigame_rooms
@@ -1986,10 +2096,82 @@ async def update_minigame_room(
                 """,
                 (json.dumps(state), status, room_code, version),
             )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+            if remove_player:
+                await db.execute(
+                    "DELETE FROM minigame_room_players WHERE room_code = ? AND user_id = ?",
+                    (room_code, user_id),
+                )
             await db.commit()
         if cursor.rowcount:
             _record_write()
     return cursor.rowcount == 1
+
+
+class InsufficientMinigameBalanceError(ValueError):
+    """Raised when a participant cannot cover a room stake."""
+
+
+async def add_minigame_room_message(
+    room_code: str,
+    user_id: int,
+    display_name: str,
+    message: str,
+) -> int | None:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT 1 FROM minigame_rooms r
+                JOIN minigame_room_players p ON p.room_code = r.room_code
+                WHERE r.room_code = ? AND p.user_id = ? AND r.status IN ('lobby', 'playing')
+                """,
+                (room_code, user_id),
+            )
+            if await cursor.fetchone() is None:
+                return None
+            cursor = await db.execute(
+                """
+                INSERT INTO minigame_room_messages(room_code, user_id, display_name, message)
+                VALUES (?, ?, ?, ?)
+                """,
+                (room_code, user_id, display_name[:80], message),
+            )
+            message_id = int(cursor.lastrowid)
+            await db.commit()
+        _record_write()
+    return message_id
+
+
+async def list_minigame_room_messages(
+    room_code: str,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT message_id, user_id, display_name, message, created_at
+            FROM minigame_room_messages
+            WHERE room_code = ?
+            ORDER BY message_id DESC
+            LIMIT ?
+            """,
+            (room_code, limit),
+        )
+        rows = await cursor.fetchall()
+    return [
+        {
+            "message_id": int(row["message_id"]),
+            "user_id": int(row["user_id"]),
+            "display_name": str(row["display_name"]),
+            "message": str(row["message"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in reversed(rows)
+    ]
 
 
 async def reserve_tarot_reading(

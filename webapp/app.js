@@ -1,13 +1,11 @@
 import { apiRequest, showToast } from "./api.js";
-import { initGames, loadRooms, loadTarot, setGamesPageActive } from "./games.js";
-import { initWheel, loadWheel } from "./wheel.js";
+import { initGames, joinRoomByCode, loadRooms, setGamesPageActive } from "./games.js";
 
 const webApp = window.Telegram?.WebApp;
 const pageTitles = {
   home: "Игры",
-  rooms: "Карточная комната",
-  tarot: "Таро дня",
-  wheel: "Колесо удачи",
+  rooms: "Игровая комната",
+  tarot: "Скоро",
 };
 let activePage = "home";
 
@@ -34,8 +32,6 @@ function showPage(pageName) {
 
   const loaders = {
     rooms: loadRooms,
-    tarot: loadTarot,
-    wheel: loadWheel,
   };
   const loader = loaders[pageName];
   if (loader) loader().catch((error) => showToast(error.message, true));
@@ -57,6 +53,12 @@ async function connectTelegram() {
     });
     accountName.textContent = session.first_name || `ID ${session.user_id}`;
     accountRole.textContent = "Игровой профиль";
+    const startParam = webApp.initDataUnsafe?.start_param || "";
+    const roomMatch = /^room_([A-HJ-NP-Z2-9]{6})$/i.exec(startParam);
+    if (roomMatch) {
+      showPage("rooms");
+      await joinRoomByCode(roomMatch[1]);
+    }
   } catch (error) {
     accountName.textContent = "Не удалось проверить";
     accountRole.textContent = "Открой Mini App из Telegram";
@@ -67,7 +69,6 @@ async function connectTelegram() {
 webApp?.ready();
 webApp?.expand();
 initGames();
-initWheel();
 document.querySelectorAll("[data-page]").forEach((button) => {
   button.addEventListener("click", (event) => {
     event.preventDefault();

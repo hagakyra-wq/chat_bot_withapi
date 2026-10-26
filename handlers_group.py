@@ -72,6 +72,34 @@ _WELCOME_MESSAGES = (
     "Теперь нас больше — добро пожаловать в нашу компанию!",
 )
 _COMMAND_RE = re.compile(r"^/([a-z_]+)(?:@\w+)?", re.IGNORECASE)
+_COMMAND_TARGET_RE = re.compile(r"^/[a-z_]+@(\w+)(?:\s|$)", re.IGNORECASE)
+_SUPPORTED_GROUP_COMMANDS = {
+    "activate",
+    "activategroup",
+    "adminhelp",
+    "banner",
+    "cancel",
+    "casino",
+    "coinpromo",
+    "fees",
+    "forget_me",
+    "fortuna",
+    "help",
+    "helpadmin",
+    "image",
+    "img",
+    "inv",
+    "inventory",
+    "market",
+    "profile",
+    "react",
+    "reaction",
+    "recycle",
+    "room",
+    "slots",
+    "start",
+    "top",
+}
 _PROFILE_GROUP_ID_RE = re.compile(
     r"(?:профиль\s+(?:группы|чата)|(?:группа|чат)\s+профиль)"
     r"(?:\s+(?:(?:по\s+)?(?:id|айди)\s*[:#]?\s*)?)\s*(-?\d+)",
@@ -134,6 +162,19 @@ def _is_bot_mentioned(message: object, bot_username: str | None, bot_id: int) ->
 def _command_name(text: str) -> str | None:
     match = _COMMAND_RE.match(text.strip())
     return match.group(1).casefold() if match else None
+
+
+def should_process_group_command(text: str, bot_username: str | None) -> bool:
+    command = _command_name(text)
+    if command is None:
+        return True
+    if command not in _SUPPORTED_GROUP_COMMANDS:
+        return False
+    target = _COMMAND_TARGET_RE.match(text.strip())
+    return target is None or (
+        bot_username is not None
+        and target.group(1).casefold() == bot_username.casefold()
+    )
 
 
 def _parse_message_top_request(text: str) -> tuple[bool, str | None]:
@@ -572,6 +613,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ) or bool(profile_command and profile_command.group(1))
     requested_group_id = _parse_profile_group_id(text, group_id)
     command = _command_name(text)
+    if not should_process_group_command(text, context.bot.username):
+        return
     is_top_request, top_period = _parse_message_top_request(text)
     replied_to_bot = _is_reply_to_bot(message, context.bot.id)
     called = is_called(text)

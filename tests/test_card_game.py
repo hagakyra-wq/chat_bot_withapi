@@ -1,6 +1,6 @@
 import unittest
 
-from card_game import apply_action, create_game
+from card_game import apply_action, create_game, forfeit_player
 
 
 def _game(players):
@@ -104,6 +104,31 @@ class CardGameTests(unittest.TestCase):
             apply_action(game, 2, "defend", card={"rank": 7, "suit": "hearts"}, target=0)
 
         self.assertEqual(len(game["players"][1]["hand"]), 1)
+
+    def test_forfeiting_players_are_ranked_after_remaining_players(self):
+        players = [
+            {"user_id": user_id, "display_name": f"Player {user_id}"}
+            for user_id in (1, 2, 3)
+        ]
+        game = create_game(players)
+
+        forfeit_player(game, 1)
+        self.assertEqual(game["status"], "playing")
+        forfeit_player(game, 2)
+
+        self.assertEqual(game["status"], "finished")
+        self.assertEqual(game["placement_order"], [3, 2, 1])
+
+    def test_forfeited_player_cannot_take_another_turn(self):
+        players = [
+            {"user_id": user_id, "display_name": f"Player {user_id}"}
+            for user_id in (1, 2, 3)
+        ]
+        game = create_game(players)
+        forfeit_player(game, 1)
+
+        with self.assertRaisesRegex(ValueError, "покинул"):
+            apply_action(game, 1, "play", card={"rank": 6, "suit": "clubs"})
 
     def test_full_game_finishes_for_two_to_four_players(self):
         for player_count in (2, 3, 4):

@@ -17,12 +17,10 @@ from urllib.parse import quote
 import httpx
 import database
 import mini_games
-from casino_rules import RARITY_NAMES, RARITY_WEIGHTS, generate_result
 from config import (
     ADMIN_ID,
     BACKUP_CHANNEL_ID,
     CASINO_RECYCLE_PAYOUT_CENTS,
-    CASINO_SPIN_COST_CENTS,
     TELEGRAM_TOKEN,
 )
 from telegram.error import TelegramError
@@ -377,97 +375,6 @@ async def _notify_transfer_user(
         )
         return False
     return True
-
-
-async def _casino_dashboard(user_id: int, username: str | None) -> dict[str, Any]:
-    balance = await database.get_duel_balance(user_id, username)
-    total_weight = sum(RARITY_WEIGHTS.values())
-    return {
-        "balance_cents": balance,
-        "spin_cost_cents": CASINO_SPIN_COST_CENTS,
-        "rarities": [
-            {
-                "level": level,
-                "name": RARITY_NAMES[level],
-                "weight": weight,
-                "percentage": round(weight / total_weight * 100, 2),
-            }
-            for level, weight in RARITY_WEIGHTS.items()
-        ],
-    }
-
-
-async def _spin_casino(
-    user_id: int,
-    username: str | None,
-    spins: int,
-    bot: Any | None,
-) -> tuple[int, dict[str, Any]]:
-    round_id = secrets.token_hex(12)
-    cost = CASINO_SPIN_COST_CENTS * spins
-    try:
-        await database.get_duel_balance(user_id, username)
-        await database.begin_casino_round(round_id, user_id, username, cost)
-    except database.InsufficientCasinoBalanceError:
-        return 409, {"error": "Недостаточно монет для выбранного числа круток."}
-    except database.ActiveCasinoRoundError:
-        return 409, {"error": "У тебя уже идёт крутка. Дождись её завершения."}
-    except Exception:
-        logging.exception("Не удалось начать Mini App крутку user_id=%s.", user_id)
-        return 503, {"error": "Не удалось начать крутку. Попробуй позже."}
-
-    try:
-        generated = [
-            generate_result(
-                user_id,
-                (
-                    secrets.randbelow(6) + 1,
-                    secrets.randbelow(6) + 1,
-                    secrets.randbelow(6) + 1,
-                ),
-            )
-            for _ in range(spins)
-        ]
-        items = await database.complete_casino_round(round_id, generated)
-    except Exception:
-        logging.exception("Не удалось завершить Mini App крутку user_id=%s.", user_id)
-        try:
-            refunded = await database.fail_casino_round(round_id)
-        except Exception:
-            logging.exception("Не удалось вернуть монеты за Mini App крутку.")
-            refunded = False
-        if refunded:
-            return 500, {
-                "error": "Крутка не завершилась; списанные монеты возвращены."
-            }
-        logging.error(
-            "Не удалось подтвердить возврат или завершение Mini App крутки "
-            "round_id=%s user_id=%s.",
-            round_id,
-            user_id,
-        )
-        return 500, {
-            "error": "Крутка не завершилась. Проверь баланс и инвентарь перед повторной попыткой."
-        }
-
-    if bot is not None:
-        _queue_banner_art(bot, items, "casino_reward")
-    balance = await database.get_duel_balance(user_id, username)
-    return 200, {
-        "balance_cents": balance,
-        "cost_cents": cost,
-        "results": [
-            {
-                "item_id": int(item["item_id"]),
-                "level": int(result["level"]),
-                "rarity": RARITY_NAMES[int(result["level"])],
-                "values": [int(value) for value in result["values"]],
-                "image_url": _media_url(user_id, int(item["item_id"])),
-                "animated": int(result["level"]) == 6,
-            }
-            for item, result in zip(items, generated, strict=True)
-        ],
-    }
 
 
 async def _delete_recycled_banner_backups(
@@ -934,6 +841,7 @@ async def dispatch(
     user_id: int,
     first_name: str,
     username: str | None,
+    photo_url: str | None,
     payload: dict[str, Any],
     bot: Any | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -967,19 +875,14 @@ async def dispatch(
                 else "Сохранённых профильных данных и статистики нет."
             ),
         }
-    if path == "/api/v1/casino" and method == "GET":
-        return 200, await _casino_dashboard(user_id, username)
-    if path == "/api/v1/casino/spin" and method == "POST":
-        spins = payload.get("spins", 1)
-        if type(spins) is not int or spins not in (1, 10):
-            return 400, {"error": "Можно выполнить одну крутку или пакет ×10."}
-        return await _spin_casino(user_id, username, spins, bot)
     if path == "/api/v1/games/rooms" and method == "GET":
         return await mini_games.list_rooms(user_id)
     if path == "/api/v1/games/rooms/create" and method == "POST":
-        return await mini_games.create_room(user_id, first_name, username, payload)
+        room_payload = {**payload, "photo_url": photo_url}
+        return await mini_games.create_room(user_id, first_name, username, room_payload)
     if path == "/api/v1/games/rooms/join" and method == "POST":
-        return await mini_games.join_room(user_id, first_name, username, payload)
+        room_payload = {**payload, "photo_url": photo_url}
+        return await mini_games.join_room(user_id, first_name, username, room_payload)
     if path == "/api/v1/games/rooms/room" and method == "GET":
         return await mini_games.get_room(query.get("code", [""])[0], user_id)
     if path == "/api/v1/games/rooms/start" and method == "POST":
@@ -997,6 +900,21 @@ async def dispatch(
         if not isinstance(room_code, str):
             return 400, {"error": "Укажи код комнаты."}
         return await mini_games.perform_action(room_code, user_id, payload)
+    if path == "/api/v1/games/rooms/leave" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        return await mini_games.leave_room(room_code, user_id)
+    if path == "/api/v1/games/rooms/messages" and method == "POST":
+        room_code = payload.get("room_code")
+        if not isinstance(room_code, str):
+            return 400, {"error": "Укажи код комнаты."}
+        return await mini_games.send_room_message(
+            room_code,
+            user_id,
+            first_name,
+            payload,
+        )
     if path == "/api/v1/games/tarot" and method == "GET":
         return await mini_games.tarot_status(user_id)
     if path == "/api/v1/games/tarot" and method == "POST":

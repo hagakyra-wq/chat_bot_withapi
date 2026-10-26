@@ -7,6 +7,7 @@ import hmac
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 import sqlite3
@@ -20,7 +21,7 @@ from typing import Any
 from urllib.parse import parse_qsl, parse_qs, urlsplit
 
 from cryptography.fernet import Fernet
-from telegram import MessageReactionUpdated, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageReactionUpdated, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -89,7 +90,9 @@ from banner_store import stop_banner_render_queue
 import miniapp_api
 
 
-def _validate_web_app_init_data(init_data: str) -> tuple[int, str, str | None]:
+def _validate_web_app_init_data(
+    init_data: str,
+) -> tuple[int, str, str | None, str | None]:
     if not init_data or len(init_data) > 4096:
         raise ValueError("Invalid Telegram initData.")
 
@@ -135,7 +138,63 @@ def _validate_web_app_init_data(init_data: str) -> tuple[int, str, str | None]:
     username = user.get("username")
     if not isinstance(username, str):
         username = None
-    return user["id"], first_name, username
+    photo_url = user.get("photo_url")
+    if not isinstance(photo_url, str) or len(photo_url) > 2048:
+        photo_url = None
+    return user["id"], first_name, username, photo_url
+
+
+async def room_invite_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+    if not context.args:
+        await message.reply_text(
+            "Создай комнату в Mini App, затем отправь в группу "
+            "`/room КОД`, чтобы поделиться входом.",
+            parse_mode="Markdown",
+        )
+        return
+
+    code = context.args[0].strip().upper()
+    if len(context.args) != 1 or not re.fullmatch(r"[A-HJ-NP-Z2-9]{6}", code):
+        await message.reply_text("Использование: `/room КОД_КОМНАТЫ`.", parse_mode="Markdown")
+        return
+    room = await database.get_minigame_room(code)
+    if room is not None:
+        await mini_games.get_room(code, user.id)
+        room = await database.get_minigame_room(code)
+    if room is None or room["status"] != "lobby":
+        await message.reply_text("Открытая комната не найдена или уже началась.")
+        return
+    if not any(
+        int(player["user_id"]) == user.id
+        for player in room["state"].get("players", [])
+    ):
+        await message.reply_text("Поделиться комнатой может только её участник.")
+        return
+    if len(room["state"].get("players", [])) >= int(room["max_players"]):
+        await message.reply_text("Все места в комнате уже заняты.")
+        return
+    username = context.bot.username
+    if not username:
+        username = (await context.bot.get_me()).username
+    if not username:
+        raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
+    invite_url = f"https://t.me/{username}?startapp=room_{code}"
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Войти в комнату", url=invite_url)]]
+    )
+    await message.reply_text(
+        f"Комната Юбары · «Дурак»\n"
+        f"Места занимают первые {room['max_players'] - len(room['state']['players'])} "
+        "игрока, которые войдут.",
+        reply_markup=keyboard,
+    )
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -145,7 +204,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
         "/assets/api.js": ("api.js", "text/javascript; charset=utf-8"),
         "/assets/games.js": ("games.js", "text/javascript; charset=utf-8"),
-        "/assets/wheel.js": ("wheel.js", "text/javascript; charset=utf-8"),
         "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
     }
     bot: Any | None = None
@@ -182,6 +240,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(asset)
             return
+        if request_path.startswith(("/assets/images/", "/assets/music/")):
+            self._handle_future_asset(request_path)
+            return
         if request_path.startswith("/media/banner/"):
             self._handle_banner_media(request_path)
             return
@@ -196,6 +257,41 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def _handle_future_asset(self, request_path: str) -> None:
+        folder, filename = request_path.removeprefix("/assets/").split("/", 1)
+        if (
+            folder not in ("images", "music")
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename)
+            or Path(filename).suffix.lower()
+            not in (
+                {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+                if folder == "images"
+                else {".mp3", ".ogg", ".wav", ".m4a"}
+            )
+        ):
+            self.send_error(404)
+            return
+        asset_path = Path(__file__).resolve().parent / "webapp" / "assets" / folder / filename
+        try:
+            asset = asset_path.read_bytes()
+        except FileNotFoundError:
+            self.send_error(404)
+            return
+        except OSError:
+            logging.exception("Не удалось прочитать будущий Mini App asset %s.", asset_path)
+            self.send_error(500, "Mini App asset unavailable")
+            return
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        )
+        self.send_header("Content-Length", str(len(asset)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(asset)
 
     def _handle_banner_media(self, request_path: str) -> None:
         try:
@@ -271,7 +367,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_error(401, "Telegram identity could not be verified")
             return
         try:
-            user_id, first_name, username = _validate_web_app_init_data(init_data)
+            user_id, first_name, username, photo_url = _validate_web_app_init_data(init_data)
         except ValueError:
             self.send_error(401, "Telegram identity could not be verified")
             return
@@ -287,6 +383,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
                 user_id,
                 first_name,
                 username,
+                photo_url,
                 payload,
                 bot=self.bot,
             )
@@ -992,6 +1089,9 @@ def build_application() -> Application:
             test_banner_command,
             filters=filters.ChatType.PRIVATE,
         )
+    )
+    application.add_handler(
+        CommandHandler("room", room_invite_command, filters=filters.ChatType.GROUPS)
     )
     application.add_handler(build_admin_conversation_handler())
     application.add_handler(build_delete_all_data_handler())

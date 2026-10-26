@@ -1,12 +1,12 @@
-import { apiRequest, showToast } from "./api.js";
+import { apiRequest, formatCoinAmount, showToast } from "./api.js";
 
 let currentRoom;
 let selectedHandIndex = null;
 let selectedTarget = null;
 let roomPoll;
 let roomPollError = null;
-let tarotLoaded = false;
 let initialized = false;
+let roomClockTimer;
 
 const suitLabels = {
   clubs: ["♣", "clubs"],
@@ -53,7 +53,7 @@ function renderRooms(rooms) {
       element(
         "span",
         "",
-        `${room.players.length} из ${room.max_players} игроков · ${room.status === "lobby" ? "ожидает игроков" : "партия началась"}`,
+        `${room.players.length} из ${room.max_players} · ${room.status === "lobby" ? "ожидает игроков" : "партия началась"}`,
       ),
     );
     const button = element("button", "button button-quiet", "Открыть");
@@ -70,12 +70,17 @@ function renderPlayers(room) {
   for (const player of room.players) {
     const row = element("div", "room-player");
     const identity = element("div", "room-player-identity");
-    identity.append(element("span", "room-player-mark", player.user_id === room.owner_id ? "✦" : "♧"));
+    const avatar = makePlayerAvatar(player);
+    identity.append(avatar);
     const name = element("strong", "", player.display_name);
     identity.append(name);
     if (player.user_id === room.owner_id) identity.append(element("small", "", "создатель"));
     row.append(identity);
-    row.append(element("span", "room-player-status", room.status === "lobby" ? "на месте" : `${player.cards_count} карт`));
+    row.append(element(
+      "span",
+      `room-player-status${player.has_left ? " is-left" : ""}`,
+      player.has_left ? "вышел" : room.status === "lobby" ? "на месте" : `${player.cards_count} карт`,
+    ));
     players.append(row);
   }
   if (room.status === "lobby") {
@@ -83,6 +88,79 @@ function renderPlayers(room) {
       players.append(element("div", "room-player room-player-open", "Ждём игрока…"));
     }
   }
+}
+
+function profileHue(photoUrl, userId) {
+  const source = photoUrl || String(userId);
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    hash = (hash * 31 + source.charCodeAt(index)) >>> 0;
+  }
+  return hash % 360;
+}
+
+function makePlayerAvatar(player, small = false) {
+  const avatar = element("span", `room-avatar${small ? " room-avatar-small" : ""}`);
+  avatar.style.setProperty("--avatar-hue", String(profileHue(player.photo_url, player.user_id)));
+  if (player.photo_url) {
+    const image = element("img");
+    image.alt = "";
+    image.referrerPolicy = "no-referrer";
+    image.src = player.photo_url;
+    const colorProbe = new Image();
+    colorProbe.crossOrigin = "anonymous";
+    colorProbe.referrerPolicy = "no-referrer";
+    colorProbe.addEventListener("load", () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.drawImage(colorProbe, 0, 0, 1, 1);
+        const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+        avatar.style.setProperty("--avatar-hue", String(rgbHue(red, green, blue)));
+      } catch {
+        avatar.style.setProperty("--avatar-hue", String(profileHue(player.photo_url, player.user_id)));
+      }
+    }, { once: true });
+    colorProbe.src = player.photo_url;
+    image.addEventListener("error", () => image.remove(), { once: true });
+    avatar.append(image);
+  } else {
+    avatar.append(element("span", "room-avatar-initial", player.display_name.slice(0, 1)));
+  }
+  avatar.append(element("span", "room-avatar-mask"));
+  return avatar;
+}
+
+function rgbHue(red, green, blue) {
+  const [r, g, b] = [red, green, blue].map((value) => value / 255);
+  const maximum = Math.max(r, g, b);
+  const minimum = Math.min(r, g, b);
+  const delta = maximum - minimum;
+  if (!delta) return 0;
+  let hue;
+  if (maximum === r) hue = ((g - b) / delta) % 6;
+  else if (maximum === g) hue = (b - r) / delta + 2;
+  else hue = (r - g) / delta + 4;
+  return Math.round((hue * 60 + 360) % 360);
+}
+
+function renderRoomChat(messages) {
+  const chat = document.getElementById("room-chat-messages");
+  const shouldStickToBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 48;
+  chat.replaceChildren();
+  if (!messages.length) {
+    chat.append(element("p", "room-chat-empty", "Здесь появятся сообщения игроков."));
+    return;
+  }
+  for (const message of messages) {
+    const line = element("article", "room-chat-message");
+    line.append(element("strong", "", message.display_name));
+    line.append(element("p", "", message.message));
+    chat.append(line);
+  }
+  if (shouldStickToBottom) chat.scrollTop = chat.scrollHeight;
 }
 
 function addActionButton(container, label, action, disabled = false) {
@@ -96,7 +174,13 @@ function addActionButton(container, label, action, disabled = false) {
 function renderTable(room) {
   const table = document.getElementById("card-table");
   const game = room.game;
-  table.hidden = !game;
+  table.hidden = false;
+  const idle = document.getElementById("table-idle");
+  idle.hidden = Boolean(game);
+  for (const selector of [".table-meta", ".table-opponents", ".table-cards", ".table-turn", ".player-hand", ".table-actions"]) {
+    const node = table.querySelector(selector);
+    node.hidden = !game;
+  }
   if (!game) return;
 
   document.getElementById("deck-count").textContent = `В колоде: ${game.deck_count}`;
@@ -108,10 +192,11 @@ function renderTable(room) {
   const opponents = document.getElementById("table-opponents");
   opponents.replaceChildren();
   for (const player of room.players) {
-    if (player.user_id === window.telegramUserId) continue;
     const node = element("div", "table-opponent");
-    node.append(element("strong", "", player.display_name));
-    node.append(element("span", "", `${player.cards_count} карт`));
+    if (player.user_id === window.telegramUserId) node.classList.add("is-self");
+    const avatar = makePlayerAvatar(player, true);
+    node.append(avatar, element("strong", "", player.display_name));
+    node.append(element("span", "", player.has_left ? "вышел" : `${player.cards_count} карт`));
     if (player.user_id === game.current_actor_id) node.classList.add("is-active");
     opponents.append(node);
   }
@@ -198,6 +283,20 @@ function renderRoom(room) {
   document.getElementById("room-status-label").textContent =
     room.status === "lobby" ? "ОЖИДАНИЕ ИГРОКОВ" : room.status === "finished" ? "ПАРТИЯ ЗАВЕРШЕНА" : "ПАРТИЯ ИДЁТ";
   renderPlayers(room);
+  renderRoomChat(room.chat || []);
+  window.clearInterval(roomClockTimer);
+  const clock = document.getElementById("room-clock");
+  const expiresAt = room.expires_at;
+  const updateClock = () => {
+    if (!expiresAt) {
+      clock.textContent = "";
+      return;
+    }
+    const seconds = Math.max(0, Math.floor(expiresAt - Date.now() / 1000));
+    clock.textContent = `Осталось ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+  updateClock();
+  roomClockTimer = window.setInterval(updateClock, 1000);
 
   const ownerInLobby = room.is_owner && room.status === "lobby";
   const full = room.players.length === room.max_players;
@@ -206,27 +305,41 @@ function renderRoom(room) {
   const startButton = document.getElementById("room-start");
   startButton.hidden = !ownerInLobby;
   startButton.disabled = !full;
+  document.getElementById("room-share").hidden = room.status !== "lobby";
+  document.getElementById("room-chat-form").hidden = room.status === "finished";
   document.getElementById("room-help").textContent = room.status === "lobby"
-    ? full ? "Все места заняты. Создатель комнаты может начинать." : `Нужно ещё ${room.max_players - room.players.length} игрока. Отправь код комнаты или пригласи друга.`
-    : "Ход и карты игроков хранятся на сервере и обновляются автоматически.";
+    ? full
+      ? "Все места заняты. Создатель комнаты может начинать."
+      : `«Дурак» · ${room.mode === "coins" ? `ставка ${formatCoinAmount(room.stake_cents)} монет` : "бесплатно"} · поделись /room ${room.room_code}`
+    : room.status === "finished"
+      ? "Комната завершена."
+      : `«Дурак» · ${room.mode === "coins" ? `ставка ${formatCoinAmount(room.stake_cents)} монет` : "бесплатно"} · ходы обновляются автоматически.`;
 
   renderTable(room);
   const winner = document.getElementById("room-winner");
   winner.hidden = room.status !== "finished";
   if (room.status === "finished") {
     const game = room.game;
-    const userLost = game.losers.includes(window.telegramUserId);
-    winner.textContent = game.finish_reason === "round_limit"
-      ? userLost
-        ? "Лимит раундов: у тебя осталось больше всего карт."
-        : game.losers.length
-          ? "Лимит раундов: у тебя меньше карт, чем у проигравших."
-          : "Лимит раундов завершён ничьей."
-      : game.loser_id === null
-        ? "Ничья — у всех закончились карты."
-        : game.loser_id === window.telegramUserId
-          ? "Партия завершена. В этот раз дурак — ты."
-          : "Партия завершена. Поздравляем, ты не остался с картами!";
+    if (room.finish_reason === "timeout" || game?.finish_reason === "timeout") {
+      winner.textContent = room.mode === "coins"
+        ? "Время вышло. Партия завершена, каждому возвращено 95% ставки."
+        : "Время комнаты вышло. Партия завершена.";
+    } else if (room.finish_reason === "room_expired") {
+      winner.textContent = "Время ожидания вышло. Комната закрыта, ставка не списывалась.";
+    } else if (room.finish_reason === "owner_left") {
+      winner.textContent = "Создатель покинул комнату. Комната закрыта.";
+    } else if (!game) {
+      winner.textContent = "Комната завершена.";
+    } else {
+      const winnerId = game.placement_order?.[0] ?? game.winners?.[0];
+      const winnerName = room.players.find((player) => player.user_id === winnerId)?.display_name || "Игрок";
+      const prefix = game.finish_reason === "round_limit" ? "Лимит раундов. " : "";
+      winner.textContent = winnerId === window.telegramUserId
+        ? `${prefix}Поздравляем, ${winnerName}! Ты победил.`
+        : `${prefix}Поздравляем победителя — ${winnerName}!`;
+      const payout = room.settlement_payouts?.find((item) => item.user_id === window.telegramUserId);
+      if (payout?.delta_cents) winner.textContent += ` Тебе начислено ${formatCoinAmount(payout.delta_cents)} монет.`;
+    }
   }
 }
 
@@ -279,55 +392,17 @@ async function submitAction(action) {
   }
 }
 
-function renderTarot(reading) {
-  const result = document.getElementById("tarot-result");
-  result.hidden = !reading || reading.status !== "complete";
-  if (!reading || reading.status !== "complete") return;
-  const cards = document.getElementById("tarot-cards");
-  cards.replaceChildren();
-  reading.cards.forEach((card) => {
-    const article = element("article", "tarot-card");
-    const position = element("span", "tarot-position", card.position);
-    const face = element("div", `tarot-card-face${card.reversed ? " is-reversed" : ""}`);
-    face.append(element("span", "tarot-card-arcana", card.arcana));
-    face.append(element("span", "tarot-card-symbol", card.symbol));
-    face.append(element("strong", "tarot-card-name", card.name));
-    face.append(element("span", "tarot-card-orientation", card.reversed ? "Перевёрнутая" : "Прямая"));
-    article.append(position, face);
-    cards.append(article);
-  });
-  document.getElementById("tarot-interpretation").textContent = reading.interpretation;
-}
-
-async function updateTarotAvailability() {
-  const status = await apiRequest("/api/v1/games/tarot");
-  const label = document.getElementById("tarot-availability");
-  const submit = document.getElementById("tarot-submit");
-  const textarea = document.getElementById("tarot-question");
-  if (status.reading?.status === "pending") {
-    label.textContent = "Расклад готовится. Обнови страницу через несколько секунд.";
-    submit.disabled = true;
-    textarea.disabled = true;
-  } else if (status.available) {
-    label.textContent = "Новый расклад доступен. Следующий — после полуночи по Москве.";
-    submit.disabled = false;
-    textarea.disabled = false;
-    renderTarot(null);
-  } else {
-    label.textContent = "Расклад на сегодня уже использован. Возвращайся завтра.";
-    submit.disabled = true;
-    textarea.disabled = true;
-    renderTarot(status.reading);
+export async function joinRoomByCode(code) {
+  try {
+    const room = await apiRequest("/api/v1/games/rooms/join", {
+      method: "POST",
+      body: { room_code: code },
+    });
+    renderRoom(room);
+    showToast(`Ты в комнате ${room.room_code}.`);
+  } catch (error) {
+    showToast(error.message, true);
   }
-}
-
-export async function loadTarot() {
-  if (tarotLoaded) {
-    await updateTarotAvailability();
-    return;
-  }
-  await updateTarotAvailability();
-  tarotLoaded = true;
 }
 
 export async function loadRooms() {
@@ -362,11 +437,24 @@ export function initGames() {
 
   document.getElementById("room-create-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const maxPlayers = Number(new FormData(event.currentTarget).get("max_players"));
+    const formData = new FormData(event.currentTarget);
+    const maxPlayers = Number(formData.get("max_players"));
+    const mode = formData.get("mode");
+    const stakeAmount = Number(formData.get("stake") || 0);
+    const stakeCents = mode === "coins" ? Math.round(stakeAmount * 100) : 0;
+    if (mode === "coins" && (!Number.isFinite(stakeAmount) || stakeCents < 1)) {
+      showToast("Укажи положительную ставку в монетах.", true);
+      return;
+    }
     try {
       const room = await apiRequest("/api/v1/games/rooms/create", {
         method: "POST",
-        body: { max_players: maxPlayers },
+        body: {
+          game_type: formData.get("game_type"),
+          max_players: maxPlayers,
+          mode,
+          stake_cents: stakeCents,
+        },
       });
       renderRoom(room);
       showToast(`Комната ${room.room_code} создана.`);
@@ -377,25 +465,13 @@ export function initGames() {
   document.getElementById("room-join-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const roomCode = new FormData(event.currentTarget).get("room_code");
-    try {
-      const room = await apiRequest("/api/v1/games/rooms/join", {
-        method: "POST",
-        body: { room_code: roomCode },
-      });
-      renderRoom(room);
-      event.currentTarget.reset();
-      showToast(`Ты в комнате ${room.room_code}.`);
-    } catch (error) {
-      showToast(error.message, true);
-    }
+    await joinRoomByCode(roomCode);
+    event.currentTarget.reset();
+  });
+  document.getElementById("room-mode").addEventListener("change", (event) => {
+    document.getElementById("room-stake-field").hidden = event.currentTarget.value !== "coins";
   });
   document.getElementById("rooms-refresh").addEventListener("click", () => {
-    loadRooms().catch((error) => showToast(error.message, true));
-  });
-  document.getElementById("room-back").addEventListener("click", () => {
-    currentRoom = null;
-    document.getElementById("room-view").hidden = true;
-    document.getElementById("room-lobby").hidden = false;
     loadRooms().catch((error) => showToast(error.message, true));
   });
   document.getElementById("room-start").addEventListener("click", async () => {
@@ -435,29 +511,84 @@ export function initGames() {
       showToast(`Код комнаты: ${currentRoom.room_code}`);
     }
   });
+  document.getElementById("room-share").addEventListener("click", async () => {
+    if (!currentRoom) return;
+    try {
+      await navigator.clipboard.writeText(`/room ${currentRoom.room_code}`);
+      showToast("Команду-приглашение скопировали. Отправь её в группу.");
+    } catch {
+      showToast(`Отправь в группу: /room ${currentRoom.room_code}`);
+    }
+  });
+  document.getElementById("room-exit").addEventListener("click", () => {
+    if (!currentRoom) return;
+    if (currentRoom.status === "finished") {
+      currentRoom = null;
+      window.clearInterval(roomClockTimer);
+      document.getElementById("room-view").hidden = true;
+      document.getElementById("room-lobby").hidden = false;
+      loadRooms().catch((error) => showToast(error.message, true));
+      return;
+    }
+    const leave = async () => {
+      try {
+        await apiRequest("/api/v1/games/rooms/leave", {
+          method: "POST",
+          body: { room_code: currentRoom.room_code },
+        });
+        currentRoom = null;
+        window.clearInterval(roomClockTimer);
+        document.getElementById("room-view").hidden = true;
+        document.getElementById("room-lobby").hidden = false;
+        showToast("Ты вышел из комнаты.");
+        await loadRooms();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    };
+    if (currentRoom.status === "playing" && window.Telegram?.WebApp?.showConfirm) {
+      window.Telegram.WebApp.showConfirm(
+        "Выход из начавшейся партии засчитывается как поражение.",
+        (confirmed) => {
+          if (confirmed) leave();
+        },
+      );
+    } else if (currentRoom.status !== "playing" || window.confirm("Выйти из комнаты?")) {
+      leave();
+    }
+  });
+  document.getElementById("room-chat-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!currentRoom) return;
+    const form = event.currentTarget;
+    const message = new FormData(form).get("message");
+    try {
+      await apiRequest("/api/v1/games/rooms/messages", {
+        method: "POST",
+        body: { room_code: currentRoom.room_code, message },
+      });
+      form.reset();
+      await refreshRoom();
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
   document.getElementById("table-actions").addEventListener("click", (event) => {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action) submitAction(action);
   });
-  document.getElementById("tarot-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const question = new FormData(event.currentTarget).get("question");
-    const submit = document.getElementById("tarot-submit");
-    submit.disabled = true;
-    document.getElementById("tarot-availability").textContent = "Карты перемешиваются…";
-    try {
-      const reading = await apiRequest("/api/v1/games/tarot", {
-        method: "POST",
-        body: { question },
-      });
-      renderTarot(reading);
-      document.getElementById("tarot-question").value = reading.question;
-      await updateTarotAvailability();
-    } catch (error) {
-      showToast(error.message, true);
-      await updateTarotAvailability().catch((statusError) => {
-        showToast(statusError.message, true);
-      });
-    }
+  const table = document.getElementById("card-table");
+  let leanTimer;
+  const stopLeaning = () => {
+    window.clearTimeout(leanTimer);
+    table.classList.remove("is-leaning");
+  };
+  table.addEventListener("pointerdown", () => {
+    window.clearTimeout(leanTimer);
+    leanTimer = window.setTimeout(() => table.classList.add("is-leaning"), 180);
   });
+  for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
+    table.addEventListener(eventName, stopLeaning);
+  }
+  table.addEventListener("contextmenu", (event) => event.preventDefault());
 }

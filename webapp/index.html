@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#11121a">
-  <meta name="description" content="Карточные игры, Таро и колесо удачи в Mini App Юбары">
-  <title>Игры — Юбара</title>
+  <meta name="description" content="Игровые комнаты Юбары — собирай друзей за одним столом">
+  <title>Игровые комнаты — Юбара</title>
   <link rel="stylesheet" href="/assets/app.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script type="module" src="/assets/app.js"></script>
@@ -19,9 +19,8 @@
       </a>
       <nav class="rail-nav" aria-label="Игры">
         <button class="nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Игры</span></button>
-        <button class="nav-item" type="button" data-page="rooms"><span class="nav-symbol">♠</span><span>Карточная комната</span></button>
-        <button class="nav-item" type="button" data-page="tarot"><span class="nav-symbol">✦</span><span>Таро дня</span></button>
-        <button class="nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо удачи</span></button>
+        <button class="nav-item" type="button" data-page="rooms"><svg><use href="/assets/icons.svg#cards"></use></svg><span>Игровая комната</span></button>
+        <button class="nav-item" type="button" data-page="tarot"><svg><use href="/assets/icons.svg#spark"></use></svg><span>Таро · Скоро</span></button>
       </nav>
       <div class="rail-foot"><span class="online-dot"></span><span>Играй вместе</span></div>
     </aside>
@@ -39,41 +38,47 @@
         <div class="welcome-card games-welcome">
           <div class="welcome-copy">
             <span class="eyebrow">ТВОЙ ВЕЧЕР В ХОРОШЕЙ КОМПАНИИ</span>
-            <h2 id="home-title">Выбирай игру.<br>Остальное — магия.</h2>
-            <p>Собирай друзей за карточным столом, задай вопрос картам или испытай удачу.</p>
-            <button class="button button-primary" type="button" data-page="rooms">К игровому столу <svg><use href="/assets/icons.svg#arrow"></use></svg></button>
+            <h2 id="home-title">Один стол.<br>Своя компания.</h2>
+            <p>Создай комнату, выбери игру и пригласи друзей по ссылке.</p>
+            <button class="button button-primary" type="button" data-page="rooms">Создать комнату <svg><use href="/assets/icons.svg#arrow"></use></svg></button>
           </div>
-          <div class="games-hero-art" aria-hidden="true"><span>♠</span><span>✦</span><span>♥</span></div>
+          <div class="games-hero-art" aria-hidden="true"><svg><use href="/assets/icons.svg#cards"></use></svg></div>
           <span class="card-orbit orbit-one"></span><span class="card-orbit orbit-two"></span>
         </div>
 
-        <div class="section-head"><div><span class="eyebrow">ТРИ СПОСОБА ПРОВЕСТИ ВРЕМЯ</span><h2>Во что сыграем?</h2></div></div>
+        <div class="section-head"><div><span class="eyebrow">ВЫБЕРИ ИГРУ ДЛЯ КОМНАТЫ</span><h2>Что на столе?</h2></div></div>
         <div class="feature-grid games-grid">
           <button class="feature-card game-feature game-feature-cards" type="button" data-page="rooms">
-            <span class="game-feature-symbol">♠</span><span class="feature-title">Карточный стол</span><span class="feature-description">Подкидной дурак с друзьями, от 2 до 4 игроков</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
+            <span class="game-feature-symbol"><svg><use href="/assets/icons.svg#cards"></use></svg></span><span class="feature-title">Подкидной дурак</span><span class="feature-description">Играйте компанией от двух до четырёх человек.</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
           </button>
-          <button class="feature-card game-feature game-feature-tarot" type="button" data-page="tarot">
-            <span class="game-feature-symbol">✦</span><span class="feature-title">Таро дня</span><span class="feature-description">Три карты и короткое толкование от ИИ — раз в день</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
-          </button>
-          <button class="feature-card game-feature game-feature-wheel" type="button" data-page="wheel">
-            <span class="game-feature-symbol">◉</span><span class="feature-title">Колесо удачи</span><span class="feature-description">Испытай удачу и получи баннер в коллекцию</span><svg class="feature-arrow"><use href="/assets/icons.svg#arrow"></use></svg>
-          </button>
+          <article class="feature-card game-feature game-feature-tarot is-coming-soon">
+            <span class="game-feature-symbol"><svg><use href="/assets/icons.svg#spark"></use></svg></span><span class="feature-title">Мафия · Скоро</span><span class="feature-description">Командная игра появится в будущих обновлениях.</span>
+          </article>
+          <article class="feature-card game-feature game-feature-tarot is-coming-soon">
+            <span class="game-feature-symbol"><svg><use href="/assets/icons.svg#spark"></use></svg></span><span class="feature-title">Багшот · Скоро</span><span class="feature-description">Новая игра будет доступна позже.</span>
+          </article>
+          <article class="feature-card game-feature game-feature-tarot is-coming-soon">
+            <span class="game-feature-symbol"><svg><use href="/assets/icons.svg#cards"></use></svg></span><span class="feature-title">Покер · Скоро</span><span class="feature-description">Поддержка игры появится в будущих обновлениях.</span>
+          </article>
         </div>
-        <p class="subtle-note">Команды и привычные функции бота по-прежнему доступны в чате Telegram.</p>
+        <p class="subtle-note">Команды бота и игровые комнаты работают отдельно друг от друга.</p>
       </section>
 
       <section class="page" id="page-rooms" aria-labelledby="rooms-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ПОДКИДНОЙ ДУРАК · 36 КАРТ</span><h2 id="rooms-title">Карточная комната</h2><p>Создай стол для друзей или присоединись к игре по коду комнаты. Если партия затянется на 120 раундов, проиграет игрок с наибольшим числом карт.</p></div>
+        <div class="page-intro"><span class="eyebrow">ОДИН ЧАС · СВОИ ПРАВИЛА</span><h2 id="rooms-title">Игровая комната</h2><p>Выбери игру, пригласи компанию и играй бесплатно или на монеты.</p></div>
         <div id="room-lobby">
           <div class="games-room-forms">
             <form class="panel game-form" id="room-create-form">
-              <span class="eyebrow">ТВОЙ СТОЛ — ТВОИ ПРАВИЛА</span><h3>Создать комнату</h3>
+              <span class="eyebrow">НОВАЯ КОМНАТА</span><h3>Настроить стол</h3>
+              <label class="select-field"><span>Игра</span><select name="game_type"><option value="durak">Подкидной дурак</option><option value="mafia" disabled>Мафия · скоро</option><option value="buckshot" disabled>Багшот · скоро</option><option value="poker" disabled>Покер · скоро</option></select></label>
               <label class="select-field"><span>Количество игроков</span><select name="max_players"><option value="2">2 игрока</option><option value="3">3 игрока</option><option value="4">4 игрока</option></select></label>
-              <button class="button button-primary" type="submit">Создать стол</button>
+              <label class="select-field"><span>Режим</span><select name="mode" id="room-mode"><option value="free">Бесплатно</option><option value="coins">На монеты</option></select></label>
+              <label class="select-field" id="room-stake-field" hidden><span>Ставка с игрока, монет</span><input name="stake" type="number" min="0.01" max="10000000000" step="0.01" value="1" inputmode="decimal"></label>
+              <button class="button button-primary" type="submit">Создать комнату</button>
             </form>
             <form class="panel game-form" id="room-join-form">
               <span class="eyebrow">ТЕБЯ УЖЕ ЖДУТ</span><h3>Войти по коду</h3>
-              <label class="select-field"><span>Код комнаты</span><input name="room_code" type="text" minlength="6" maxlength="6" placeholder="Например, A7K9Q2" autocomplete="off" required></label>
+              <label class="select-field"><span>Код или приглашение</span><input name="room_code" type="text" minlength="6" maxlength="6" placeholder="Например, A7K9Q2" autocomplete="off" required></label>
               <button class="button button-quiet" type="submit">Присоединиться</button>
             </form>
           </div>
@@ -84,7 +89,7 @@
         <section class="panel room-panel" id="room-view" hidden aria-live="polite">
           <div class="room-heading">
             <div><span class="eyebrow" id="room-status-label">КОМНАТА</span><h3>Стол <button class="room-code-copy" id="room-code-label" type="button" aria-label="Скопировать код комнаты"></button></h3></div>
-            <button class="button button-quiet" id="room-back" type="button">К комнатам</button>
+            <div class="room-heading-actions"><button class="button button-quiet" id="room-share" type="button">Скопировать /room</button><button class="button button-quiet" id="room-exit" type="button">Выйти</button></div>
           </div>
           <div class="room-content">
             <div>
@@ -94,9 +99,19 @@
                 <button class="button button-quiet" type="submit">Отправить приглашение</button>
               </form>
               <button class="button button-primary room-start-button" id="room-start" type="button" hidden>Начать игру</button>
-              <p class="muted room-help" id="room-help">Отправь код друзьям — они смогут войти в комнату из Mini App.</p>
+              <p class="muted room-help" id="room-help">Поделись командой /room КОД в группе — первые игроки займут свободные места.</p>
+              <section class="room-chat panel" aria-label="Чат комнаты">
+                <div class="room-chat-heading"><strong>Чат комнаты</strong><span id="room-clock"></span></div>
+                <div class="room-chat-messages" id="room-chat-messages" aria-live="polite"></div>
+                <form class="room-chat-form" id="room-chat-form">
+                  <input name="message" maxlength="500" placeholder="Сообщение игрокам…" autocomplete="off" required>
+                  <button class="button button-primary" type="submit" aria-label="Отправить сообщение">Отправить</button>
+                </form>
+              </section>
             </div>
-            <div class="card-table" id="card-table" hidden>
+            <div class="card-table" id="card-table" hidden aria-label="Круглый игровой стол">
+              <div class="table-lean-hint" aria-hidden="true">Удерживай стол, чтобы посмотреть на него</div>
+              <p class="table-idle" id="table-idle">Стол готов. Ждём игроков…</p>
               <div class="table-meta"><span id="deck-count">Колода: —</span><span class="trump-badge" id="trump-badge"></span></div>
               <div class="table-opponents" id="table-opponents"></div>
               <div class="table-cards" id="table-cards"><p class="table-empty">Стол пока пуст</p></div>
@@ -110,51 +125,7 @@
       </section>
 
       <section class="page" id="page-tarot" aria-labelledby="tarot-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ОДИН РАСКЛАД В МОСКОВСКИЕ СУТКИ</span><h2 id="tarot-title">Таро дня</h2><p>Сформулируй вопрос, выбери направление мысли — и открой три карты. Это символическая подсказка, не предсказание.</p></div>
-        <form class="panel tarot-form" id="tarot-form">
-          <label class="field-label" for="tarot-question">Что тебя волнует?</label>
-          <textarea id="tarot-question" name="question" maxlength="300" minlength="3" placeholder="Напиши вопрос своими словами…" required></textarea>
-          <div class="tarot-form-footer"><span id="tarot-availability">Загружаем состояние расклада…</span><button class="button button-primary" id="tarot-submit" type="submit" disabled>Открыть карты</button></div>
-        </form>
-        <section class="tarot-result" id="tarot-result" hidden aria-live="polite">
-          <div class="section-head"><div><span class="eyebrow">ТВОЙ РАСКЛАД</span><h2>Три взгляда на вопрос</h2></div></div>
-          <div class="tarot-cards" id="tarot-cards"></div>
-          <article class="panel tarot-interpretation"><span class="eyebrow">ТОЛКОВАНИЕ</span><p id="tarot-interpretation"></p></article>
-        </section>
-      </section>
-
-      <section class="page" id="page-wheel" aria-labelledby="wheel-title" hidden>
-        <div class="page-intro"><span class="eyebrow">ИСПЫТАНИЕ УДАЧИ</span><h2 id="wheel-title">Колесо удачи</h2><p>Каждая крутка открывает новый баннер. Результат определяется сервером и сразу сохраняется в инвентарь.</p></div>
-        <div class="wheel-layout">
-          <article class="panel wheel-machine" id="wheel-machine">
-            <div class="wheel-frame" id="wheel-frame">
-              <div class="wheel-indicator" aria-hidden="true"><svg><use href="/assets/icons.svg#arrow"></use></svg></div>
-              <div class="wheel-disc" id="wheel-disc" role="img" aria-label="Колесо с секторами редкости баннеров">
-                <div class="wheel-center"><svg aria-hidden="true"><use href="/assets/icons.svg#fortune"></use></svg></div>
-              </div>
-            </div>
-            <p class="wheel-status" id="wheel-status" aria-live="polite">Загружаем колесо…</p>
-          </article>
-          <div class="wheel-side">
-            <article class="panel wheel-controls">
-              <div class="wheel-balance"><span class="eyebrow">ТВОЙ БАЛАНС</span><strong id="wheel-balance">—</strong><span>монет</span></div>
-              <div class="wheel-spin-options" role="group" aria-label="Количество круток">
-                <button class="wheel-option is-selected" type="button" data-spins="1">Одна крутка<span id="wheel-single-cost">—</span></button>
-                <button class="wheel-option" type="button" data-spins="10">Пакет ×10<span id="wheel-ten-cost">—</span></button>
-              </div>
-              <button class="button button-primary wheel-spin-button" id="wheel-spin" type="button" disabled>Крутить</button>
-              <p class="wheel-inventory-note">Баннеры зачисляются в коллекцию бота.</p>
-            </article>
-            <article class="panel wheel-odds">
-              <div class="section-head"><div><span class="eyebrow">ЧЕСТНЫЕ ШАНСЫ</span><h3>Редкость приза</h3></div></div>
-              <div class="wheel-odds-list" id="wheel-odds-list"></div>
-            </article>
-          </div>
-        </div>
-        <section class="wheel-results-section" aria-live="polite">
-          <div class="section-head"><div><span class="eyebrow">ПОСЛЕДНИЙ РЕЗУЛЬТАТ</span><h2>Твои призы</h2></div></div>
-          <div class="wheel-results" id="wheel-results"><div class="panel wheel-empty">Крути колесо, чтобы получить первый баннер.</div></div>
-        </section>
+        <div class="panel coming-soon-card"><span class="game-feature-symbol"><svg><use href="/assets/icons.svg#spark"></use></svg></span><h2 id="tarot-title">Таро скоро вернётся</h2><p>Сейчас мы собираем игровые комнаты для компании. Загляни позже.</p></div>
       </section>
 
       <footer class="footer"><span>ЮБАРА</span><span>Твоя следующая игра уже здесь</span></footer>
@@ -163,9 +134,8 @@
 
   <nav class="mobile-nav" aria-label="Игры">
     <button class="mobile-nav-item is-active" type="button" data-page="home"><svg><use href="/assets/icons.svg#home"></use></svg><span>Игры</span></button>
-    <button class="mobile-nav-item" type="button" data-page="rooms"><span class="nav-symbol">♠</span><span>Карты</span></button>
-    <button class="mobile-nav-item" type="button" data-page="tarot"><span class="nav-symbol">✦</span><span>Таро</span></button>
-    <button class="mobile-nav-item" type="button" data-page="wheel"><svg><use href="/assets/icons.svg#fortune"></use></svg><span>Колесо</span></button>
+    <button class="mobile-nav-item" type="button" data-page="rooms"><svg><use href="/assets/icons.svg#cards"></use></svg><span>Комната</span></button>
+    <button class="mobile-nav-item" type="button" data-page="tarot"><svg><use href="/assets/icons.svg#spark"></use></svg><span>Скоро</span></button>
   </nav>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>
