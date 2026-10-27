@@ -23,6 +23,7 @@ from telegram.ext import ContextTypes
 
 import database
 from banner_store import get_profile_banner
+from chat_tarot import extract_tarot_trigger_question, send_tarot_reading
 from casino import (
     handle_coin_promo_message,
     handle_game_message,
@@ -111,8 +112,8 @@ _GROUP_PROMO_COMMAND_RE = re.compile(
 )
 _TOP_COMMAND_RE = re.compile(r"^/top(?:@\w+)?(?:\s+(\S+))?\s*$", re.IGNORECASE)
 _TOP_TEXT_RE = re.compile(
-    r"^(?:топ(?:\s+(?:сообщений|активности))?|статистика\s+активности)"
-    r"(?:\s+(?:за\s+)?(\S+))?$",
+    r"^(?:топ(?:\s+(?:сообщений|активности))?|статистика\s+активности|стата)"
+    r"(?:\s+(?:за\s+)?(всё\s+время|все\s+время|вся|все|всё|\S+))?$",
     re.IGNORECASE,
 )
 _TOP_PERIODS = {
@@ -133,6 +134,14 @@ _TOP_PERIODS = {
     "month": "m",
     "месяц": "m",
     "месяце": "m",
+    "a": "a",
+    "all": "a",
+    "alltime": "a",
+    "вся": "a",
+    "все": "a",
+    "всё": "a",
+    "всё время": "a",
+    "все время": "a",
 }
 def _user_name(user: object | None) -> str:
     if user is None:
@@ -327,7 +336,12 @@ def _format_person_profile(
             f"<blockquote expandable>{html.escape(fact_text)}</blockquote>"
         )
     if activity is not None and stats_period is not None:
-        period_labels = {"d": "D · сегодня", "w": "W · неделя", "m": "M · месяц"}
+        period_labels = {
+            "d": "D · сегодня",
+            "w": "W · неделя",
+            "m": "M · месяц",
+            "a": "всё время",
+        }
         if stats_period not in period_labels:
             raise ValueError(f"Неизвестный период статистики группы: {stats_period!r}.")
         lines.append(
@@ -336,9 +350,9 @@ def _format_person_profile(
         )
     elif activity is not None:
         lines.append(
-            "<i>Сообщения · D/W/M: "
+            "<i>Сообщения · D/W/M/всё время: "
             f"{activity.get('d', 0)} / {activity.get('w', 0)} / "
-            f"{activity.get('m', 0)}</i>"
+            f"{activity.get('m', 0)} / {activity.get('a', 0)}</i>"
         )
     return "\n".join(lines)
 
@@ -406,7 +420,7 @@ def _group_profile_stats_keyboard(
                         f"profile:groupstats:{target_user_id}:{group_id}:{period}"
                     ),
                 )
-                for period, label in (("d", "D"), ("w", "W"), ("m", "M"))
+                for period, label in (("d", "D"), ("w", "W"), ("m", "M"), ("a", "Всего"))
             ]
         ]
     )
@@ -486,7 +500,7 @@ async def on_group_profile_stats_callback(
         target_user_id = int(parts[2])
         group_id = int(parts[3])
         stats_period = parts[4]
-        if stats_period not in ("d", "w", "m"):
+        if stats_period not in ("d", "w", "m", "a"):
             await query.answer("Неизвестный период статистики.", show_alert=True)
             return
         if (
@@ -503,7 +517,7 @@ async def on_group_profile_stats_callback(
             return
         activity = (await database.get_group_message_activity(group_id)).get(
             target_user_id,
-            {"d": 0, "w": 0, "m": 0},
+            {"d": 0, "w": 0, "m": 0, "a": 0},
         )
         await query.answer()
         answered = True
@@ -797,6 +811,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if await handle_game_message(update, context):
         return
 
+    tarot_question = extract_tarot_trigger_question(text)
+    if tarot_question is not None:
+        await send_tarot_reading(message, tarot_question)
+        return
+
     if is_transcription_request(text, message):
         await handle_voice_transcription(message, context)
         return
@@ -808,6 +827,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await image_manager.offer(update, context, image_prompt)
         return
 
+    summary = is_summary_request(text)
     if not (
         called
         or replied_to_bot
@@ -815,10 +835,10 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         or command
         or profile_request
         or group_profile_request
+        or summary
     ):
         return
 
-    summary = is_summary_request(text)
     summary_period_minutes = extract_summary_period_minutes(text)
     if summary and summary_period_minutes is not None:
         if summary_period_minutes <= 0:

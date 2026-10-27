@@ -1,5 +1,6 @@
 import os
 import unittest
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -10,12 +11,24 @@ os.environ.setdefault("GROQ_API_KEY", "test-key")
 os.environ.setdefault("HISTORY_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii"))
 os.environ.setdefault("ADMIN_ID", "1")
 
-from chat_tarot import tarot_command
+from chat_tarot import extract_tarot_trigger_question, tarot_command
 
 
 class TarotCommandTests(unittest.IsolatedAsyncioTestCase):
+    def test_tarot_trigger_word_extracts_optional_question(self):
+        self.assertEqual(extract_tarot_trigger_question("таро"), "")
+        self.assertEqual(
+            extract_tarot_trigger_question("Таро, что меня ждёт?"),
+            "что меня ждёт?",
+        )
+        self.assertEqual(
+            extract_tarot_trigger_question("Юбара, таро — стоит ли менять работу?"),
+            "стоит ли менять работу?",
+        )
+        self.assertIsNone(extract_tarot_trigger_question("Расскажи, что такое таро"))
+
     async def test_no_question_uses_general_reading(self):
-        message = SimpleNamespace(reply_text=AsyncMock())
+        message = SimpleNamespace(reply_text=AsyncMock(), reply_photo=AsyncMock())
         update = SimpleNamespace(effective_message=message)
         context = SimpleNamespace(args=None)
         cards = [
@@ -24,6 +37,7 @@ class TarotCommandTests(unittest.IsolatedAsyncioTestCase):
                 "symbol": "✦",
                 "name": f"Карта {index}",
                 "reversed": False,
+                "image_file": "00-TheFool.jpg",
             }
             for index, position in enumerate(
                 ("Прошлое", "Настоящее", "Возможное направление"),
@@ -37,13 +51,16 @@ class TarotCommandTests(unittest.IsolatedAsyncioTestCase):
                 "chat_tarot.llm.generate_tarot_interpretation",
                 new=AsyncMock(return_value="Время подумать."),
             ) as interpret,
+            patch("chat_tarot.create_tarot_collage", return_value=BytesIO(b"image")),
         ):
             await tarot_command(update, context)
 
         self.assertEqual(interpret.await_args.args[0], "Общий расклад")
+        message.reply_photo.assert_awaited_once()
+        message.reply_text.assert_awaited_once()
 
     async def test_each_call_generates_a_new_unlimited_reading(self):
-        message = SimpleNamespace(reply_text=AsyncMock())
+        message = SimpleNamespace(reply_text=AsyncMock(), reply_photo=AsyncMock())
         update = SimpleNamespace(effective_message=message)
         context = SimpleNamespace(args=["Что", "меня", "ждёт?"])
         cards = [
@@ -52,6 +69,7 @@ class TarotCommandTests(unittest.IsolatedAsyncioTestCase):
                 "symbol": "✦",
                 "name": f"Карта {index}",
                 "reversed": False,
+                "image_file": "00-TheFool.jpg",
             }
             for index, position in enumerate(
                 ("Прошлое", "Настоящее", "Возможное направление"),
@@ -65,12 +83,14 @@ class TarotCommandTests(unittest.IsolatedAsyncioTestCase):
                 "chat_tarot.llm.generate_tarot_interpretation",
                 new=AsyncMock(return_value="Время подумать."),
             ) as interpret,
+            patch("chat_tarot.create_tarot_collage", return_value=BytesIO(b"image")),
         ):
             await tarot_command(update, context)
             await tarot_command(update, context)
 
         self.assertEqual(draw.call_count, 2)
         self.assertEqual(interpret.await_count, 2)
+        self.assertEqual(message.reply_photo.await_count, 2)
         self.assertEqual(message.reply_text.await_count, 2)
         self.assertIn("Вопрос: Что меня ждёт?", message.reply_text.call_args.args[0])
 

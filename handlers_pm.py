@@ -35,6 +35,7 @@ import database
 import autoresponder
 import personal_account
 from banner_store import get_profile_banner, reroll_active_banner, send_banner
+from chat_tarot import extract_tarot_trigger_question, send_tarot_reading
 from casino import (
     handle_activation_message,
     handle_coin_promo_message,
@@ -155,7 +156,12 @@ def _format_private_profile(
         if len(facts) > 650:
             facts = facts[:647].rsplit("\n", 1)[0] + "\n…"
         caption += f"\n<blockquote expandable>{html.escape(facts)}</blockquote>"
-    period_labels = {"d": "D · сегодня", "w": "W · неделя", "m": "M · месяц"}
+    period_labels = {
+        "d": "D · сегодня",
+        "w": "W · неделя",
+        "m": "M · месяц",
+        "a": "всё время",
+    }
     if stats_period not in period_labels:
         raise ValueError(f"Неизвестный период статистики профиля: {stats_period!r}.")
     caption += (
@@ -175,7 +181,7 @@ def _profile_keyboard(
             f"{'● ' if period == stats_period else ''}{label}",
             callback_data=f"profile:stats:{period}",
         )
-        for period, label in (("d", "D"), ("w", "W"), ("m", "M"))
+        for period, label in (("d", "D"), ("w", "W"), ("m", "M"), ("a", "Всего"))
     ]
     return InlineKeyboardMarkup(
         [
@@ -382,7 +388,7 @@ async def on_profile_callback(
         return
     if action.startswith("profile:stats:"):
         stats_period = action.removeprefix("profile:stats:")
-        if stats_period not in ("d", "w", "m"):
+        if stats_period not in ("d", "w", "m", "a"):
             await query.message.reply_text("Неизвестный период статистики.")
             return
         try:
@@ -4184,6 +4190,10 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if await handle_activation_message(update, context):
         return
     if await handle_coin_promo_message(update):
+        return
+    tarot_question = extract_tarot_trigger_question(message.text)
+    if tarot_question is not None:
+        await send_tarot_reading(message, tarot_question)
         return
     try:
         has_access = await has_private_bot_access(user.id, context.bot)

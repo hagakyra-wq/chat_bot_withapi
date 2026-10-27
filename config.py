@@ -47,7 +47,6 @@ def _model_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 TELEGRAM_TOKEN = _required_text("TELEGRAM_TOKEN")
 GROQ_API_KEY = _required_text("GROQ_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 HISTORY_ENCRYPTION_KEY = _required_text("HISTORY_ENCRYPTION_KEY")
 ADMIN_ID = _required_int("ADMIN_ID")
 BACKUP_CHANNEL_ID = _optional_int("BACKUP_CHANNEL_ID")
@@ -71,10 +70,6 @@ TELEGRAM_USER_SESSION_PATH = Path(
 )
 DATABASE_SHARD_THRESHOLD_BYTES = 19 * 1024 * 1024
 MODEL_NAME = "openai/gpt-oss-120b"
-SUMMARY_GEMINI_MODELS = _model_list(
-    "SUMMARY_GEMINI_MODELS",
-    ("gemini-2.5-flash", "gemini-2.0-flash"),
-)
 SUMMARY_GROQ_MODELS = _model_list(
     "SUMMARY_GROQ_MODELS",
     (
@@ -83,9 +78,11 @@ SUMMARY_GROQ_MODELS = _model_list(
         "llama-3.1-8b-instant",
     ),
 )
+if not SUMMARY_GROQ_MODELS:
+    raise ValueError("SUMMARY_GROQ_MODELS должен содержать хотя бы одну модель.")
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 
-DEFAULT_CONTEXT_SIZE = 5
+DEFAULT_CONTEXT_SIZE = 15
 CONTEXT_CHAR_LIMIT = 80_000
 SUMMARY_CONTEXT_CHAR_LIMIT = 120_000
 DICE_ANIMATION_DELAY_SECONDS = 4

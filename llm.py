@@ -7,17 +7,13 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, BinaryIO
 
-from google import genai
-from google.genai import types
 from openai import AsyncOpenAI
 
 from config import (
-    GEMINI_API_KEY,
     GROQ_API_KEY,
     MODEL_NAME,
     CONTEXT_CHAR_LIMIT,
     MOSCOW_TIMEZONE,
-    SUMMARY_GEMINI_MODELS,
     SUMMARY_GROQ_MODELS,
     SUMMARY_CONTEXT_CHAR_LIMIT,
     SUMMARY_TRIGGERS,
@@ -76,9 +72,6 @@ _client = AsyncOpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
 )
-_gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
-
 def current_datetime_moscow() -> str:
     return datetime.now(MOSCOW_TIMEZONE).strftime("%d.%m.%Y %H:%M:%S %Z (UTC%z)")
 
@@ -258,9 +251,11 @@ def build_prompt(
         )
     else:
         prompt += (
-            f"\n\nОтветь собеседнику ({display_name}) в своём стиле и с учётом истории. "
-            "Если вопрос о мнении по ситуации, сначала используй относящиеся к ней последние сообщения "
-            "из истории, затем выскажи конкретное мнение."
+            f"\n\nОтветь собеседнику ({display_name}) в своём стиле. Учитывай историю "
+            "последних сообщений, если она нужна для понимания вопроса или ответа; "
+            "не притягивай не относящиеся к вопросу детали. Если вопрос о мнении по "
+            "ситуации, сначала используй относящиеся к ней сообщения из истории, "
+            "затем выскажи конкретное мнение."
             "Для простого сообщения дай одну короткую фразу; не добавляй пояснения, "
             "вступление, вывод или повтор вопроса. Расширь ответ только если пользователь "
             "просит подробностей либо без них нельзя правильно ответить. Это ориентир, "
@@ -378,33 +373,6 @@ async def generate_summary(
         f"<история>\n{transcript}\n</история>"
     )
     failures: list[str] = []
-
-    if _gemini_client is not None:
-        for model in SUMMARY_GEMINI_MODELS:
-            try:
-                response = await _gemini_client.aio.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        max_output_tokens=4096,
-                    ),
-                )
-                answer = (response.text or "").strip()
-                if not answer:
-                    raise RuntimeError("модель вернула пустой ответ")
-                logging.info("Саммари успешно создано через Gemini (%s).", model)
-                return answer
-            except Exception as exc:
-                logging.warning(
-                    "Не удалось создать саммари через Gemini (%s): %s",
-                    model,
-                    exc,
-                    exc_info=True,
-                )
-                failures.append(f"Gemini {model} ({type(exc).__name__})")
-    else:
-        logging.info("GEMINI_API_KEY не задан; для саммари будут проверены модели Groq.")
 
     for model in SUMMARY_GROQ_MODELS:
         try:

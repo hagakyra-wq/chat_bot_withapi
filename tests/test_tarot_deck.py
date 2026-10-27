@@ -14,6 +14,11 @@ class TarotDeckTests(unittest.TestCase):
             ["Прошлое", "Настоящее", "Возможное направление"],
         )
         self.assertTrue(all(type(card["reversed"]) is bool for card in spread))
+        self.assertTrue(all(card["image_file"].endswith(".jpg") for card in spread))
+
+    def test_deck_has_a_matching_image_for_every_card(self):
+        spread = draw_spread()
+        self.assertEqual(len({card["image_file"] for card in spread}), 3)
 
 
 if __name__ == "__main__":

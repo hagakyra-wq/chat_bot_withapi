@@ -21,6 +21,7 @@ _PERIOD_LABELS = {
     "d": ("ДЕНЬ", "за день"),
     "w": ("НЕДЕЛЯ", "за неделю"),
     "m": ("МЕСЯЦ", "за месяц"),
+    "a": ("ВСЁ ВРЕМЯ", "за всё время"),
 }
 _CROWN_COLORS = (
     (255, 199, 53),
@@ -38,7 +39,7 @@ _FALLBACK_COLORS = (
     (88, 170, 126),
     (212, 164, 82),
 )
-_PERIOD_CALLBACK_RE = re.compile(r"^gstats:([ac]):(-?\d+):([dwm])$")
+_PERIOD_CALLBACK_RE = re.compile(r"^gstats:([ac]):(-?\d+):([dwma])$")
 _MODE_CALLBACK_RE = re.compile(r"^gstats:([ac]):(-?\d+)$")
 
 
@@ -54,7 +55,12 @@ def leaderboard_keyboard(
                 f"{'● ' if key == period else ''}{label}",
                 callback_data=f"gstats:a:{chat_id}:{key}",
             )
-            for key, label in (("d", "День"), ("w", "Неделя"), ("m", "Месяц"))
+            for key, label in (
+                ("d", "День"),
+                ("w", "Неделя"),
+                ("m", "Месяц"),
+                ("a", "Всё время"),
+            )
         ]
         return InlineKeyboardMarkup(
             [

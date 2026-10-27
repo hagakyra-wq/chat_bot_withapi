@@ -48,7 +48,7 @@ _AUTORESPONDER_DEFAULT_PRIVATE_TEXT = (
 )
 _TELEGRAM_SESSION_BACKUPS_KEY = "telegram_session_backups"
 _history_cipher = Fernet(HISTORY_ENCRYPTION_KEY.encode("ascii"))
-_MESSAGE_ACTIVITY_BACKFILL_KEY = "message_activity_backfill_v2"
+_MESSAGE_ACTIVITY_BACKFILL_KEY = "message_activity_backfill_v3"
 _MOSCOW_TIMESTAMP_MIGRATION_KEY = "moscow_timestamp_migration_v1"
 _OWNER_BANNER_USER_ID_META_KEY = "temporary_owner_banner_user_id"
 _MOSCOW_TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -1271,10 +1271,16 @@ async def _encrypt_legacy_messages(db: aiosqlite.Connection) -> int:
     )
     rows = await cursor.fetchall()
     for row in rows:
-        encrypted_text = _encrypt_message_payload(
-            str(row["sender_name"]),
-            str(row["text"]),
-        )
+        text = str(row["text"])
+        try:
+            _decrypt_message_payload(text)
+        except HistoryDecryptionError:
+            encrypted_text = _encrypt_message_payload(
+                str(row["sender_name"]),
+                text,
+            )
+        else:
+            encrypted_text = text
         await db.execute(
             """
             UPDATE messages
@@ -2134,7 +2140,8 @@ async def get_user_message_activity(user_id: int) -> dict[str, int]:
                 COALESCE(SUM(CASE
                     WHEN activity_date BETWEEN ? AND ? THEN message_count
                     ELSE 0
-                END), 0) AS month_count
+                END), 0) AS month_count,
+                COALESCE(SUM(message_count), 0) AS all_count
             FROM message_activity
             WHERE user_id = ?
             """,
@@ -2153,6 +2160,7 @@ async def get_user_message_activity(user_id: int) -> dict[str, int]:
         "d": int(row["day_count"]),
         "w": int(row["week_count"]),
         "m": int(row["month_count"]),
+        "a": int(row["all_count"]),
     }
 
 
@@ -2176,9 +2184,10 @@ async def get_group_message_activity(
                 END), 0) AS week_count,
                 COALESCE(SUM(CASE
                     WHEN activity_date BETWEEN ? AND ? THEN message_count ELSE 0
-                END), 0) AS month_count
+                END), 0) AS month_count,
+                COALESCE(SUM(message_count), 0) AS all_count
             FROM message_activity
-            WHERE chat_id = ? AND activity_date BETWEEN ? AND ?
+            WHERE chat_id = ?
             GROUP BY user_id
             """,
             (
@@ -2189,8 +2198,6 @@ async def get_group_message_activity(
                 month_start,
                 today,
                 group_id,
-                month_start,
-                today,
             ),
         )
         rows = await cursor.fetchall()
@@ -2199,6 +2206,7 @@ async def get_group_message_activity(
             "d": int(row["day_count"]),
             "w": int(row["week_count"]),
             "m": int(row["month_count"]),
+            "a": int(row["all_count"]),
         }
         for row in rows
     }
@@ -2210,15 +2218,22 @@ async def get_group_message_leaderboard(
     *,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    start_date, end_date = _message_activity_period_dates(period)
+    if period not in ("d", "w", "m", "a"):
+        raise ValueError(f"Неизвестный период статистики сообщений: {period!r}.")
+    activity_filter = ""
+    parameters: list[object] = [chat_id]
+    if period != "a":
+        start_date, end_date = _message_activity_period_dates(period)
+        activity_filter = " AND activity_date BETWEEN ? AND ?"
+        parameters.extend((start_date, end_date))
     safe_limit = min(max(1, limit), 50)
     async with _connect() as db:
         cursor = await db.execute(
-            """
+            f"""
             WITH counts AS (
                 SELECT user_id, SUM(message_count) AS message_count
                 FROM message_activity
-                WHERE chat_id = ? AND activity_date BETWEEN ? AND ?
+                WHERE chat_id = ?{activity_filter}
                 GROUP BY user_id
             )
             SELECT
@@ -2239,7 +2254,7 @@ async def get_group_message_leaderboard(
             ORDER BY counts.message_count DESC, display_name COLLATE NOCASE
             LIMIT ?
             """,
-            (chat_id, start_date, end_date, chat_id, safe_limit),
+            (*parameters, chat_id, safe_limit),
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -2564,6 +2579,7 @@ async def _get_message_rows(
                 await archive.close()
         except (OSError, sqlite3.Error):
             logging.exception("Не удалось прочитать архив сообщений %s.", archive_path)
+            raise
     for row in rows:
         if int(row.get("payload_version") or 0) == 1:
             payload = _decrypt_message_payload(str(row["text"]))
@@ -3000,7 +3016,6 @@ async def _backfill_message_activity() -> None:
                         COUNT(*) AS message_count
                     FROM messages
                     WHERE chat_id < 0
-                      AND created_at >= datetime('now', '+3 hours', '-32 days')
                       AND date(created_at) IS NOT NULL
                     GROUP BY chat_id, user_id, activity_date
                     """
@@ -3025,10 +3040,15 @@ async def _backfill_message_activity() -> None:
                 return
             await db.executemany(
                 """
-                INSERT OR IGNORE INTO message_activity(
+                INSERT INTO message_activity(
                     chat_id, user_id, activity_date, message_count
                 )
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, user_id, activity_date)
+                DO UPDATE SET message_count = MAX(
+                    message_activity.message_count,
+                    excluded.message_count
+                )
                 """,
                 (
                     (chat_id, user_id, activity_date, count)
@@ -3083,7 +3103,8 @@ async def _archive_messages_if_needed() -> bool:
                     message_id INTEGER NOT NULL,
                     sender_name TEXT NOT NULL,
                     text TEXT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+                    created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                    payload_version INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -3094,8 +3115,9 @@ async def _archive_messages_if_needed() -> bool:
             await db.execute(
                 """
                 INSERT INTO message_archive.messages
-                    (id, chat_id, user_id, message_id, sender_name, text, created_at)
-                SELECT id, chat_id, user_id, message_id, sender_name, text, created_at
+                    (id, chat_id, user_id, message_id, sender_name, text, created_at, payload_version)
+                SELECT id, chat_id, user_id, message_id, sender_name, text, created_at,
+                       payload_version
                 FROM main.messages
                 """
             )
