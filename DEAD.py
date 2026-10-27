@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import io
 import logging
 import re
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
-
 from typing import Final
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+import edge_tts
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 import database
+import llm
 from config import MOSCOW_TIMEZONE
 
 _MIN_DEAD_SECONDS = 2 * 24 * 60 * 60
@@ -98,7 +100,11 @@ def dead_confirmation_keyboard(user_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "Живой!",
                     callback_data=f"dead:fulfilled:{user_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    "Придумать историю",
+                    callback_data=f"dead:story:{user_id}",
+                ),
             ]
         ]
     )
@@ -162,6 +168,106 @@ def _new_deadline() -> datetime:
     return now + timedelta(seconds=seconds)
 
 
+async def _generate_dead_story_text(user_id: int, cause: str) -> str:
+    prompt = (
+        "Сочини короткую комичную историю на русском в духе абсурдного черного юмора. "
+        "Начинается ровно со слов: 'Дело было так:'. "
+        "История должна быть смешной, но не совсем абсурдной; пусть в ней будут хаос, "
+        "неудачные решения и серьёзные лица, которые всё усложняют. "
+        f"Обязательно вставь эту деталь: причина смерти героя — {cause}. "
+        f"Пользовательский ID для контекста: {user_id}. "
+        "История должна звучать живо, эмоционально и занимательно, не длиннее 180 слов."
+    )
+    response = await llm._client.chat.completions.create(
+        model=llm.MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Ты — талантливый автор комичных историй. Пиши на русском. "
+                    "Начинай точно со слов 'Дело было так:' и не добавляй лишних вводных фраз. "
+                    "Держи темп живым, понятным и слегка дурным, но без жестокости."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.9,
+        max_tokens=220,
+    )
+    text = (response.choices[0].message.content or "").strip()
+    if not text:
+        raise ValueError("ИИ не вернул текст истории.")
+    if not text.lower().startswith("дело было так"):
+        text = f"Дело было так: {text}"
+    return text
+
+
+async def _generate_dead_story_audio(story_text: str) -> bytes | None:
+    try:
+        speech = edge_tts.Communicate(
+            story_text,
+            voice="ru-RU-SvetlanaNeural",
+        )
+        audio = bytearray()
+        async for chunk in speech.stream():
+            if chunk["type"] == "audio":
+                audio.extend(chunk["data"])
+        if not audio:
+            raise ValueError("Edge TTS вернул пустой аудиофайл.")
+        return bytes(audio)
+    except Exception:
+        logging.exception("Не удалось синтезировать историю через бесплатный Edge TTS.")
+        return None
+
+
+async def handle_dead_story_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+    if query.data != f"dead:story:{user.id}":
+        await query.answer("Эта кнопка предназначена другому участнику.", show_alert=True)
+        return
+
+    try:
+        await query.answer("Придумываю историю...", show_alert=False)
+        if query.message is not None:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="🕵️ Жду экспертизы от дэтэктива...",
+                reply_to_message_id=query.message.message_id,
+            )
+        cause, _last_words = get_daily_dead_prediction(user.id, datetime.now(MOSCOW_TIMEZONE))
+        story_text = await _generate_dead_story_text(user.id, cause)
+        audio_bytes = await _generate_dead_story_audio(story_text)
+        if query.message is not None:
+            if audio_bytes is not None:
+                voice_file = InputFile(
+                    io.BytesIO(audio_bytes),
+                    filename="dead_story.mp3",
+                )
+                await context.bot.send_audio(
+                    chat_id=query.message.chat_id,
+                    audio=voice_file,
+                    caption=story_text,
+                    reply_to_message_id=query.message.message_id,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=story_text,
+                    reply_to_message_id=query.message.message_id,
+                )
+        if query.message is not None:
+            await query.edit_message_text("История готова.")
+    except Exception:
+        logging.exception("Не удалось придумать историю для user_id=%s.", user.id)
+        await query.answer("Не удалось придумать историю. Попробуй ещё раз.", show_alert=True)
+
+
 async def dead_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -190,28 +296,43 @@ async def dead_command(
         deadline = datetime.fromtimestamp(float(timer["deadline"]), MOSCOW_TIMEZONE)
         if deadline <= now:
             await message.reply_text(
-                "Срок настал — скоро отправлю кнопку для подтверждения.\n"
-                f"Причина смерти: {cause}.\n"
-                f"Последние слова: «{last_words}»"
+                "🕯️ Время пришло\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"Причина смерти: {cause}\n\n"
+                f"Последние слова: «{last_words}»\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Скоро отправлю кнопку для подтверждения."
             )
             return
         await message.reply_text(
-            "До конца жизни осталось:\n"
+            "🕰️ До конца жизни осталось\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
             f"{format_dead_countdown(now, deadline)}\n"
-            f"Причина смерти: {cause}.\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Причина смерти: {cause}\n\n"
             f"Последние слова: «{last_words}»"
         )
     elif status == "awaiting_confirmation":
         await message.reply_text(
-            f"Срок настал. Причина смерти: {cause}.\n"
-            f"Последние слова: «{last_words}»\nЖивой?",
+            "⚰️ Срок настал\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Причина смерти: {cause}\n\n"
+            f"Последние слова: «{last_words}»\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Живой?",
             reply_markup=dead_confirmation_keyboard(user.id),
         )
     elif status == "fulfilled":
-        await message.reply_text("Живой! Сегодня тебе повезло — без приза, но с хорошим финалом.")
+        await message.reply_text(
+            "✅ Живой!\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Сегодня тебе повезло — без приза, но с хорошим финалом."
+        )
     else:
         await message.reply_text(
-            f"Срок истёк. Причина смерти: {cause}.\n"
+            "🕯️ Срок истёк\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Причина смерти: {cause}\n\n"
             f"Последние слова: «{last_words}»"
         )
 
@@ -264,9 +385,12 @@ async def process_dead_timers(context: ContextTypes.DEFAULT_TYPE) -> None:
             sent_message = await context.bot.send_message(
                 chat_id=int(timer["chat_id"]),
                 text=(
-                    "Срок настал.\n"
-                    f"Причина смерти: {cause}.\n"
-                    f"Последние слова: «{last_words}»\nЖивой?"
+                    "⚰️ Срок настал\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Причина смерти: {cause}\n\n"
+                    f"Последние слова: «{last_words}»\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "Живой?"
                 ),
                 reply_markup=dead_confirmation_keyboard(user_id),
             )
@@ -296,8 +420,9 @@ async def process_dead_timers(context: ContextTypes.DEFAULT_TYPE) -> None:
                 chat_id=int(timer["chat_id"]),
                 message_id=int(message_id),
                 text=(
-                    "Срок подтверждения прошёл — возможно, его больше нет с нами.\n"
-                    f"Причина смерти: {cause}.\n"
+                    "🕯️ Срок подтверждения прошёл\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Причина смерти: {cause}\n\n"
                     f"Последние слова: «{last_words}»"
                 ),
             )

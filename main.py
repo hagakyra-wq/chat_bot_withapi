@@ -60,7 +60,12 @@ from config import (
     TELEGRAM_TOKEN,
 )
 from duel import handle_player_duel_callback
-from DEAD import dead_command, handle_dead_callback, process_dead_timers
+from DEAD import (
+    dead_command,
+    handle_dead_callback,
+    handle_dead_story_callback,
+    process_dead_timers,
+)
 from casino import (
     audit_subscription_bonuses,
     on_chat_member_update,
@@ -736,6 +741,9 @@ def build_application() -> Application:
         group=-1,
     )
     application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
+    application.add_handler(
+        CallbackQueryHandler(handle_dead_story_callback, pattern=r"^dead:story:")
+    )
     application.add_handler(
         CallbackQueryHandler(handle_dead_callback, pattern=r"^dead:")
     )
