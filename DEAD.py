@@ -174,38 +174,62 @@ def _new_deadline() -> datetime:
     return now + timedelta(seconds=seconds)
 
 
-async def _generate_dead_story_text(user_id: int, cause: str) -> str:
+async def _generate_dead_story_text(cause: str) -> str:
     prompt = (
         "Сочини короткую комичную историю на русском в духе абсурдного черного юмора. "
         "Начинается ровно со слов: 'Дело было так:'. "
         "История должна быть смешной, но не совсем абсурдной; пусть в ней будут хаос, "
         "неудачные решения и серьёзные лица, которые всё усложняют. "
         f"Обязательно вставь эту деталь: причина смерти героя — {cause}. "
-        f"Пользовательский ID для контекста: {user_id}. "
         "История должна звучать живо, эмоционально и занимательно, не длиннее 180 слов."
     )
-    response = await llm._client.chat.completions.create(
-        model=llm.MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты — талантливый автор комичных историй. Пиши на русском. "
-                    "Начинай точно со слов 'Дело было так:' и не добавляй лишних вводных фраз. "
-                    "Держи темп живым, понятным и слегка дурным, но без жестокости."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.9,
-        max_tokens=220,
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Ты — талантливый автор комичных историй. Пиши на русском. "
+                "Начинай точно со слов 'Дело было так:' и не добавляй лишних вводных фраз. "
+                "Держи темп живым, понятным и слегка дурным, но без жестокости."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+    failures: list[str] = []
+
+    for model in dict.fromkeys((llm.MODEL_NAME, *llm.SUMMARY_GROQ_MODELS)):
+        try:
+            response = await llm._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.9,
+            )
+            if not response.choices:
+                raise ValueError("модель вернула пустой список вариантов")
+            choice = response.choices[0]
+            text = (choice.message.content or "").strip()
+            if not text:
+                raise ValueError(
+                    "модель вернула пустой текст "
+                    f"(finish_reason={choice.finish_reason!r}, "
+                    f"refusal={choice.message.refusal!r})"
+                )
+            if not text.lower().startswith("дело было так"):
+                text = f"Дело было так: {text}"
+            if model != llm.MODEL_NAME:
+                logging.info("История создана запасной моделью Groq (%s).", model)
+            return text
+        except Exception as exc:
+            logging.warning(
+                "Не удалось создать историю через Groq (%s): %s",
+                model,
+                exc,
+                exc_info=True,
+            )
+            failures.append(f"{model} ({type(exc).__name__})")
+
+    raise RuntimeError(
+        "Не удалось создать историю ни одной моделью Groq: " + "; ".join(failures)
     )
-    text = (response.choices[0].message.content or "").strip()
-    if not text:
-        raise ValueError("ИИ не вернул текст истории.")
-    if not text.lower().startswith("дело было так"):
-        text = f"Дело было так: {text}"
-    return text
 
 
 async def _generate_dead_story_audio(story_text: str) -> bytes | None:
@@ -247,7 +271,7 @@ async def handle_dead_story_callback(
                 reply_to_message_id=query.message.message_id,
             )
         cause, _last_words = get_daily_dead_prediction(user.id, datetime.now(MOSCOW_TIMEZONE))
-        story_text = await _generate_dead_story_text(user.id, cause)
+        story_text = await _generate_dead_story_text(cause)
         audio_bytes = await _generate_dead_story_audio(story_text)
         if query.message is not None:
             if audio_bytes is not None:
