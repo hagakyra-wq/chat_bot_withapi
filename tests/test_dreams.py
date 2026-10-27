@@ -87,7 +87,7 @@ class DeadTimerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["deadline"], repeated["deadline"])
         self.assertEqual(first["chat_id"], repeated["chat_id"])
         self.assertEqual(result, "fulfilled")
-        self.assertEqual(balance, 10_500)
+        self.assertIsNone(balance)
         self.assertEqual(repeated_result, "fulfilled")
         self.assertIsNone(repeated_balance)
 

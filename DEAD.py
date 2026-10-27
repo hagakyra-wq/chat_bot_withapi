@@ -10,6 +10,8 @@ import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from typing import Final
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -24,6 +26,32 @@ _DEAD_TRIGGER_RE = re.compile(
     r"^\s*(?:сколько мне осталось|сколько до конца моих дней)\s*[?!.]*\s*$",
     re.IGNORECASE,
 )
+_REPLIC_PATH = Path(__file__).with_name("replic.txt")
+_DEFAULT_LAST_WORDS: Final[tuple[str, ...]] = (
+    "Сейчас я бы очень хотел, чтобы кто-нибудь забыл про меня и пошёл пить чай.",
+    "Если это всё, то пусть хотя бы будет весело.",
+    "Надеюсь, это был не самый скучный финал.",
+    "Я уходил спокойно — просто кто-то слишком быстро нажал на паузу.",
+    "Да, я знаю, это странный момент для шутки, но я и не обещал быть серьёзным.",
+    "Пожалуйста, не говорите, что я ничего не успел — я успел опоздать.",
+    "Давайте считать это эффектной финальной репликой.",
+    "Не волнуйтесь, я ушёл красиво, будто это было частью программы.",
+)
+
+
+def _load_last_words() -> tuple[str, ...]:
+    if not _REPLIC_PATH.exists():
+        return _DEFAULT_LAST_WORDS
+    lines: list[str] = []
+    for line in _REPLIC_PATH.read_text("utf-8").splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        cleaned = re.sub(r"^\d+\.\s*", "", cleaned)
+        cleaned = cleaned.strip('"\'')
+        if cleaned:
+            lines.append(cleaned)
+    return tuple(lines) if lines else _DEFAULT_LAST_WORDS
 
 
 def _load_dead_causes() -> list[str]:
@@ -40,11 +68,23 @@ def _load_dead_causes() -> list[str]:
     return causes or ["неизвестная причина смерти"]
 
 
-def get_dead_cause(user_id: int) -> str:
+def get_daily_dead_prediction(user_id: int, when: datetime | None = None) -> tuple[str, str]:
+    now = when or datetime.now(MOSCOW_TIMEZONE)
     causes = _load_dead_causes()
-    digest = hashlib.sha256(str(user_id).encode("utf-8")).digest()
-    index = int.from_bytes(digest[:4], "big") % len(causes)
-    return causes[index]
+    last_words = _load_last_words()
+    day_key = now.date().isoformat()
+    digest = hashlib.sha256(f"{user_id}:{day_key}".encode("utf-8")).digest()
+    cause_index = int.from_bytes(digest[:4], "big") % len(causes)
+    words_index = int.from_bytes(digest[4:8], "big") % len(last_words)
+    return causes[cause_index], last_words[words_index]
+
+
+def get_dead_cause(user_id: int, when: datetime | None = None) -> str:
+    return get_daily_dead_prediction(user_id, when)[0]
+
+
+def get_last_words(user_id: int, when: datetime | None = None) -> str:
+    return get_daily_dead_prediction(user_id, when)[1]
 
 
 def is_dead_trigger(text: str) -> bool:
@@ -143,30 +183,37 @@ async def dead_command(
         await message.reply_text("Не удалось загрузить таймер конца жизни. Попробуй позже.")
         return
 
+    now = datetime.now(MOSCOW_TIMEZONE)
+    cause, last_words = get_daily_dead_prediction(user.id, now)
     status = timer["status"]
     if status == "counting":
-        now = datetime.now(MOSCOW_TIMEZONE)
         deadline = datetime.fromtimestamp(float(timer["deadline"]), MOSCOW_TIMEZONE)
         if deadline <= now:
             await message.reply_text(
                 "Срок настал — скоро отправлю кнопку для подтверждения.\n"
-                f"Причина смерти: {get_dead_cause(user.id)}."
+                f"Причина смерти: {cause}.\n"
+                f"Последние слова: «{last_words}»"
             )
             return
         await message.reply_text(
             "До конца жизни осталось:\n"
             f"{format_dead_countdown(now, deadline)}\n"
-            f"Причина смерти: {get_dead_cause(user.id)}."
+            f"Причина смерти: {cause}.\n"
+            f"Последние слова: «{last_words}»"
         )
     elif status == "awaiting_confirmation":
         await message.reply_text(
-            f"Срок настал. Причина смерти: {get_dead_cause(user.id)}.\nЖивой?",
+            f"Срок настал. Причина смерти: {cause}.\n"
+            f"Последние слова: «{last_words}»\nЖивой?",
             reply_markup=dead_confirmation_keyboard(user.id),
         )
     elif status == "fulfilled":
-        await message.reply_text("Живой! — награда 100 монет уже получена.")
+        await message.reply_text("Живой! Сегодня тебе повезло — без приза, но с хорошим финалом.")
     else:
-        await message.reply_text("Срок истёк, возможно его больше нет с нами.")
+        await message.reply_text(
+            f"Срок истёк. Причина смерти: {cause}.\n"
+            f"Последние слова: «{last_words}»"
+        )
 
 
 async def handle_dead_callback(
@@ -182,7 +229,7 @@ async def handle_dead_callback(
         return
 
     try:
-        status, balance = await database.fulfill_dead_timer(
+        status, _unused_balance = await database.fulfill_dead_timer(
             user.id,
             user.username,
             datetime.now(MOSCOW_TIMEZONE).timestamp(),
@@ -196,10 +243,9 @@ async def handle_dead_callback(
         return
 
     if status == "fulfilled":
-        await query.answer("Поздравляю! Начислено 100 монет.")
+        await query.answer("Живой — и это уже победа.")
         await query.edit_message_text(
-            "Ты смог победить судьбу! Тебе начислено 100 монет. "
-            f"Баланс: {int(balance or 0) / 100:.2f} монет."
+            "Ты смог победить судьбу. Ни награды, ни приза — просто ещё один день живой."
         )
     elif status == "not_fulfilled":
         await query.answer("Время для подтверждения закончилось.", show_alert=True)
@@ -213,10 +259,15 @@ async def process_dead_timers(context: ContextTypes.DEFAULT_TYPE) -> None:
     due_timers = await database.get_due_dead_timers(now)
     for timer in due_timers:
         user_id = int(timer["user_id"])
+        cause, last_words = get_daily_dead_prediction(user_id, datetime.now(MOSCOW_TIMEZONE))
         try:
             sent_message = await context.bot.send_message(
                 chat_id=int(timer["chat_id"]),
-                text=f"Срок настал. Причина смерти: {get_dead_cause(user_id)}.\nЖивой?",
+                text=(
+                    "Срок настал.\n"
+                    f"Причина смерти: {cause}.\n"
+                    f"Последние слова: «{last_words}»\nЖивой?"
+                ),
                 reply_markup=dead_confirmation_keyboard(user_id),
             )
         except TelegramError:
@@ -234,6 +285,7 @@ async def process_dead_timers(context: ContextTypes.DEFAULT_TYPE) -> None:
     expired_prompts = await database.get_expired_dead_prompts(now)
     for timer in expired_prompts:
         user_id = int(timer["user_id"])
+        cause, last_words = get_daily_dead_prediction(user_id, datetime.now(MOSCOW_TIMEZONE))
         if not await database.mark_dead_not_fulfilled(user_id, now):
             continue
         message_id = timer["prompt_message_id"]
@@ -245,7 +297,8 @@ async def process_dead_timers(context: ContextTypes.DEFAULT_TYPE) -> None:
                 message_id=int(message_id),
                 text=(
                     "Срок подтверждения прошёл — возможно, его больше нет с нами.\n"
-                    f"Причина смерти: {get_dead_cause(user_id)}."
+                    f"Причина смерти: {cause}.\n"
+                    f"Последние слова: «{last_words}»"
                 ),
             )
         except TelegramError:

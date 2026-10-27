@@ -2936,8 +2936,7 @@ async def fulfill_dead_timer(
     user_id: int,
     username: str | None,
     now: float,
-) -> tuple[str, int | None]:
-    today_text = _moscow_date().isoformat()
+) -> tuple[str, None]:
     async with _write_lock:
         async with _connect() as db:
             cursor = await db.execute(
@@ -2963,41 +2962,14 @@ async def fulfill_dead_timer(
 
             await db.execute(
                 """
-                INSERT OR IGNORE INTO duel_players(
-                    user_id, username, balance_cents, last_mined_on, is_bot
-                )
-                VALUES (?, ?, 500, ?, 0)
-                """,
-                (user_id, username, today_text),
-            )
-            await db.execute(
-                """
-                UPDATE duel_players
-                SET balance_cents = balance_cents + 10000,
-                    username = COALESCE(?, username)
-                WHERE user_id = ?
-                """,
-                (username, user_id),
-            )
-            await db.execute(
-                """
                 UPDATE dead_timers SET status = 'fulfilled'
                 WHERE user_id = ? AND status = 'awaiting_confirmation'
                 """,
                 (user_id,),
             )
-            cursor = await db.execute(
-                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
-                (user_id,),
-            )
-            balance_row = await cursor.fetchone()
-            if balance_row is None:
-                raise sqlite3.DatabaseError(
-                    f"Не удалось выдать награду за подтверждение жизни user_id={user_id}."
-                )
             await db.commit()
         _record_write()
-    return "fulfilled", int(balance_row["balance_cents"])
+    return "fulfilled", None
 
 
 class InsufficientDuelBalanceError(ValueError):
