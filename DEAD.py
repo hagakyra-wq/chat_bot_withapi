@@ -110,6 +110,12 @@ def dead_confirmation_keyboard(user_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def dead_story_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Придумать историю", callback_data=f"dead:story:{user_id}")]]
+    )
+
+
 def _add_months(value: datetime, months: int) -> datetime:
     month_index = value.year * 12 + value.month - 1 + months
     year, month = divmod(month_index, 12)
@@ -301,7 +307,8 @@ async def dead_command(
                 f"Причина смерти: {cause}\n\n"
                 f"Последние слова: «{last_words}»\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "Скоро отправлю кнопку для подтверждения."
+                "Скоро отправлю кнопку для подтверждения.",
+                reply_markup=dead_story_keyboard(user.id),
             )
             return
         await message.reply_text(
@@ -310,7 +317,8 @@ async def dead_command(
             f"{format_dead_countdown(now, deadline)}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"Причина смерти: {cause}\n\n"
-            f"Последние слова: «{last_words}»"
+            f"Последние слова: «{last_words}»",
+            reply_markup=dead_story_keyboard(user.id),
         )
     elif status == "awaiting_confirmation":
         await message.reply_text(
