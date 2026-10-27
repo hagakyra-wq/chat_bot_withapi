@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import calendar
 import hashlib
 import io
@@ -12,7 +13,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-import edge_tts
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -174,14 +174,33 @@ def _new_deadline() -> datetime:
     return now + timedelta(seconds=seconds)
 
 
-async def _generate_dead_story_text(cause: str) -> str:
+def _readable_story_name(username: str | None) -> str:
+    if username is None:
+        return "наша жертва"
+    name = username.strip().removeprefix("@")
+    if re.fullmatch(r"[A-Za-zА-Яа-яЁё]{2,32}", name):
+        return name
+    return "наша жертва"
+
+
+async def _generate_dead_story_text(
+    cause: str,
+    last_words: str,
+    username: str | None,
+) -> str:
+    subject = _readable_story_name(username)
     prompt = (
-        "Сочини короткую комичную историю на русском в духе абсурдного черного юмора. "
-        "Начинается ровно со слов: 'Дело было так:'. "
-        "История должна быть смешной, но не совсем абсурдной; пусть в ней будут хаос, "
-        "неудачные решения и серьёзные лица, которые всё усложняют. "
-        f"Обязательно вставь эту деталь: причина смерти героя — {cause}. "
-        "История должна звучать живо, эмоционально и занимательно, не длиннее 180 слов."
+        "Напиши на русском комичную историю примерно на 60–100 слов, как короткий "
+        "анекдот с понятной последовательностью событий: нелепая цель героя, несколько "
+        "смешных осложнений и комичная развязка. Тон — абсурдный, живой и слегка "
+        "черноюморной, но без жестоких подробностей.\n"
+        "История обязательно должна начинаться ровно со слов «Дело было так:».\n"
+        f"Главный герой — {subject}. Если это имя звучит неестественно в предложении, "
+        "назови героя «наша жертва».\n"
+        f"Вплети в развязку причину смерти: {cause}.\n"
+        "Последние слова героя должны естественно совпасть с этой репликой: "
+        f"«{last_words}».\n"
+        "Не добавляй объяснений до или после истории."
     )
     messages = [
         {
@@ -234,19 +253,57 @@ async def _generate_dead_story_text(cause: str) -> str:
 
 async def _generate_dead_story_audio(story_text: str) -> bytes | None:
     try:
-        speech = edge_tts.Communicate(
+        speech = await asyncio.create_subprocess_exec(
+            "espeak-ng",
+            "-v",
+            "ru+f3",
+            "-s",
+            "155",
+            "--stdout",
             story_text,
-            voice="ru-RU-SvetlanaNeural",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        audio = bytearray()
-        async for chunk in speech.stream():
-            if chunk["type"] == "audio":
-                audio.extend(chunk["data"])
-        if not audio:
-            raise ValueError("Edge TTS вернул пустой аудиофайл.")
-        return bytes(audio)
-    except Exception:
-        logging.exception("Не удалось синтезировать историю через бесплатный Edge TTS.")
+        wav_data, speech_error = await speech.communicate()
+        if speech.returncode != 0:
+            raise RuntimeError(
+                f"espeak-ng завершился с кодом {speech.returncode}: "
+                f"{speech_error.decode('utf-8', errors='replace').strip()}"
+            )
+        if not wav_data:
+            raise RuntimeError("espeak-ng не вернул аудиоданные.")
+
+        encoder = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "4",
+            "-f",
+            "mp3",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        mp3_data, encoder_error = await encoder.communicate(wav_data)
+        if encoder.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg завершился с кодом {encoder.returncode}: "
+                f"{encoder_error.decode('utf-8', errors='replace').strip()}"
+            )
+        if not mp3_data:
+            raise RuntimeError("ffmpeg не вернул MP3-данные.")
+        return mp3_data
+    except (OSError, RuntimeError):
+        logging.exception(
+            "Не удалось озвучить историю локальными espeak-ng/ffmpeg."
+        )
         return None
 
 
@@ -270,8 +327,15 @@ async def handle_dead_story_callback(
                 text="🕵️ Жду экспертизы от дэтэктива...",
                 reply_to_message_id=query.message.message_id,
             )
-        cause, _last_words = get_daily_dead_prediction(user.id, datetime.now(MOSCOW_TIMEZONE))
-        story_text = await _generate_dead_story_text(cause)
+        cause, last_words = get_daily_dead_prediction(
+            user.id,
+            datetime.now(MOSCOW_TIMEZONE),
+        )
+        story_text = await _generate_dead_story_text(
+            cause,
+            last_words,
+            user.username,
+        )
         audio_bytes = await _generate_dead_story_audio(story_text)
         if query.message is not None:
             if audio_bytes is not None:
