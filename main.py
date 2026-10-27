@@ -60,6 +60,7 @@ from config import (
     TELEGRAM_TOKEN,
 )
 from duel import handle_player_duel_callback
+from DEAD import dead_command, handle_dead_callback, process_dead_timers
 from casino import (
     audit_subscription_bonuses,
     on_chat_member_update,
@@ -369,6 +370,12 @@ async def _post_init(application: Application) -> None:
         interval=CASINO_BONUS_AUDIT_INTERVAL_SECONDS,
         first=CASINO_BONUS_AUDIT_INTERVAL_SECONDS,
         name="subscription-bonus-audit",
+    )
+    application.job_queue.run_repeating(
+        process_dead_timers,
+        interval=60,
+        first=1,
+        name="dead-timer-check",
     )
     await autoresponder.initialize(application)
     await send_channel_event(
@@ -730,6 +737,9 @@ def build_application() -> Application:
     )
     application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
     application.add_handler(
+        CallbackQueryHandler(handle_dead_callback, pattern=r"^dead:")
+    )
+    application.add_handler(
         CallbackQueryHandler(
             on_game_callback,
             pattern=r"^(?:casino:|inv:|menu:|mkt:|bonus:)",
@@ -782,6 +792,7 @@ def build_application() -> Application:
         CommandHandler("start", on_private_message, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(CommandHandler("tarot", tarot_command))
+    application.add_handler(CommandHandler("dead", dead_command))
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,

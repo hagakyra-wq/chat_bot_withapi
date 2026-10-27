@@ -55,6 +55,7 @@ from duel import (
     handle_coin_leaderboard_request,
     handle_duel_challenge,
 )
+from DEAD import dead_command, is_dead_trigger
 from images import create_profile_card, extract_image_request, image_manager
 from llm import (
     build_prompt,
@@ -1390,7 +1391,9 @@ async def private_access_callback_guard(
         or query.message.chat.type != ChatType.PRIVATE
     ):
         return
-    if query.data in {"menu:activate", "menu:activation_cancel"}:
+    if query.data in {"menu:activate", "menu:activation_cancel"} or (
+        query.data or ""
+    ).startswith("dead:fulfilled:"):
         return
     if query.data in {"menu:report", "menu:report_cancel"} or (
         query.data or ""
@@ -4190,6 +4193,9 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if await handle_activation_message(update, context):
         return
     if await handle_coin_promo_message(update):
+        return
+    if is_dead_trigger(message.text):
+        await dead_command(update, context)
         return
     tarot_question = extract_tarot_trigger_question(message.text)
     if tarot_question is not None:

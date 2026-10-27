@@ -41,6 +41,7 @@ from duel import (
     handle_duel_challenge,
     is_coin_leaderboard_request,
 )
+from DEAD import dead_command, is_dead_trigger
 from group_stats import (
     leaderboard_caption,
     leaderboard_keyboard,
@@ -692,6 +693,10 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if await handle_coin_promo_message(update):
+        return
+
+    if is_dead_trigger(text):
+        await dead_command(update, context)
         return
 
     if is_top_request:

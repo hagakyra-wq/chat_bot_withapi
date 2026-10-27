@@ -243,6 +243,16 @@ async def initialize() -> None:
                     last_mined_on TEXT NOT NULL,
                     is_bot INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS dead_timers (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    chat_id INTEGER NOT NULL,
+                    deadline REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'counting'
+                        CHECK(status IN ('counting', 'awaiting_confirmation', 'fulfilled', 'not_fulfilled')),
+                    prompt_message_id INTEGER,
+                    response_deadline REAL
+                );
                 CREATE TABLE IF NOT EXISTS banner_items (
                     item_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -2819,6 +2829,175 @@ async def apply_duel_result(user_id: int, username: str | None, delta_cents: int
     if row is None:
         raise sqlite3.DatabaseError(f"Не удалось прочитать баланс user_id={user_id}.")
     return int(row["balance_cents"])
+
+
+async def create_or_get_dead_timer(
+    user_id: int,
+    username: str | None,
+    chat_id: int,
+    deadline: float,
+) -> dict[str, Any]:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO dead_timers(user_id, username, chat_id, deadline)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, username, chat_id, deadline),
+            )
+            created = cursor.rowcount == 1
+            cursor = await db.execute(
+                "SELECT * FROM dead_timers WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise sqlite3.DatabaseError(
+                    f"Не удалось сохранить таймер конца жизни user_id={user_id}."
+                )
+            await db.commit()
+        if created:
+            _record_write()
+    return dict(row)
+
+
+async def get_due_dead_timers(now: float) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, username, chat_id, deadline
+            FROM dead_timers
+            WHERE status = 'counting' AND deadline <= ?
+            ORDER BY deadline
+            """,
+            (now,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def mark_dead_prompt_sent(
+    user_id: int,
+    message_id: int,
+    response_deadline: float,
+) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE dead_timers
+                SET status = 'awaiting_confirmation',
+                    prompt_message_id = ?,
+                    response_deadline = ?
+                WHERE user_id = ? AND status = 'counting'
+                """,
+                (message_id, response_deadline, user_id),
+            )
+            await db.commit()
+        if cursor.rowcount == 1:
+            _record_write()
+            return True
+    return False
+
+
+async def get_expired_dead_prompts(now: float) -> list[dict[str, Any]]:
+    async with _connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, chat_id, prompt_message_id
+            FROM dead_timers
+            WHERE status = 'awaiting_confirmation' AND response_deadline < ?
+            ORDER BY response_deadline
+            """,
+            (now,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def mark_dead_not_fulfilled(user_id: int, now: float) -> bool:
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE dead_timers SET status = 'not_fulfilled'
+                WHERE user_id = ? AND status = 'awaiting_confirmation'
+                    AND response_deadline < ?
+                """,
+                (user_id, now),
+            )
+            await db.commit()
+        if cursor.rowcount == 1:
+            _record_write()
+            return True
+    return False
+
+
+async def fulfill_dead_timer(
+    user_id: int,
+    username: str | None,
+    now: float,
+) -> tuple[str, int | None]:
+    today_text = _moscow_date().isoformat()
+    async with _write_lock:
+        async with _connect() as db:
+            cursor = await db.execute(
+                "SELECT status, response_deadline FROM dead_timers WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return "not_found", None
+            if row["status"] != "awaiting_confirmation":
+                return str(row["status"]), None
+            if row["response_deadline"] is None or now > float(row["response_deadline"]):
+                await db.execute(
+                    """
+                    UPDATE dead_timers SET status = 'not_fulfilled'
+                    WHERE user_id = ? AND status = 'awaiting_confirmation'
+                    """,
+                    (user_id,),
+                )
+                await db.commit()
+                _record_write()
+                return "not_fulfilled", None
+
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO duel_players(
+                    user_id, username, balance_cents, last_mined_on, is_bot
+                )
+                VALUES (?, ?, 500, ?, 0)
+                """,
+                (user_id, username, today_text),
+            )
+            await db.execute(
+                """
+                UPDATE duel_players
+                SET balance_cents = balance_cents + 10000,
+                    username = COALESCE(?, username)
+                WHERE user_id = ?
+                """,
+                (username, user_id),
+            )
+            await db.execute(
+                """
+                UPDATE dead_timers SET status = 'fulfilled'
+                WHERE user_id = ? AND status = 'awaiting_confirmation'
+                """,
+                (user_id,),
+            )
+            cursor = await db.execute(
+                "SELECT balance_cents FROM duel_players WHERE user_id = ?",
+                (user_id,),
+            )
+            balance_row = await cursor.fetchone()
+            if balance_row is None:
+                raise sqlite3.DatabaseError(
+                    f"Не удалось выдать награду за подтверждение жизни user_id={user_id}."
+                )
+            await db.commit()
+        _record_write()
+    return "fulfilled", int(balance_row["balance_cents"])
 
 
 class InsufficientDuelBalanceError(ValueError):
