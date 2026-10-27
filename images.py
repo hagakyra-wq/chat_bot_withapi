@@ -302,36 +302,6 @@ class ImageGenerationManager:
             return
         await self.refresh_status(message.chat_id, context.bot, owner_id=user.id)
 
-    async def offer_webapp(self, bot: Any, user_id: int, prompt: str) -> None:
-        prompt = prompt.strip()
-        if not prompt:
-            raise ValueError("Опиши изображение.")
-        if len(prompt) > PROMPT_MAX_LENGTH:
-            raise ValueError(
-                f"Описание должно содержать не более {PROMPT_MAX_LENGTH} символов."
-            )
-
-        request_id = uuid.uuid4().hex
-        self.pending[request_id] = PendingImage(
-            prompt=prompt,
-            owner_id=user_id,
-            chat_id=user_id,
-        )
-        try:
-            message = await bot.send_message(
-                chat_id=user_id,
-                text="Запрос из Mini App. Настроить параметры или запустить генерацию?",
-                reply_markup=_mode_keyboard(request_id),
-            )
-            await record_bot_message(message)
-        except TelegramError:
-            self.pending.pop(request_id, None)
-            logging.exception(
-                "Не удалось отправить запрос генерации из Mini App user_id=%s.",
-                user_id,
-            )
-            raise
-
     async def handle_callback(
         self,
         update: Update,

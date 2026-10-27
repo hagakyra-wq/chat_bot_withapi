@@ -1,13 +1,11 @@
 """Точка входа: восстановление данных, Render healthcheck и polling."""
 
 import asyncio
-import concurrent.futures
 import hashlib
 import hmac
 import io
 import json
 import logging
-import mimetypes
 import os
 import re
 import sqlite3
@@ -18,15 +16,11 @@ from datetime import datetime, time as datetime_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, parse_qs, urlencode, urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     MessageReactionUpdated,
     Update,
-    WebAppInfo,
 )
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -44,7 +38,6 @@ from telegram.ext import (
 import database
 import autoresponder
 import personal_account
-import mini_games
 from channel_log import (
     TelegramChannelLogHandler,
     install_channel_log_handler,
@@ -62,7 +55,6 @@ from config import (
     DATABASE_PATH,
     HISTORY_ENCRYPTION_KEY,
     LOGS_CHAT,
-    MINI_APP_URL,
     MOSCOW_TIMEZONE,
     PORT,
     TELEGRAM_TOKEN,
@@ -95,513 +87,18 @@ from handlers_pm import (
 )
 from images import create_profile_card, on_image_callback, stop_image_jobs
 from banner_store import stop_banner_render_queue
-import miniapp_api
-
-
-def _validate_web_app_init_data(
-    init_data: str,
-) -> tuple[int, str, str | None, str | None]:
-    if not init_data or len(init_data) > 4096:
-        raise ValueError("Invalid Telegram initData.")
-
-    try:
-        fields_list = parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
-        fields = dict(fields_list)
-        if len(fields) != len(fields_list):
-            raise ValueError("Duplicate Telegram initData fields.")
-        received_hash = fields.pop("hash")
-        auth_date = int(fields["auth_date"])
-        user = json.loads(fields["user"])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("Invalid Telegram initData.") from exc
-
-    if len(received_hash) != 64:
-        raise ValueError("Invalid Telegram initData hash.")
-    try:
-        int(received_hash, 16)
-    except ValueError as exc:
-        raise ValueError("Invalid Telegram initData hash.") from exc
-
-    data_check_string = "\n".join(
-        f"{key}={value}" for key, value in sorted(fields.items())
-    )
-    secret_key = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
-    expected_hash = hmac.new(
-        secret_key,
-        data_check_string.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(received_hash, expected_hash):
-        raise ValueError("Invalid Telegram initData signature.")
-
-    now = int(time.time())
-    if auth_date > now + 60 or now - auth_date > 86_400:
-        raise ValueError("Expired Telegram initData.")
-    if not isinstance(user, dict) or type(user.get("id")) is not int:
-        raise ValueError("Invalid Telegram user.")
-
-    first_name = user.get("first_name", "")
-    if not isinstance(first_name, str):
-        first_name = ""
-    username = user.get("username")
-    if not isinstance(username, str):
-        username = None
-    photo_url = user.get("photo_url")
-    if not isinstance(photo_url, str) or len(photo_url) > 2048:
-        photo_url = None
-    return user["id"], first_name, username, photo_url
-
-
-def _room_app_url(room_code: str) -> str | None:
-    if not MINI_APP_URL:
-        return None
-    try:
-        parsed = urlsplit(MINI_APP_URL)
-        hostname = parsed.hostname
-        parsed.port
-    except ValueError:
-        logging.error("MINI_APP_URL содержит некорректный адрес.")
-        return None
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        logging.error("MINI_APP_URL должен быть HTTPS URL без логина/пароля.")
-        return None
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    query["room"] = [room_code]
-    return urlunsplit((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path or "/",
-        urlencode(query, doseq=True),
-        "",
-    ))
-
-
-async def room_start_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    message = update.effective_message
-    user = update.effective_user
-    if message is None or user is None or update.effective_chat is None:
-        return
-    if update.effective_chat.type != "private":
-        return
-
-    argument = context.args[0].strip().upper() if context.args else ""
-    match = re.fullmatch(r"ROOM_([A-HJ-NP-Z2-9]{6})", argument)
-    if match is None:
-        await on_private_message(update, context)
-        return
-
-    code = match.group(1)
-    room = await database.get_minigame_room(code)
-    if room is None or room["status"] == "finished":
-        await message.reply_text(
-            f"Комната {code} уже закрыта или не найдена. "
-            "Попроси друзей прислать новое приглашение."
-        )
-        return
-    players = room["state"].get("players", [])
-    is_player = any(int(player["user_id"]) == user.id for player in players)
-    if room["status"] != "lobby" and not is_player:
-        await message.reply_text("Игра уже началась — новые игроки войти не могут.")
-        return
-    if not is_player and len(players) >= int(room["max_players"]):
-        await message.reply_text("В этой комнате уже заняты все места.")
-        return
-
-    app_url = _room_app_url(code)
-    if app_url:
-        button = InlineKeyboardButton(
-            "Открыть комнату",
-            web_app=WebAppInfo(url=app_url),
-        )
-        hint = "Нажми кнопку, чтобы открыть Mini App и занять свободное место."
-    else:
-        await message.reply_text(
-            f"Комната {code} открыта. Открой Mini App Юбары из меню бота "
-            "и введи этот код. Для открытия по кнопке администратору нужно "
-            "задать MINI_APP_URL в Render."
-        )
-        return
-    await message.reply_text(
-        f"Приглашение в комнату «Дурак» · {code}\n{hint}",
-        reply_markup=InlineKeyboardMarkup([[button]]),
-    )
-
-
-async def room_invite_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    message = update.effective_message
-    user = update.effective_user
-    if message is None or user is None:
-        return
-    if not context.args:
-        status, room = await mini_games.create_room(
-            user.id,
-            user.first_name,
-            user.username,
-            {
-                "game_type": "durak",
-                "max_players": 2,
-                "mode": "free",
-                "stake_cents": 0,
-            },
-        )
-        if status != 201:
-            await message.reply_text(room.get("error", "Не удалось создать комнату."))
-            return
-        code = room["room_code"]
-        username = context.bot.username
-        if not username:
-            username = (await context.bot.get_me()).username
-        if not username:
-            raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
-        invite_url = f"https://t.me/{username}?startapp=room_{code}"
-        fallback_url = f"https://t.me/{username}?start=room_{code}"
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("Войти в комнату", url=invite_url)],
-                [InlineKeyboardButton("Если не открылось — сюда", url=fallback_url)],
-            ],
-        )
-        await message.reply_text(
-            f"Комната Юбары · «Дурак» · {code}\n"
-            "Первый игрок, который войдёт, займёт свободное место. "
-            "Если первая кнопка не открылась — используй запасную.",
-            reply_markup=keyboard,
-        )
-        return
-
-    code = context.args[0].strip().upper()
-    if len(context.args) != 1 or not re.fullmatch(r"[A-HJ-NP-Z2-9]{6}", code):
-        await message.reply_text("Использование: `/room КОД_КОМНАТЫ`.", parse_mode="Markdown")
-        return
-    room = await database.get_minigame_room(code)
-    if room is None or room["status"] != "lobby":
-        await message.reply_text("Открытая комната не найдена или уже началась.")
-        return
-    if not any(
-        int(player["user_id"]) == user.id
-        for player in room["state"].get("players", [])
-    ):
-        await message.reply_text("Поделиться комнатой может только её участник.")
-        return
-    if len(room["state"].get("players", [])) >= int(room["max_players"]):
-        await message.reply_text("Все места в комнате уже заняты.")
-        return
-    username = context.bot.username
-    if not username:
-        username = (await context.bot.get_me()).username
-    if not username:
-        raise RuntimeError("Не удалось получить username бота для ссылки Mini App.")
-    invite_url = f"https://t.me/{username}?startapp=room_{code}"
-    fallback_url = f"https://t.me/{username}?start=room_{code}"
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Войти в комнату", url=invite_url)],
-            [InlineKeyboardButton("Если не открылось — сюда", url=fallback_url)],
-        ]
-    )
-    await message.reply_text(
-        f"Комната Юбары · «Дурак»\n"
-        f"Места занимают первые {room['max_players'] - len(room['state']['players'])} "
-        "игрока, которые войдут.",
-        reply_markup=keyboard,
-    )
+from chat_tarot import tarot_command
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    event_loop: asyncio.AbstractEventLoop | None = None
-    _static_assets = {
-        "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
-        "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
-        "/assets/api.js": ("api.js", "text/javascript; charset=utf-8"),
-        "/assets/games.js": ("games.js", "text/javascript; charset=utf-8"),
-        "/assets/sounds.js": ("sounds.js", "text/javascript; charset=utf-8"),
-        "/assets/buddy3d.js": ("buddy3d.js", "text/javascript; charset=utf-8"),
-        "/assets/room3d.js": ("room3d.js", "text/javascript; charset=utf-8"),
-        "/assets/icons.svg": ("icons.svg", "image/svg+xml"),
-    }
-    bot: Any | None = None
-
     def do_GET(self) -> None:
-        request_path = urlsplit(self.path).path
-        if request_path in ("/", "/index.html"):
-            page_path = Path(__file__).resolve().parent / "webapp" / "index.html"
-            try:
-                page = page_path.read_bytes()
-            except OSError:
-                logging.exception("Не удалось прочитать страницу Mini App %s.", page_path)
-                self.send_error(500, "Mini App page unavailable")
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(page)))
-            self.end_headers()
-            self.wfile.write(page)
-            return
-        if request_path in self._static_assets:
-            asset_name, content_type = self._static_assets[request_path]
-            asset_path = Path(__file__).resolve().parent / "webapp" / asset_name
-            try:
-                asset = asset_path.read_bytes()
-            except OSError:
-                logging.exception("Не удалось прочитать Mini App asset %s.", asset_path)
-                self.send_error(500, "Mini App asset unavailable")
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(asset)))
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(asset)
-            return
-        if request_path.startswith(("/assets/images/", "/assets/music/")):
-            self._handle_future_asset(request_path)
-            return
-        if request_path == "/media/telegram-photo":
-            self._handle_telegram_photo(parse_qs(urlsplit(self.path).query))
-            return
-        if request_path.startswith("/media/banner/"):
-            self._handle_banner_media(request_path)
-            return
-        if request_path.startswith("/api/"):
-            self._handle_api_request("GET")
-            return
         if self.path != "/health":
             self.send_error(404)
             return
-
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"OK")
-
-    def _handle_future_asset(self, request_path: str) -> None:
-        folder, filename = request_path.removeprefix("/assets/").split("/", 1)
-        if (
-            folder not in ("images", "music")
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename)
-            or Path(filename).suffix.lower()
-            not in (
-                {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-                if folder == "images"
-                else {".mp3", ".ogg", ".wav", ".m4a"}
-            )
-        ):
-            self.send_error(404)
-            return
-        asset_path = Path(__file__).resolve().parent / "webapp" / "assets" / folder / filename
-        try:
-            asset = asset_path.read_bytes()
-        except FileNotFoundError:
-            self.send_error(404)
-            return
-        except OSError:
-            logging.exception("Не удалось прочитать будущий Mini App asset %s.", asset_path)
-            self.send_error(500, "Mini App asset unavailable")
-            return
-        self.send_response(200)
-        self.send_header(
-            "Content-Type",
-            mimetypes.guess_type(filename)[0] or "application/octet-stream",
-        )
-        self.send_header("Content-Length", str(len(asset)))
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(asset)
-
-    def _handle_banner_media(self, request_path: str) -> None:
-        try:
-            item_id = int(request_path.removeprefix("/media/banner/"))
-        except ValueError:
-            self.send_error(404)
-            return
-        loop = self.event_loop
-        if loop is None or loop.is_closed():
-            self.send_error(503, "API is unavailable")
-            return
-        future = asyncio.run_coroutine_threadsafe(
-            miniapp_api.get_banner_media(
-                item_id,
-                parse_qs(urlsplit(self.path).query),
-                bot=self.bot,
-            ),
-            loop,
-        )
-        try:
-            status, body, content_type = future.result(timeout=30)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            self.send_error(504, "Image request timed out")
-            return
-        except Exception:
-            logging.exception("Mini App banner image request failed item_id=%s.", item_id)
-            self.send_error(500, "Image request failed")
-            return
-
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        if status == 200:
-            self.send_header("Cache-Control", "private, max-age=300")
-            self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _handle_telegram_photo(self, query: dict[str, list[str]]) -> None:
-        loop = self.event_loop
-        if loop is None or loop.is_closed():
-            self.send_error(503, "API is unavailable")
-            return
-        future = asyncio.run_coroutine_threadsafe(
-            miniapp_api.get_telegram_photo(query),
-            loop,
-        )
-        try:
-            status, body, content_type = future.result(timeout=10)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            self.send_error(504, "Photo request timed out")
-            return
-        except Exception:
-            logging.exception("Mini App Telegram profile photo request failed.")
-            self.send_error(500, "Photo request failed")
-            return
-
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if status == 200:
-            self.send_header("Cache-Control", "private, max-age=300")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self) -> None:
-        self._handle_api_request("POST")
-
-    def _handle_api_request(self, method: str) -> None:
-        if self.headers.get_content_type() not in ("application/json", "text/plain"):
-            self.send_error(415, "Unsupported request content type")
-            return
-
-        payload: dict[str, Any] = {}
-        if method == "POST":
-            content_length = self.headers.get("Content-Length")
-            try:
-                body_length = int(content_length or "")
-            except ValueError:
-                self.send_error(400, "Invalid Content-Length")
-                return
-            if not 1 <= body_length <= 8192:
-                self.send_error(413, "Invalid request size")
-                return
-            try:
-                parsed = json.loads(self.rfile.read(body_length))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self.send_error(400, "Invalid JSON")
-                return
-            if not isinstance(parsed, dict):
-                self.send_error(400, "Expected a JSON object")
-                return
-            payload = parsed
-
-        init_data = self.headers.get("X-Telegram-Init-Data", "")
-        if self.path == "/api/session" and method == "POST":
-            init_data = payload.get("initData", "")
-        if not isinstance(init_data, str):
-            self._send_json_error(
-                401,
-                "Telegram не передал данные авторизации. Открой Mini App кнопкой внутри Telegram.",
-            )
-            return
-        if len(init_data) > 4096:
-            self._send_json_error(
-                401,
-                "Данные Telegram имеют некорректный размер. Закрой Mini App и открой его заново.",
-            )
-            return
-        try:
-            user_id, first_name, username, photo_url = _validate_web_app_init_data(init_data)
-        except ValueError as error:
-            if not init_data:
-                reason = (
-                    "Telegram не передал данные авторизации. "
-                    "Открой Mini App кнопкой внутри Telegram."
-                )
-            elif "Expired" in str(error):
-                reason = "Срок данных Telegram истёк. Закрой Mini App и открой его заново."
-            else:
-                reason = (
-                    "Не удалось проверить данные Telegram. "
-                    "Открой Mini App заново кнопкой внутри Telegram."
-                )
-            self._send_json_error(401, reason)
-            return
-
-        parsed_url = urlsplit(self.path)
-        if parsed_url.path == "/api/session" and method == "POST":
-            coroutine = miniapp_api.get_session(user_id, first_name, username)
-        else:
-            coroutine = miniapp_api.dispatch(
-                method,
-                parsed_url.path,
-                parse_qs(parsed_url.query),
-                user_id,
-                first_name,
-                username,
-                photo_url,
-                payload,
-                bot=self.bot,
-            )
-        loop = self.event_loop
-        if loop is None or loop.is_closed():
-            self.send_error(503, "API is unavailable")
-            return
-        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-        try:
-            status, response = future.result(timeout=30)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            self.send_error(504, "API request timed out")
-            return
-        except Exception:
-            logging.exception(
-                "Mini App API request failed method=%s path=%s user_id=%s.",
-                method,
-                parsed_url.path,
-                user_id,
-            )
-            self.send_error(500, "API request failed")
-            return
-
-        body = json.dumps(response, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _send_json_error(self, status: int, message: str) -> None:
-        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
 
     def log_message(self, _format: str, *_args: object) -> None:
         del _format, _args
@@ -1277,16 +774,14 @@ def build_application() -> Application:
             filters=filters.ChatType.PRIVATE,
         )
     )
-    application.add_handler(
-        CommandHandler("room", room_invite_command, filters=filters.ChatType.GROUPS)
-    )
     application.add_handler(build_admin_conversation_handler())
     application.add_handler(build_delete_all_data_handler())
     application.add_handler(build_history_conversation_handler())
     application.add_handler(build_personal_autoresponder_conversation_handler())
     application.add_handler(
-        CommandHandler("start", room_start_command, filters=filters.ChatType.PRIVATE)
+        CommandHandler("start", on_private_message, filters=filters.ChatType.PRIVATE)
     )
+    application.add_handler(CommandHandler("tarot", tarot_command))
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -1551,13 +1046,11 @@ def main() -> None:
     http_thread: threading.Thread | None = None
     try:
         application = build_application()
-        HealthCheckHandler.bot = application.bot
         try:
             http_server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
         except OSError:
             logging.exception("Не удалось запустить HTTP healthcheck на порту %s.", PORT)
             raise
-        HealthCheckHandler.event_loop = event_loop
         http_thread = threading.Thread(
             target=http_server.serve_forever,
             name="render-healthcheck",
@@ -1567,8 +1060,6 @@ def main() -> None:
         logging.info("HTTP healthcheck запущен на порту %s.", PORT)
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
-        HealthCheckHandler.event_loop = None
-        HealthCheckHandler.bot = None
         if not event_loop.is_closed():
             event_loop.close()
         asyncio.set_event_loop(None)

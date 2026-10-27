@@ -1,4 +1,4 @@
-"""Shared result rules for Telegram and Mini App casino spins."""
+"""Shared result rules for Telegram casino spins."""
 
 import secrets
 from typing import Any

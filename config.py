@@ -54,11 +54,6 @@ BACKUP_CHANNEL_ID = _optional_int("BACKUP_CHANNEL_ID")
 LOGS_CHAT = _optional_int("LOGS_CHAT")
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
-MINI_APP_URL = (
-    os.getenv("MINI_APP_URL", "").strip()
-    or os.getenv("RENDER_EXTERNAL_URL", "").strip()
-).rstrip("/")
-
 try:
     PORT = int(os.getenv("PORT", "8080"))
 except ValueError as exc:

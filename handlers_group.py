@@ -95,7 +95,6 @@ _SUPPORTED_GROUP_COMMANDS = {
     "react",
     "reaction",
     "recycle",
-    "room",
     "slots",
     "start",
     "top",
