@@ -251,7 +251,26 @@ async def _generate_dead_story_text(
     )
 
 
-async def _generate_dead_story_audio(story_text: str) -> bytes | None:
+async def _generate_dead_story_audio_gtts(story_text: str) -> bytes:
+    from gtts import gTTS
+
+    def synthesize() -> bytes:
+        audio_buffer = io.BytesIO()
+        gTTS(
+            text=story_text,
+            lang="ru",
+            slow=False,
+            timeout=(5, 15),
+        ).write_to_fp(audio_buffer)
+        return audio_buffer.getvalue()
+
+    audio = await asyncio.wait_for(asyncio.to_thread(synthesize), timeout=20)
+    if not audio:
+        raise RuntimeError("Google TTS не вернул аудиоданные.")
+    return audio
+
+
+async def _generate_dead_story_audio_local(story_text: str) -> bytes:
     try:
         speech = await asyncio.create_subprocess_exec(
             "espeak-ng",
@@ -304,6 +323,21 @@ async def _generate_dead_story_audio(story_text: str) -> bytes | None:
         logging.exception(
             "Не удалось озвучить историю локальными espeak-ng/ffmpeg."
         )
+        raise
+
+
+async def _generate_dead_story_audio(story_text: str) -> bytes | None:
+    try:
+        return await _generate_dead_story_audio_gtts(story_text)
+    except Exception:
+        logging.warning(
+            "Не удалось озвучить историю через Google TTS; пробую локальный синтез.",
+            exc_info=True,
+        )
+
+    try:
+        return await _generate_dead_story_audio_local(story_text)
+    except (OSError, RuntimeError):
         return None
 
 

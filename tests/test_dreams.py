@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 
@@ -15,10 +15,63 @@ os.environ.setdefault("ADMIN_ID", "1")
 
 import database
 from config import MOSCOW_TIMEZONE
-from DEAD import format_dead_countdown, is_dead_trigger
+from DEAD import (
+    _generate_dead_story_audio,
+    _generate_dead_story_audio_gtts,
+    format_dead_countdown,
+    is_dead_trigger,
+)
 
 
 class DeadTimerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gtts_uses_russian_and_returns_mp3_bytes(self):
+        with patch("gtts.gTTS") as gtts:
+            gtts.return_value.write_to_fp.side_effect = (
+                lambda audio_buffer: audio_buffer.write(b"mp3 audio")
+            )
+            result = await _generate_dead_story_audio_gtts("Дело было так.")
+
+        self.assertEqual(result, b"mp3 audio")
+        gtts.assert_called_once_with(
+            text="Дело было так.",
+            lang="ru",
+            slow=False,
+            timeout=(5, 15),
+        )
+
+    async def test_story_audio_prefers_online_tts(self):
+        with (
+            patch(
+                "DEAD._generate_dead_story_audio_gtts",
+                new=AsyncMock(return_value=b"MP3 audio"),
+            ) as online_tts,
+            patch(
+                "DEAD._generate_dead_story_audio_local",
+                new=AsyncMock(),
+            ) as local_tts,
+        ):
+            result = await _generate_dead_story_audio("Дело было так.")
+
+        self.assertEqual(result, b"MP3 audio")
+        online_tts.assert_awaited_once_with("Дело было так.")
+        local_tts.assert_not_awaited()
+
+    async def test_story_audio_falls_back_when_online_tts_fails(self):
+        with (
+            patch(
+                "DEAD._generate_dead_story_audio_gtts",
+                new=AsyncMock(side_effect=RuntimeError("TTS unavailable")),
+            ),
+            patch(
+                "DEAD._generate_dead_story_audio_local",
+                new=AsyncMock(return_value=b"local audio"),
+            ) as local_tts,
+        ):
+            result = await _generate_dead_story_audio("Дело было так.")
+
+        self.assertEqual(result, b"local audio")
+        local_tts.assert_awaited_once_with("Дело было так.")
+
     def test_countdown_uses_years_months_days_and_clock_units(self):
         start = datetime(2026, 1, 31, 12, 0, 0, tzinfo=MOSCOW_TIMEZONE)
         deadline = datetime(2028, 3, 31, 13, 2, 3, tzinfo=MOSCOW_TIMEZONE)
