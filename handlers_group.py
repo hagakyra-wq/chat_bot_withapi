@@ -41,7 +41,13 @@ from duel import (
     handle_duel_challenge,
     is_coin_leaderboard_request,
 )
-from DEAD import dead_command, is_dead_trigger
+from death_fate import (
+    format_time_left,
+    get_death_time_reply,
+    is_death_reason_request,
+    is_death_time_request,
+    random_death_cause,
+)
 from group_stats import (
     leaderboard_caption,
     leaderboard_keyboard,
@@ -695,8 +701,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if await handle_coin_promo_message(update):
         return
 
-    if is_dead_trigger(text):
-        await dead_command(update, context)
+    if is_death_reason_request(text):
+        await message.reply_text(f"Причина смерти: {random_death_cause()}")
+        return
+    if is_death_time_request(text):
+        await message.reply_text(get_death_time_reply())
         return
 
     if is_top_request:

@@ -1,5 +1,4 @@
 python-telegram-bot[job-queue]==21.11.1
-gTTS==2.5.4
 openai==1.68.2
 aiosqlite==0.21.0
 python-dotenv==1.0.1
