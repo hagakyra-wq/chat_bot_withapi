@@ -92,7 +92,7 @@ from chat_tarot import tarot_command
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path != "/health":
+        if self.path not in ("/", "/health"):
             self.send_error(404)
             return
         self.send_response(200)
