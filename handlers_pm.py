@@ -170,7 +170,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("Админ-панель доступна только владельцу бота.")
         return
     await message.reply_text(
-        "⚙️ Админ-панель\n\nДоступные действия:",
+        "⚙️ Админ-панель\n\nДоступные действия:\n• /adm — открыть панель\n• /admin — тоже работает",
         reply_markup=_admin_panel_markup(),
     )
 

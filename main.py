@@ -40,6 +40,7 @@ def build_app() -> Application:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("adm", admin_command))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
     app.add_handler(CallbackQueryHandler(court_callback, pattern="^court:"))
     app.add_handler(CallbackQueryHandler(advanced_court_callback, pattern="^court_adv:"))
