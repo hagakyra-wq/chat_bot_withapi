@@ -2272,6 +2272,28 @@ async def has_chat_message(chat_id: int, message_id: int) -> bool:
     return False
 
 
+async def clear_chat_history(chat_id: int) -> int:
+    """Удаляет историю сообщений и активность чата по его chat_id."""
+    deleted = 0
+    for database_path in [DATABASE_PATH, *_message_archive_paths()]:
+        async with aiosqlite.connect(database_path) as db:
+            message_cursor = await db.execute(
+                "DELETE FROM messages WHERE chat_id = ?",
+                (chat_id,),
+            )
+            deleted += message_cursor.rowcount
+            activity_cursor = await db.execute(
+                "DELETE FROM message_activity WHERE chat_id = ?",
+                (chat_id,),
+            )
+            deleted += activity_cursor.rowcount
+            await db.commit()
+    if deleted:
+        _record_write()
+        logging.info("Удалена история чата %s: %s записей.", chat_id, deleted)
+    return deleted
+
+
 async def purge_private_message_history() -> int:
     """Removes previously retained direct-message history from every message shard."""
     deleted = 0

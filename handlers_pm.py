@@ -6,6 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
 from telegram.ext import CallbackContext, CommandHandler, ContextTypes, MessageHandler, filters
 
+from config import ADMIN_ID
 import database
 from court import (
     is_court_request,
@@ -47,6 +48,23 @@ def _menu_markup() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🏛️ Суд-2", callback_data="menu:advanced_court"),
                 InlineKeyboardButton("🎙️ Транскрибация", callback_data="menu:transcribe"),
             ],
+            [
+                InlineKeyboardButton("👑 Админ", callback_data="menu:admin"),
+                InlineKeyboardButton("⬅️ Назад", callback_data="menu:main"),
+            ],
+        ]
+    )
+
+
+def _admin_panel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🧹 Сбросить историю чата", callback_data="menu:reset_history"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:main"),
+            ],
         ]
     )
 
@@ -86,35 +104,108 @@ async def menu_callback(update: Update, context: CallbackContext) -> None:
         return
     await query.answer()
     action = query.data or ""
-    if action == "menu:summary":
+    if action == "menu:main":
         await query.edit_message_text(
-            "Для саммари напиши в чате 'саммари' или 'что я пропустил'. Можно указать период: 'саммари за 30 минут'."
+            "Главное меню\n\n• Напиши 'саммари'\n• Используй 'суд' в ответ на сообщение\n• Напиши 'кодекс' или 'законы'\n• Ответь на голосовое: 'расшифруй'",
+            reply_markup=_menu_markup(),
+        )
+    elif action == "menu:summary":
+        await query.edit_message_text(
+            "Для саммари напиши в чате 'саммари' или 'что я пропустил'. Можно указать период: 'саммари за 30 минут'.",
+            reply_markup=_menu_markup(),
         )
     elif action == "menu:delete":
         await query.edit_message_text(
-            "Чтобы удалить сообщение, ответь на него командой 'дэл'. Для удаления нескольких сообщений: 'дэл 5' или 'удали 5'."
+            "Чтобы удалить сообщение, ответь на него командой 'дэл'. Для удаления нескольких сообщений: 'дэл 5' или 'удали 5'.",
+            reply_markup=_menu_markup(),
         )
     elif action == "menu:transcribe":
         await query.edit_message_text(
-            "Ответь на голосовое или аудиофайл текстом: 'расшифруй', 'в текст' или 'транскриб'."
+            "Ответь на голосовое или аудиофайл текстом: 'расшифруй', 'в текст' или 'транскриб'.",
+            reply_markup=_menu_markup(),
         )
     elif action == "menu:court":
-        await query.edit_message_text(_court_help_text())
+        await query.edit_message_text(_court_help_text(), reply_markup=_menu_markup())
     elif action == "menu:law":
         await query.edit_message_text(
-            "Кодекс Юбари можно посмотреть командой 'кодекс', 'законы' или 'сводка законов'."
+            "📜 Кодекс Юбари\n\nКодекс можно посмотреть командой 'кодекс', 'законы' или 'сводка законов'.\n\nСудья учитывает нормы кодекса при вынесении вердикта, особенно для флуда, мемов, стикеров, фото, видео, голосовых и ботов.",
+            reply_markup=_menu_markup(),
         )
     elif action == "menu:advanced_court":
         await query.edit_message_text(
-            "🏛️ Суд-2 — расширенный процесс. Ответь в группе на сообщение командой 'суд', и бот запустит таймер и приглашения в ЛС."
+            "🏛️ Суд-2 — расширенный процесс. Ответь в группе на сообщение командой 'суд', и бот запустит таймер и приглашения в ЛС.",
+            reply_markup=_menu_markup(),
         )
+    elif action == "menu:admin":
+        user_id = query.from_user.id if query.from_user else None
+        if user_id not in (ADMIN_ID,):
+            await query.answer("Нет доступа к админ-панели.", show_alert=True)
+            return
+        await query.edit_message_text(
+            "⚙️ Админ-панель\n\nЗдесь можно быстро управлять историей чата и проверками бота.",
+            reply_markup=_admin_panel_markup(),
+        )
+    elif action == "menu:reset_history":
+        user_id = query.from_user.id if query.from_user else None
+        if user_id not in (ADMIN_ID,):
+            await query.answer("Только администратор может сбрасывать историю.", show_alert=True)
+            return
+        try:
+            deleted = await database.clear_chat_history(query.message.chat_id)
+            await query.edit_message_text(
+                f"🧹 История чата очищена. Удалено записей: {deleted}.",
+                reply_markup=_menu_markup(),
+            )
+        except Exception:
+            logging.exception("Не удалось сбросить историю чата %s.", query.message.chat_id)
+            await query.edit_message_text("Не удалось очистить историю чата. Попробуй позже.", reply_markup=_menu_markup())
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    message = update.effective_message
+    if message is None:
+        return
+    if message.from_user is None or message.from_user.id not in (ADMIN_ID,):
+        await message.reply_text("Админ-панель доступна только владельцу бота.")
+        return
+    await message.reply_text(
+        "⚙️ Админ-панель\n\nДоступные действия:",
+        reply_markup=_admin_panel_markup(),
+    )
+
+
+def _message_content_text(message) -> str:
+    if message is None:
+        return ""
+    if message.text:
+        return message.text.strip()
+    if message.caption:
+        return message.caption.strip()
+    if message.sticker:
+        return "[стикер]"
+    if message.photo:
+        return "[фото]"
+    if message.video:
+        return "[видео]"
+    if message.voice:
+        return "[голосовое]"
+    if message.audio:
+        return "[аудио]"
+    if message.document:
+        return "[документ]"
+    if message.animation:
+        return "[анимация]"
+    return ""
 
 
 async def handle_plain_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
-    if message is None or not message.text:
+    if message is None:
         return
-    text = message.text.strip()
+    text = _message_content_text(message)
+    if not text:
+        return
 
     if await handle_delete_replied_message(update, context):
         return
@@ -191,9 +282,10 @@ async def main() -> None:
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
     app.add_handler(CallbackQueryHandler(advanced_court_callback, pattern="^court_adv:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_plain_message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE | filters.STICKER | filters.AUDIO | filters.ANIMATION | filters.Document.ALL, handle_plain_message))
     await app.initialize()
     await app.start()
     await app.updater.start_polling()  # type: ignore[attr-defined]

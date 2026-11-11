@@ -139,8 +139,14 @@ async def advanced_court_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def record_advanced_court_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.effective_message
-    if message is None or message.text is None or message.chat.type == ChatType.GROUP:
+    if message is None or message.chat.type == ChatType.GROUP:
         return False
+
+    text = (message.text or message.caption or "").strip()
+    if not text and not any((message.sticker, message.photo, message.video, message.voice, message.audio, message.document, message.animation)):
+        return False
+    if not text:
+        text = "[медиа]"
 
     user = message.from_user
     if user is None:
@@ -151,14 +157,14 @@ async def record_advanced_court_story(update: Update, context: ContextTypes.DEFA
         if case["status"] == "closed":
             continue
         if user.id == case["plaintiff_id"] and case["plaintiff_story"] is None:
-            case["plaintiff_story"] = message.text.strip()
+            case["plaintiff_story"] = text
             await message.reply_text("🧾 Истец передал позицию. Ожидаем защиту ответчика.")
             if case["defendant_story"] is not None or case["status"] == "declined":
                 await _finalize_advanced_court(case, context)
             return True
 
         if user.id == case["defendant_id"] and case["defendant_story"] is None:
-            case["defendant_story"] = message.text.strip()
+            case["defendant_story"] = text
             await message.reply_text("🛡️ Защита получена. Судьи Юбары готовят вердикт.")
             if case["plaintiff_story"] is not None:
                 await _finalize_advanced_court(case, context)

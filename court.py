@@ -9,6 +9,41 @@ from telegram.ext import ContextTypes
 
 import database
 
+LAW_ARTICLES = {
+    "стикер": [
+        "Статья 1. Незаконное присвоение стикеров — штраф 3 виртуальных щелбана.",
+        "Статья 3. Стикерный спам — более пяти одинаковых стикеров подряд считается нарушением.",
+    ],
+    "мем": [
+        "Статья 11. Кража мема — присвоение чужого авторства рассматривается как нарушение.",
+        "Статья 19. Мемный террор — отправка более пятнадцати мемов подряд считается злостным флудом.",
+    ],
+    "флуд": [
+        "Статья 41. Массовый флуд — более двадцати бессодержательных сообщений подряд.",
+        "Статья 24. Дробление сообщений — разбиение одного текста на десять и более сообщений.",
+    ],
+    "голос": [
+        "Статья 31. Чрезмерно длинное голосовое сообщение — свыше пяти минут без смысловой ценности.",
+        "Статья 34. Голосовой сериал — более десяти коротких голосовых подряд.",
+    ],
+    "фото": [
+        "Статья 57. Нарушение неприкосновенности галереи — чужие изображения нельзя публиковать без разрешения.",
+        "Статья 52. Кража материалов из галереи — копирование чужих образов и выдача за свои.",
+    ],
+    "видео": [
+        "Статья 60. Умышленный срыв дропа — массовая провокация и засорение обсуждения.",
+        "Статья 44. Провокация конфликта — намеренное создание ссор ради реакции.",
+    ],
+    "бот": [
+        "Статья 61. Эксплуатация бота — перегрузка сервиса бессмысленными командами.",
+        "Статья 68. Намеренный срыв работы бота — действия, нарушающие стабильность системы.",
+    ],
+    "суд": [
+        "Статья 81. Неуважение к суду — засорение разбирательства чужими сообщениями.",
+        "Статья 82. Заведомо ложный донос — ложное обвинение в нарушение Кодекса.",
+    ],
+}
+
 COURT_LAWS = (
     "1. Чай в суде — не доказательство, но сильное смягчающее обстоятельство.",
     "2. Суд опирается в первую очередь на историю чата и на то, что реально было сказано, а не на эмоции в момент спора.",
@@ -22,11 +57,37 @@ COURT_LAWS = (
     "10. Судья Юбары может назначить 'королевскую отсрочку', но не может отменить очевидную логику переписки.",
 )
 
+_LAW_TEXT = """📜 УГОЛОВНЫЙ КОДЕКС ЧАТА
+
+1. Чай в суде — не доказательство, но сильное смягчающее обстоятельство.
+2. Суд опирается в первую очередь на историю чата и на то, что реально было сказано, а не на эмоции в момент спора.
+3. Если спор подтверждён двумя сторонами и одной важной историей переписки, приоритет отдаётся фактам, а не красноречию.
+4. За кражу мемов, стикеров, фото и видео без согласия предусмотрены виртуальные щелбаны.
+5. Систематический флуд, мемный террор, голосовой спам и попытки перегрузить бота считаются нарушениями.
+6. Суд учитывает не только слова, но и тип контента: стикеры, мемы, фото, видео, голосовые и бот-команды.
+7. Если участник молчит, суд имеет право опереться на историю чата и восстановить события по фактам.
+8. При наличии смягчающих обстоятельств приговор может быть сокращён или переведён в предупреждение.
+9. Внутренний кодекс Юбары не обязан копировать земное право, но должен быть справедливым внутри чата.
+10. Явка в суд и объяснение своей позиции всегда лучше молчания, даже если инцидент был смешной или спорный.
+
+Кодекс Юбары действует как свод норм для судебных дел внутри чата и учитывается при вердикте."""
+
 _COURT_RE = re.compile(r"\bсуд\b|\bтрибунал\b|\bсудеб\w*\b", re.IGNORECASE)
 _LAWS_RE = re.compile(
     r"\b(кодекс|законы|закон|сводка\s+законов|права|правила)\b",
     re.IGNORECASE,
 )
+
+
+def _law_matches_from_text(text: str) -> list[str]:
+    normalized = " ".join(text.casefold().split())
+    matches: list[str] = []
+    for keyword, articles in LAW_ARTICLES.items():
+        if keyword in normalized:
+            matches.extend(articles)
+    if not matches and any(word in normalized for word in ("флуд", "спам", "засор", "много сообщений")):
+        matches.extend(LAW_ARTICLES["флуд"])
+    return matches
 
 
 def is_court_request(text: str) -> bool:
@@ -40,15 +101,11 @@ def is_laws_request(text: str) -> bool:
 
 
 def format_laws() -> str:
-    return "\n".join(COURT_LAWS)
+    return _LAW_TEXT + "\n\n" + "\n".join(COURT_LAWS)
 
 
 async def send_laws_summary(message: Message) -> None:
-    await message.reply_text(
-        "📜 Кодекс Юбари\n\n"
-        + format_laws()
-        + "\n\nЭти нормы не копируют чужое право. Это свод правил, который работает здесь и сейчас."
-    )
+    await message.reply_text(format_laws())
 
 
 async def start_court_case(message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -167,8 +224,22 @@ async def court_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def record_court_story(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.effective_message
-    if message is None or message.text is None:
+    if message is None:
         return False
+
+    text = (message.text or message.caption or "").strip()
+    if not text and not any((message.sticker, message.photo, message.video, message.voice, message.audio, message.document, message.animation)):
+        return False
+    if not text:
+        text = {
+            True: "[стикер]",
+            bool(message.photo): "[фото]",
+            bool(message.video): "[видео]",
+            bool(message.voice): "[голосовое]",
+            bool(message.audio): "[аудио]",
+            bool(message.document): "[документ]",
+            bool(message.animation): "[анимация]",
+        }[True]
 
     user = message.from_user
     if user is None:
@@ -182,7 +253,7 @@ async def record_court_story(update: Update, context: ContextTypes.DEFAULT_TYPE)
             continue
 
         if user.id == case["plaintiff_id"] and case.get("plaintiff_story") is None:
-            case["plaintiff_story"] = message.text.strip()
+            case["plaintiff_story"] = text
             await message.reply_text(
                 "🧾 Истец передал историю. Адвокат Юбары записал позицию и ждёт ответчика."
             )
@@ -191,7 +262,7 @@ async def record_court_story(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return True
 
         if user.id == case["defendant_id"] and case.get("defendant_story") is None:
-            case["defendant_story"] = message.text.strip()
+            case["defendant_story"] = text
             await message.reply_text(
                 "🛡️ Защита принята. Юбара готовит вердикт после сверки сторон."
             )
@@ -243,12 +314,20 @@ async def _finalize_verdict(case: dict[str, Any], context: ContextTypes.DEFAULT_
             "виновен, но с компенсацией в виде чайной реабилитации",
         ])
 
+    law_context = _law_matches_from_text(f"{plaintiff_story}\n{defendant_story}")
+    law_context_sql = (
+        "\n".join(dict.fromkeys(law_context))
+        if law_context
+        else "Нормы Кодекса Юбары применены по общему принципу справедливости и учёту истории чата."
+    )
+
     verdict = (
         "⚖️ Вердикт суда Юбары\n\n"
         f"Истец: {plaintiff_name}\n"
         f"Ответчик: {defendant_name}\n\n"
         f"История истца:\n{plaintiff_story}\n\n"
         f"История ответчика:\n{defendant_story}\n\n"
+        f"Учтённые нормы:\n{law_context_sql}\n\n"
         f"Правовая сводка: {random.choice(COURT_LAWS)}\n\n"
         f"Решение: {verdict_result}.\n"
         + defense_note
