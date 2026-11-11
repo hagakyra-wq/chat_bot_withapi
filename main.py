@@ -63,7 +63,6 @@ from duel import handle_player_duel_callback
 from casino import (
     audit_subscription_bonuses,
     on_chat_member_update,
-    on_game_callback,
     test_banner_command,
 )
 from handlers_group import (
@@ -81,13 +80,11 @@ from handlers_pm import (
     build_delete_all_data_handler,
     build_history_conversation_handler,
     build_personal_autoresponder_conversation_handler,
-    on_profile_callback,
     on_private_message,
     private_access_callback_guard,
 )
-from images import create_profile_card, on_image_callback, stop_image_jobs
+from images import create_profile_card, stop_image_jobs
 from banner_store import stop_banner_render_queue
-from chat_tarot import tarot_command
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -728,14 +725,6 @@ def build_application() -> Application:
         CallbackQueryHandler(private_access_callback_guard),
         group=-1,
     )
-    application.add_handler(CallbackQueryHandler(on_image_callback, pattern=r"^img:"))
-    application.add_handler(
-        CallbackQueryHandler(
-            on_game_callback,
-            pattern=r"^(?:casino:|inv:|menu:|mkt:|bonus:)",
-        ),
-        group=1,
-    )
     application.add_handler(
         CallbackQueryHandler(
             on_group_profile_stats_callback,
@@ -747,10 +736,6 @@ def build_application() -> Application:
             on_group_stats_callback,
             pattern=r"^gstats:",
         )
-    )
-    application.add_handler(
-        CallbackQueryHandler(on_profile_callback, pattern=r"^profile:"),
-        group=1,
     )
     application.add_handler(
         CallbackQueryHandler(on_welcome_callback, pattern=r"^(?:wg|wa):")
@@ -781,7 +766,6 @@ def build_application() -> Application:
     application.add_handler(
         CommandHandler("start", on_private_message, filters=filters.ChatType.PRIVATE)
     )
-    application.add_handler(CommandHandler("tarot", tarot_command))
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS,

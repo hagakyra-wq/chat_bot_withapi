@@ -24,6 +24,20 @@ class GroupCommandFilterTests(unittest.TestCase):
     def test_regular_messages_are_not_filtered(self):
         self.assertTrue(should_process_group_command("Привет, Юбара!", "yubara_bot"))
 
+    def test_removed_feature_commands_are_ignored(self):
+        for command in (
+            "/profile",
+            "/top",
+            "/market",
+            "/fortuna",
+            "/casino",
+            "/banner",
+            "/inventory",
+            "/react",
+            "/reaction",
+        ):
+            self.assertFalse(should_process_group_command(command, "yubara_bot"))
+
 
 if __name__ == "__main__":
     unittest.main()

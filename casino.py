@@ -3026,78 +3026,31 @@ async def handle_game_message(
     if await handle_activation_message(update, context):
         return True
     start_match = re.fullmatch(r"/start(?:@\w+)?(?:\s+(\w+))?", text)
-    if start_match and start_match.group(1) == "inventory":
-        await _show_inventory(update, context)
-        return True
-    if start_match and start_match.group(1) == "casino":
-        await open_casino(update, context)
-        return True
     if start_match:
-        await open_main_menu(update, context)
-        return True
-    if re.fullmatch(r"/(?:fortuna|casino|slots)(?:@\w+)?", text) or text in {
+        return False
+    if re.fullmatch(r"/(?:fortuna|casino|slots|inventory|inv|banner|market|profile|top)(?:@\w+)?", text) or text in {
         "казино",
         "колесо удачи",
         "казик",
         "крутка",
         "🎰 казино",
         "🎡 колесо удачи",
-    }:
-        await open_casino(update, context)
-        return True
-    if re.fullmatch(r"/(?:inventory|inv)(?:@\w+)?", text) or text in {
         "инвентарь",
         "сменить банер",
         "сменить баннер",
         "🎒 инвентарь",
-    }:
-        await _show_inventory(update, context)
-        return True
-    if re.fullmatch(r"/banner(?:@\w+)?", text) or text in {"мой баннер", "мой банер"}:
-        try:
-            media = await get_profile_banner(context.bot, user.id)
-            if media is None:
-                await message.reply_text(
-                    "У тебя пока нет активного баннера. Попытай удачу в Колесе удачи.",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🎡 Колесо удачи", callback_data="casino:menu")]]
-                    ),
-                )
-            else:
-                payload, animated = media
-                await send_banner(
-                    context.bot,
-                    message.chat_id,
-                    payload,
-                    animated=animated,
-                    caption="Твой профильный баннер.",
-                )
-        except Exception:
-            logging.exception("Не удалось показать баннер user_id=%s.", user.id)
-            await message.reply_text("Не удалось открыть баннер. Попробуй позже.")
-        return True
-    market_command = _MARKET_COMMAND_RE.fullmatch(message.text.strip())
-    market_text = _MARKET_TEXT_RE.fullmatch(message.text.strip())
-    if market_command is not None or market_text is not None or text in {
+        "мой баннер",
+        "мой банер",
         "площадка",
         "маркет",
         "маркетплейс",
         "🏪 площадка",
+        "мой профиль",
+        "топ монет",
+        "рейтинг монет",
+        "топ",
     }:
-        query = (
-            market_command.group(1)
-            if market_command is not None
-            else market_text.group(1) if market_text is not None else ""
-        )
-        await _show_market(
-            update,
-            context,
-            0,
-            "all",
-            "relevance" if query else "date",
-            search_query=query,
-        )
-        return True
+        return False
     if re.fullmatch(r"/fees(?:@\w+)?", text):
         if user.id != ADMIN_ID and not await database.is_admin_user(user.id):
             await message.reply_text("Команда доступна только администраторам бота.")

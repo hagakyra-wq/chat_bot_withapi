@@ -38,7 +38,6 @@ from banner_store import get_profile_banner, reroll_active_banner, send_banner
 from chat_tarot import extract_tarot_trigger_question, send_tarot_reading
 from casino import (
     handle_activation_message,
-    handle_coin_promo_message,
     handle_error_report_message,
     handle_game_message,
 )
@@ -61,7 +60,6 @@ from death_fate import (
     is_death_time_request,
     random_death_cause,
 )
-from images import create_profile_card, extract_image_request, image_manager
 from llm import (
     build_prompt,
     extract_reported_age,
@@ -69,10 +67,6 @@ from llm import (
     is_summary_request,
     parse_meta,
     extract_reported_nickname,
-)
-from message_deletion import (
-    handle_delete_bot_messages,
-    handle_delete_replied_message,
 )
 from reactions import maybe_react
 from voice_transcription import handle_voice_transcription, is_transcription_request
@@ -714,18 +708,13 @@ def _admin_access_keyboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("👥 Список людей", callback_data="admin:people")],
             [
-                InlineKeyboardButton("💰 Промокод на монеты", callback_data="admin:create_coin_promo"),
-                InlineKeyboardButton("🖼 Баннерский ключ", callback_data="admin:create_banner_key"),
+                InlineKeyboardButton("� Баннерский ключ", callback_data="admin:create_banner_key"),
             ],
             [
                 InlineKeyboardButton(
                     "🗑 Отозвать баннерский ключ",
                     callback_data="admin:revoke_banner_key",
                 )
-            ],
-            [
-                InlineKeyboardButton("➖ Штрафной ключ", callback_data="admin:create_penalty"),
-                InlineKeyboardButton("🗑 Отозвать штрафной", callback_data="admin:revoke_penalty"),
             ],
             [
                 InlineKeyboardButton("🚫 Отозвать доступ", callback_data="admin:revoke_user"),
@@ -1817,16 +1806,6 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ),
             )
         return ADMIN_MENU
-    if action == "admin:create_coin_promo":
-        await query.edit_message_text(
-            "Введи сумму промокода в монетах (от 0.01 до 100000; "
-            "можно указать копейки, например 25 или 12.50).\n"
-            "Для отмены отправь /cancel.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("↩️ Отмена", callback_data="admin:menu")]]
-            ),
-        )
-        return WAIT_CREATE_COIN_PROMO
     if action == "admin:create_banner_key":
         await query.edit_message_text(
             "Отправь напечатанный на баннере 6-значный номер, уровень и Telegram ID прежнего владельца "
@@ -1842,16 +1821,6 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             ),
         )
         return WAIT_CREATE_BANNER_KEY
-    if action == "admin:create_penalty":
-        await query.edit_message_text(
-            "Введи положительную сумму штрафа в монетах (можно с копейками). "
-            "Одноразовый код спишет эту сумму и может увести баланс в минус.\n"
-            "Для отмены нажми кнопку или отправь /cancel.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("↩️ Отмена", callback_data="admin:menu")]]
-            ),
-        )
-        return WAIT_CREATE_PENALTY
     if action == "admin:access":
         await _show_admin_section(
             update,
@@ -2170,9 +2139,14 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     logging.info("Не удалось удалить устаревший QR-код.")
             else:
                 context.user_data["userbot_qr_message"] = qr_message
-        except Exception:
+        except Exception as exc:
             logging.exception("Не удалось отправить QR-код администратору.")
             await _cancel_userbot_login(user.id, context)
+            await query.edit_message_text(
+                "Не удалось отправить QR-код "
+                f"({type(exc).__name__}). Проверьте личный чат с ботом и наличие "
+                "TELEGRAM_API_ID/TELEGRAM_API_HASH."
+            )
             return ADMIN_MENU
         return WAIT_USERBOT_QR
     if action == "admin:userbot_disable":
@@ -2322,30 +2296,6 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         return WAIT_REVOKE_BANNER_KEY
-    if action == "admin:revoke_penalty":
-        codes = [
-            item
-            for item in await database.list_coin_penalty_codes()
-            if item["redeemed_by"] is None
-        ]
-        context.user_data["revoke_penalty_codes"] = codes
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    f"{_format_coin_amount(int(item['amount_cents']))} монет · {item['code'][-8:]}",
-                    callback_data=f"admin:revoke_penalty:{index}",
-                )
-            ]
-            for index, item in enumerate(codes[:80])
-        ]
-        buttons.append([InlineKeyboardButton("↩️ Назад", callback_data="admin:menu")])
-        await query.edit_message_text(
-            "Выбери неиспользованный штрафной ключ для отзыва:"
-            if codes
-            else "Неиспользованных штрафных ключей нет.",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-        return WAIT_REVOKE_PENALTY
     if action == "admin:people":
         users = await database.list_authorized_users(access_level="user")
         admins = await database.list_authorized_users(access_level="admin")
@@ -2474,9 +2424,13 @@ async def personal_autoresponder_callback(
         except personal_account.AuthFlowBusyError:
             await query.edit_message_text("Вход уже выполняется. Попробуй позже.")
             return AUTO_MENU
-        except Exception:
+        except Exception as exc:
             logging.exception("Не удалось создать QR для user_id=%s.", user.id)
-            await query.edit_message_text("Не удалось создать QR-код. Попробуй позже.")
+            await query.edit_message_text(
+                "Не удалось создать или отправить QR-код "
+                f"({type(exc).__name__}). Проверь личный чат с ботом и настройки "
+                "Telegram API."
+            )
             return AUTO_MENU
         if qr_login is None:
             personal_account.set_enabled(True, user.id)
@@ -2503,10 +2457,14 @@ async def personal_autoresponder_callback(
                     logging.info("Не удалось удалить устаревший QR user_id=%s.", user.id)
             else:
                 context.user_data["userbot_qr_message"] = qr_message
-        except Exception:
+        except Exception as exc:
             logging.exception("Не удалось отправить QR user_id=%s.", user.id)
             await _cancel_userbot_login(user.id, context)
-            await query.edit_message_text("Не удалось показать QR-код. Попробуй ещё раз.")
+            await query.edit_message_text(
+                "Не удалось отправить QR-код "
+                f"({type(exc).__name__}). Проверь личный чат с ботом и настройки "
+                "Telegram API."
+            )
             return AUTO_MENU
         return WAIT_AUTO_QR
     if action == "auto:disable":
@@ -4055,64 +4013,42 @@ async def _private_dialog(
         await handle_voice_transcription(message, context)
         return
 
-    profile_request = any(
-        phrase in message_text.casefold() for phrase in PROFILE_TRIGGERS
-    ) or re.fullmatch(r"/profile(?:@\w+)?", message_text.strip(), re.IGNORECASE) is not None
-    if profile_request:
-        try:
-            profile = await database.get_global_profile(user_id)
-            if profile is None:
-                raise RuntimeError(f"Глобальный профиль пользователя {user_id} отсутствует.")
-            await _send_profile_card(message, user_id, profile, context)
-        except Exception:
-            logging.exception("Не удалось показать глобальный профиль пользователя %s.", user_id)
-            await message.reply_text("Не удалось открыть профиль. Попробуй позже.")
+    profile_request = False
+    if re.fullmatch(
+        r"/(?:profile|top|market|fortuna|casino|inventory|inv|banner|slots|recycle|coinpromo|react|reaction|del|delete|remove)(?:@\w+)?",
+        message_text.strip(),
+        re.IGNORECASE,
+    ):
+        return
+    if any(
+        phrase in message_text.casefold()
+        for phrase in (
+            "мой профиль",
+            "профиль обо мне",
+            "топ монет",
+            "рейтинг монет",
+            "колесо удачи",
+            "казино",
+            "инвентарь",
+            "баннер",
+            "площадка",
+            "маркет",
+        )
+    ):
         return
 
     if is_summary_request(message_text):
         await message.reply_text("Подробное саммари доступно в группах за период до 24 часов.")
         return
 
-    if await image_manager.consume_setting_input(update, context):
-        return
-
-    await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
-
     if await handle_duel_challenge(update, context):
-        return
-    if await handle_coin_leaderboard_request(update, context):
-        return
-    if await handle_balance_request(update, context):
-        return
-
-    if await handle_delete_bot_messages(update, context):
-        return
-
-    if await handle_delete_replied_message(update, context):
         return
 
     command = message_text.strip().casefold()
-    if (
-        command in ("/reaction", "/react")
-        or re.fullmatch(r"/(?:reaction|react)@[\w]+", command)
-        or command in ("реакция", "реакцию")
-    ):
-        target = message.reply_to_message or message
-        try:
-            await target.set_reaction(
-                reaction=[ReactionTypeEmoji(random.choice(AVAILABLE_REACTIONS))]
-            )
-        except TelegramError:
-            logging.exception("Не удалось установить реакцию в личном чате")
-        return
 
     summary = is_summary_request(message_text)
     gender = "неизвестен"
     try:
-        is_image_request, image_prompt = extract_image_request(message_text)
-        if is_image_request:
-            await image_manager.offer(update, context, image_prompt)
-            return
         profile = await database.get_global_profile(user_id)
         gender = str(profile.get("gender") or "неизвестен") if profile else "неизвестен"
         replied_data = None
@@ -4176,8 +4112,6 @@ async def _private_dialog(
     except TelegramError:
         logging.exception("Не удалось ответить в личном чате")
         return
-    await image_manager.refresh_status(message.chat_id, context.bot, owner_id=user.id)
-    await maybe_react(message)
 
 
 async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4195,17 +4129,38 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if await handle_activation_message(update, context):
         return
-    if await handle_coin_promo_message(update):
-        return
     if is_death_reason_request(message.text):
         await message.reply_text(f"Причина смерти: {random_death_cause()}")
         return
     if is_death_time_request(message.text):
         await message.reply_text(get_death_time_reply())
         return
-    tarot_question = extract_tarot_trigger_question(message.text)
-    if tarot_question is not None:
-        await send_tarot_reading(message, tarot_question)
+    if re.fullmatch(
+        r"/(?:profile|top|market|fortuna|casino|inventory|inv|banner|slots|recycle|coinpromo|tarot)(?:@\w+)?",
+        message.text.strip(),
+        re.IGNORECASE,
+    ):
+        return
+    if any(
+        phrase in message.text.casefold()
+        for phrase in (
+            "мой профиль",
+            "топ монет",
+            "рейтинг монет",
+            "колесо удачи",
+            "казино",
+            "инвентарь",
+            "баннер",
+            "площадка",
+            "маркет",
+            "таро",
+            "расклад",
+            "реакция",
+            "реагировать",
+            "удалить последние сообщения",
+            "удалить сообщение",
+        )
+    ):
         return
     try:
         has_access = await has_private_bot_access(user.id, context.bot)

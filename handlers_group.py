@@ -53,7 +53,6 @@ from group_stats import (
     leaderboard_keyboard,
     render_leaderboard_banner,
 )
-from images import create_profile_card, extract_image_request, image_manager, is_image_command
 from llm import (
     build_prompt,
     extract_reported_age,
@@ -85,27 +84,12 @@ _SUPPORTED_GROUP_COMMANDS = {
     "activate",
     "activategroup",
     "adminhelp",
-    "banner",
     "cancel",
-    "casino",
-    "coinpromo",
     "fees",
     "forget_me",
-    "fortuna",
     "help",
     "helpadmin",
-    "image",
-    "img",
-    "inv",
-    "inventory",
-    "market",
-    "profile",
-    "react",
-    "reaction",
-    "recycle",
-    "slots",
     "start",
-    "top",
 }
 _PROFILE_GROUP_ID_RE = re.compile(
     r"(?:профиль\s+(?:группы|чата)|(?:группа|чат)\s+профиль)"
@@ -206,9 +190,8 @@ def _parse_message_top_request(text: str) -> tuple[bool, str | None]:
 
 async def on_group_activity(
     update: Update,
-    _context: ContextTypes.DEFAULT_TYPE,
+    context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    del _context
     message = update.effective_message
     user = update.effective_user
     if (
@@ -219,17 +202,39 @@ async def on_group_activity(
         or not (message.text or message.caption or message.effective_attachment)
     ):
         return
-    if message.text and (
-        _parse_message_top_request(message.text)[0]
-        or is_coin_leaderboard_request(message.text)
-    ):
-        return
     try:
-        if await database.is_group_allowed(message.chat_id):
-            await database.record_group_message_activity(message.chat_id, user.id)
+        if not await database.is_group_allowed(message.chat_id):
+            return
+    except Exception:
+        logging.exception("Не удалось проверить доступ группы %s.", message.chat_id)
+        return
+
+    try:
+        history = await database.load_chat_history(
+            message.chat_id,
+            summary=False,
+            limit=4,
+        )
+    except Exception:
+        logging.exception("Не удалось загрузить историю группы %s.", message.chat_id)
+        history = []
+    context.application.create_task(
+        maybe_react(message, history),
+        update=update,
+    )
+
+    message_text = message.text or message.caption or "[сообщение без текста]"
+    try:
+        await database.save_message(
+            message.chat_id,
+            user.id,
+            message.message_id,
+            _user_name(user),
+            message_text,
+        )
     except Exception:
         logging.exception(
-            "Не удалось учесть сообщение user_id=%s в статистике группы %s.",
+            "Не удалось сохранить сообщение user_id=%s в истории группы %s.",
             user.id,
             message.chat_id,
         )
@@ -622,20 +627,47 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     group_id = message.chat_id
     text = message.text
+    display_name = _user_name(user)
+    person = {
+        "gender": "неизвестен",
+        "callsign": None,
+        "display_name": display_name,
+    }
     normalized_text = text.casefold()
     profile_command = _PROFILE_COMMAND_RE.fullmatch(text.strip())
-    profile_request = (
-        any(phrase in normalized_text for phrase in PROFILE_TRIGGERS)
-        or bool(profile_command and not profile_command.group(1))
-    )
-    group_profile_request = any(
-        phrase in normalized_text for phrase in KNOWN_PEOPLE_TRIGGERS
-    ) or bool(profile_command and profile_command.group(1))
+    profile_request = False
+    group_profile_request = False
     requested_group_id = _parse_profile_group_id(text, group_id)
     command = _command_name(text)
     if not should_process_group_command(text, context.bot.username):
         return
+    if (
+        command in {"profile", "top", "market", "fortuna", "casino", "banner", "inventory", "inv", "slots", "recycle", "coinpromo", "react", "reaction"}
+        or bool(profile_command)
+        or any(
+            phrase in normalized_text
+            for phrase in (
+                "мой профиль",
+                "профиль обо мне",
+                "профиль",
+                "топ монет",
+                "топ",
+                "рейтинг монет",
+                "колесо удачи",
+                "казино",
+                "инвентарь",
+                "баннер",
+                "площадка",
+                "маркет",
+                "реакция",
+                "реагировать",
+            )
+        )
+    ):
+        return
     is_top_request, top_period = _parse_message_top_request(text)
+    if is_top_request:
+        return
     replied_to_bot = _is_reply_to_bot(message, context.bot.id)
     called = is_called(text)
     mentioned = _is_bot_mentioned(message, context.bot.username, context.bot.id)
@@ -686,18 +718,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await message.reply_text("Не удалось активировать группу. Попробуй позже.")
         return
 
-    try:
-        await database.add_allowed_group(group_id)
-        await database.set_group_membership(group_id, user.id, is_member=True)
-    except Exception:
-        logging.exception(
-            "Не удалось сохранить доступ или членство пользователя %s в группе %s.",
-            user.id,
-            group_id,
-        )
-        await message.reply_text("Не удалось проверить доступ к боту. Попробуй позже.")
-        return
-
     if await handle_coin_promo_message(update):
         return
 
@@ -706,16 +726,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     if is_death_time_request(text):
         await message.reply_text(get_death_time_reply())
-        return
-
-    if is_top_request:
-        if top_period is None:
-            await message.reply_text("Период не распознан. Используй /top d, /top n или /top m.")
-            return
-        await _send_message_leaderboard(message, context, top_period)
-        return
-
-    if await image_manager.consume_setting_input(update, context):
         return
 
     pending_age_key = (group_id, user.id)
@@ -742,8 +752,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                             group_id,
                         )
 
-    await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
-
     if command == "forget_me":
         try:
             deleted = await database.forget_user(user.id, group_id)
@@ -760,66 +768,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if command == "adm":
         return
 
-    if command in ("reaction", "react") or text.strip().casefold() in ("реакция", "реакцию"):
-        target_message = message.reply_to_message or message
-        try:
-            await target_message.set_reaction(
-                reaction=[ReactionTypeEmoji(random.choice(AVAILABLE_REACTIONS))]
-            )
-        except TelegramError:
-            logging.exception("Не удалось установить реакцию командой в группе %s", group_id)
-        return
-
-    if await handle_delete_bot_messages(update, context):
-        return
-
     if await handle_duel_challenge(update, context):
-        return
-    if await handle_coin_leaderboard_request(update, context):
-        return
-    if await handle_balance_request(update, context):
-        return
-
-    if await handle_delete_replied_message(update, context):
-        return
-
-    try:
-        await database.ensure_user(
-            user.id,
-            group_id,
-            user.username,
-            _user_name(user),
-            is_bot=user.is_bot,
-        )
-        reported_nickname = extract_reported_nickname(text)
-        if reported_nickname is not None:
-            await database.update_user_profile(
-                user.id,
-                group_id,
-                callsign=reported_nickname,
-            )
-        person = await database.get_user_data(user.id, group_id)
-        if person is None:
-            logging.error("Профиль пользователя %s не создан в группе %s", user.id, group_id)
-            return
-        display_name = person["callsign"] or _user_name(user)
-        await database.save_message(
-            group_id,
-            user.id,
-            message.message_id,
-            display_name,
-            text,
-            gender=str(person.get("gender") or "неизвестен"),
-            age=person.get("age") if isinstance(person.get("age"), int) else None,
-            reply_to=(
-                f"{_user_name(message.reply_to_message.from_user)}: "
-                f"{message.reply_to_message.text or message.reply_to_message.caption or ''}"
-                if message.reply_to_message
-                else None
-            ),
-        )
-    except Exception:
-        logging.exception("Ошибка сохранения группового сообщения в SQLite")
         return
 
     if await handle_game_message(update, context):
@@ -832,13 +781,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if is_transcription_request(text, message):
         await handle_voice_transcription(message, context)
-        return
-
-    is_image_request, image_prompt = extract_image_request(text)
-    if is_image_request and (
-        is_image_command(text) or called or replied_to_bot or mentioned
-    ):
-        await image_manager.offer(update, context, image_prompt)
         return
 
     summary = is_summary_request(text)
@@ -887,7 +829,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 summary=False,
                 limit=DEFAULT_CONTEXT_SIZE,
             )
-        participant_genders = await database.get_group_user_genders(group_id)
+        participant_genders = {}
         replied = message.reply_to_message
         replied_data = None
         if replied and replied.text:
@@ -897,63 +839,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 replied.from_user.id if replied.from_user else None,
                 replied.text,
             )
-        if profile_request or group_profile_request:
-            if group_profile_request and not await database.is_group_allowed(requested_group_id):
-                await message.reply_text(
-                    f"Группа с ID {requested_group_id} не найдена в списке разрешённых."
-                )
-                return
-            participants = (
-                await database.get_group_users(requested_group_id)
-                if group_profile_request
-                else None
-            )
-            activity_by_user = await database.get_group_message_activity(
-                requested_group_id if group_profile_request else group_id
-            )
-            answer = _format_profile_response(
-                person,
-                participants,
-                group_title=(
-                    message.chat.title
-                    if group_profile_request and requested_group_id == group_id
-                    else None
-                ),
-                activity_by_user=activity_by_user,
-                stats_period="d",
-            )
-            profile_photo: BytesIO | str | None = None
-            profile_animated = False
-            if not group_profile_request:
-                media = await get_profile_banner(
-                    context.bot,
-                    user.id,
-                    profile=await database.get_global_profile(user.id),
-                )
-                if media is not None:
-                    profile_photo, profile_animated = media
-                else:
-                    decoration = await database.get_or_create_profile_decoration(user.id)
-                    nickname = str(
-                        person.get("callsign")
-                        or person.get("display_name")
-                        or _user_name(user)
-                    )
-                    profile_photo = create_profile_card(nickname, decoration)
-            await _send_profile_messages(
-                message,
-                context,
-                answer,
-                profile_photo,
-                profile_animated,
-                reply_markup=(
-                    _group_profile_stats_keyboard(user.id, group_id, "d")
-                    if profile_request
-                    else None
-                ),
-            )
-            await maybe_react(message)
-            return
         prompt = ""
         if not summary:
             prompt = build_prompt(
@@ -1064,8 +949,6 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except Exception:
             logging.exception("Не удалось сохранить ответ бота в истории группы %s", group_id)
-        await maybe_react(message)
-        await image_manager.refresh_status(group_id, context.bot, owner_id=user.id)
 
 
 async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1076,6 +959,7 @@ async def on_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         or not message.new_chat_members
     ):
         return
+    return
     try:
         await database.add_allowed_group(message.chat_id)
     except Exception:
@@ -1206,29 +1090,5 @@ async def on_message_reaction(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     del context
-    if reaction_update.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return
-    if reaction_update.user is None:
-        return
-    try:
-        if not await database.is_group_allowed(reaction_update.chat.id):
-            return
-        reaction = ", ".join(
-            getattr(item, "emoji", None)
-            or getattr(item, "custom_emoji_id", None)
-            or "реакция"
-            for item in reaction_update.new_reaction
-        )
-        await database.update_message_reaction(
-            reaction_update.chat.id,
-            reaction_update.message_id,
-            reaction_update.user.id,
-            _user_name(reaction_update.user),
-            reaction or None,
-        )
-    except Exception:
-        logging.exception(
-            "Не удалось сохранить реакцию на сообщение %s в группе %s.",
-            reaction_update.message_id,
-            reaction_update.chat.id,
-        )
+    del reaction_update
+    return
