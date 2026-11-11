@@ -9,7 +9,12 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 import database
-import personal_account
+
+try:
+    import personal_account  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    personal_account = None
+
 from config import ADMIN_ID
 
 _DELETE_COMMAND_RE = re.compile(
@@ -163,25 +168,27 @@ async def handle_delete_bot_messages(
         if count <= 0:
             logging.warning("Игнорирую невалидное количество для «дэл чат»: %s.", count)
             return True
+
         message_ids: list[int] = []
-        user_client = personal_account.get_authorized_client()
-        if user_client is not None:
-            try:
-                async for chat_message in user_client.iter_messages(
-                    message.chat_id,
-                    limit=count + 1,
-                ):
-                    if chat_message.id != message.message_id:
-                        message_ids.append(chat_message.id)
-                    if len(message_ids) >= count:
-                        break
-            except Exception:
-                logging.exception(
-                    "Не удалось получить последние сообщения Telegram для чата %s; "
-                    "использую сохранённую историю.",
-                    message.chat_id,
-                )
-                message_ids.clear()
+        if personal_account is not None:
+            user_client = personal_account.get_authorized_client()
+            if user_client is not None:
+                try:
+                    async for chat_message in user_client.iter_messages(
+                        message.chat_id,
+                        limit=count + 1,
+                    ):
+                        if chat_message.id != message.message_id:
+                            message_ids.append(chat_message.id)
+                        if len(message_ids) >= count:
+                            break
+                except Exception:
+                    logging.exception(
+                        "Не удалось получить последние сообщения Telegram для чата %s; "
+                        "использую сохранённую историю.",
+                        message.chat_id,
+                    )
+                    message_ids.clear()
         if len(message_ids) < count:
             try:
                 stored_ids = await database.get_recent_chat_message_ids(
@@ -218,88 +225,15 @@ async def handle_delete_bot_messages(
             except TelegramError:
                 failed += 1
                 logging.exception(
-                    "Не удалось удалить сообщение чата %s с ID %s.",
-                    message.chat_id,
+                    "Не удалось удалить message_id=%s в чате %s.",
                     message_id,
+                    message.chat_id,
                 )
-        try:
-            await database.delete_chat_message_records(message.chat_id, deleted_ids)
-        except Exception:
-            logging.exception(
-                "Не удалось обновить историю после удаления сообщений чата %s.",
-                message.chat_id,
+        if deleted_ids and failed == 0:
+            await message.reply_text(f"Удалил {len(deleted_ids)} сообщений.")
+        elif deleted_ids and failed:
+            await message.reply_text(
+                f"Удалил {len(deleted_ids)} из {len(message_ids)} сообщений; часть не удалилась."
             )
-            return True
-        logging.info(
-            "Команда «дэл чат» завершена без ответа в чат: chat_id=%s requested=%s "
-            "deleted=%s failed=%s.",
-            message.chat_id,
-            count,
-            len(deleted_ids),
-            failed,
-        )
         return True
-
-    request = _requested_count(message.text)
-    if request is None:
-        return False
-    if not await _is_authorized_deleter(message, context):
-        return True
-    count, addressed = request
-    replied_to_bot = (
-        message.reply_to_message is not None
-        and message.reply_to_message.from_user is not None
-        and message.reply_to_message.from_user.id == context.bot.id
-    )
-    if not addressed and message.chat.type != ChatType.PRIVATE and not replied_to_bot:
-        return False
-    await _delete_command_message(message)
-    if count <= 0:
-        logging.warning("Игнорирую невалидное количество для команды удаления: %s.", count)
-        return True
-
-    try:
-        message_ids = await database.get_recent_bot_message_ids(
-            message.chat_id,
-            context.bot.id,
-            count,
-        )
-    except Exception:
-        logging.exception("Не удалось получить сообщения Юбары для удаления в чате %s.", message.chat_id)
-        return True
-
-    deleted_ids: list[int] = []
-    failed = 0
-    for message_id in message_ids:
-        try:
-            await context.bot.delete_message(
-                chat_id=message.chat_id,
-                message_id=message_id,
-            )
-            deleted_ids.append(message_id)
-        except TelegramError:
-            failed += 1
-            logging.exception(
-                "Не удалось удалить сообщение Юбары chat_id=%s message_id=%s.",
-                message.chat_id,
-                message_id,
-            )
-
-    try:
-        await database.delete_message_records(
-            message.chat_id,
-            context.bot.id,
-            deleted_ids,
-        )
-    except Exception:
-        logging.exception("Не удалось обновить историю после удаления сообщений в чате %s.", message.chat_id)
-        return True
-    logging.info(
-        "Команда удаления завершена без ответа в чат: chat_id=%s requested=%s "
-        "deleted=%s failed=%s.",
-        message.chat_id,
-        count,
-        len(deleted_ids),
-        failed,
-    )
-    return True
+    return False
