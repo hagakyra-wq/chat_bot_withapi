@@ -1,6 +1,7 @@
 """Минимальные обработчики личных сообщений: меню, саммари, транскрипция, суд и удаление."""
 
 import logging
+import secrets
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatType
@@ -63,9 +64,7 @@ def _admin_help_text() -> str:
         "• /adm — открыть панель администратора\n"
         "• /admin — тот же вход\n"
         "• /adminhelp — справка с учётом прав\n"
-        "• /helpadmin — алиас справки\n\n"
-        "Эта сборка оставляет только служебные функции: доступы, ключи, список людей и сброс истории чата.\n"
-        "Баннерные ключи, казино и связанные механики здесь отключены."
+        "• /helpadmin — алиас справки"
     )
 
 
@@ -97,6 +96,39 @@ def _admin_panel_markup() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def _generate_access_code(level: str) -> str:
+    prefixes = {"user": "USER", "admin": "ADMIN", "autoresponder": "AUTO"}
+    prefix = prefixes.get(level, "USER")
+    suffix = secrets.token_hex(4).upper()
+    return f"YUBARA-{prefix}-{suffix}"
+
+
+async def _issue_access_key(level: str, created_by: int, *, days: int = 30) -> str:
+    code = _generate_access_code(level)
+    ok = await database.create_access_key(
+        code,
+        access_level=level,
+        duration_seconds=days * 86400,
+        created_by=created_by,
+    )
+    if not ok:
+        return "Не удалось создать ключ. Попробуй ещё раз."
+    return f"✅ Ключ создан\n{code}\n\nУровень: {level}\nСрок: {days} дней"
+
+
+async def _format_authorized_users(access_level: str) -> str:
+    users = await database.list_authorized_users(access_level=access_level)
+    if not users:
+        return f"Нет активных пользователей с уровнем: {access_level}."
+    lines = [f"Активные {access_level}:"]
+    for item in users:
+        username = item.get("username") or "без username"
+        expires_at = item.get("expires_at")
+        expires = "без срока" if expires_at is None else f"до {expires_at}"
+        lines.append(f"• {item['user_id']} | {username} | {expires}")
+    return "\n".join(lines)
 
 
 def _court_help_text() -> str:
@@ -174,8 +206,39 @@ async def menu_callback(update: Update, context: CallbackContext) -> None:
         await query.edit_message_text(_admin_help_text(), reply_markup=_admin_panel_markup())
     elif action == "menu:admin_help":
         await query.edit_message_text(_admin_help_text(), reply_markup=_admin_panel_markup())
-    elif action.startswith("admin:"):
-        await query.answer("Этот раздел отключён в текущей сборке. Доступен только сброс истории и служебная справка.", show_alert=False)
+    elif action == "admin:access_key":
+        if query.from_user is None:
+            return
+        text = await _issue_access_key("user", query.from_user.id, days=30)
+        await query.edit_message_text(text, reply_markup=_admin_panel_markup())
+    elif action == "admin:invite_admin":
+        if query.from_user is None:
+            return
+        text = await _issue_access_key("admin", query.from_user.id, days=30)
+        await query.edit_message_text(text, reply_markup=_admin_panel_markup())
+    elif action == "admin:autoresponder_key":
+        if query.from_user is None:
+            return
+        text = await _issue_access_key("autoresponder", query.from_user.id, days=7)
+        await query.edit_message_text(text, reply_markup=_admin_panel_markup())
+    elif action == "admin:user_list":
+        user_list = await _format_authorized_users("user")
+        admin_list = await _format_authorized_users("admin")
+        await query.edit_message_text(f"{user_list}\n\n{admin_list}", reply_markup=_admin_panel_markup())
+    elif action == "admin:chat_history":
+        await query.edit_message_text("📜 История чата доступна через кнопку «Сбросить историю чата» или команду /adm + сброс.", reply_markup=_admin_panel_markup())
+    elif action == "admin:promo":
+        await query.edit_message_text("🎟️ Промокоды в текущей сборке не подключены. Используй ключи доступа и список пользователей.", reply_markup=_admin_panel_markup())
+    elif action == "admin:revoke_access":
+        lines = [
+            "🚫 Для отзыва доступа: отправь сообщение вида",
+            " /revoke_access 123456789",
+            "или",
+            " /revoke_admin 123456789",
+        ]
+        await query.edit_message_text("\n".join(lines), reply_markup=_admin_panel_markup())
+    elif action == "admin:revoke_admin":
+        await query.edit_message_text("🚫 Для отзыва прав администратора: /revoke_admin 123456789", reply_markup=_admin_panel_markup())
     elif action == "menu:reset_history":
         user_id = query.from_user.id if query.from_user else None
         if user_id not in (ADMIN_ID,):
@@ -201,6 +264,43 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("Админ-панель доступна только владельцу бота.")
         return
     await message.reply_text(_admin_help_text(), reply_markup=_admin_panel_markup())
+
+
+async def admin_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    message = update.effective_message
+    if message is None:
+        return
+    if message.from_user is None or message.from_user.id not in (ADMIN_ID,):
+        await message.reply_text("Только владелец бота может смотреть список доступа.")
+        return
+    await message.reply_text(await _format_authorized_users("user") + "\n\n" + await _format_authorized_users("admin"))
+
+
+async def revoke_access_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    del context
+    message = update.effective_message
+    if message is None or message.from_user is None:
+        return
+    if message.from_user.id not in (ADMIN_ID,):
+        await message.reply_text("Только владелец бота может отзываться доступ.")
+        return
+    raw = (message.text or "").strip()
+    parts = raw.split()
+    if len(parts) < 2:
+        await message.reply_text("Формат: /revoke_access 123456789 или /revoke_admin 123456789")
+        return
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.reply_text("ID должен быть числом.")
+        return
+    access_level = "admin" if raw.startswith("/revoke_admin") else "user"
+    deleted = await database.revoke_authorized_user(user_id, access_level=access_level)
+    if deleted:
+        await message.reply_text(f"✅ Доступ {access_level} для пользователя {user_id} отозван.")
+    else:
+        await message.reply_text(f"Пользователь {user_id} с ролью {access_level} не найден.")
 
 
 def _message_content_text(message) -> str:

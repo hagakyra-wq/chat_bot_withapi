@@ -9,7 +9,14 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from config import PORT, TELEGRAM_TOKEN
 from court import court_callback
 from court_advanced import advanced_court_callback
-from handlers_pm import admin_command, handle_plain_message, menu_callback, start_command
+from handlers_pm import (
+    admin_command,
+    admin_list_command,
+    handle_plain_message,
+    menu_callback,
+    revoke_access_command,
+    start_command,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(name)s | %(message)s')
 
@@ -43,7 +50,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("adm", admin_command))
     app.add_handler(CommandHandler("adminhelp", admin_command))
     app.add_handler(CommandHandler("helpadmin", admin_command))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
+    app.add_handler(CommandHandler("list_access", admin_list_command))
+    app.add_handler(CommandHandler("revoke_access", revoke_access_command))
+    app.add_handler(CommandHandler("revoke_admin", revoke_access_command))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(menu|admin):"))
     app.add_handler(CallbackQueryHandler(court_callback, pattern="^court:"))
     app.add_handler(CallbackQueryHandler(advanced_court_callback, pattern="^court_adv:"))
     app.add_handler(
