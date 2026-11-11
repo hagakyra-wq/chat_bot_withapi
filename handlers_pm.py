@@ -58,14 +58,14 @@ def _menu_markup() -> InlineKeyboardMarkup:
 
 def _admin_help_text() -> str:
     return (
-        "⚙️ Админ-панель\n\n"
+        "⚙️ Доступ и ключи\n\n"
         "Доступные команды:\n"
         "• /adm — открыть панель администратора\n"
         "• /admin — тот же вход\n"
         "• /adminhelp — справка с учётом прав\n"
         "• /helpadmin — алиас справки\n\n"
-        "Опасные действия требуют подтверждения.\n"
-        "Сейчас в панели доступен сброс истории чата для текущего чата."
+        "Эта сборка оставляет только служебные функции: доступы, ключи, список людей и сброс истории чата.\n"
+        "Баннерные ключи, казино и связанные механики здесь отключены."
     )
 
 
@@ -73,11 +73,27 @@ def _admin_panel_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
+                InlineKeyboardButton("🔑 Ключ доступа", callback_data="admin:access_key"),
+                InlineKeyboardButton("👤 Пригласить ад...", callback_data="admin:invite_admin"),
+            ],
+            [
+                InlineKeyboardButton("🛡️ Ключ автоответчика", callback_data="admin:autoresponder_key"),
                 InlineKeyboardButton("🧹 Сбросить историю чата", callback_data="menu:reset_history"),
+            ],
+            [
+                InlineKeyboardButton("👥 Список людей", callback_data="admin:user_list"),
+                InlineKeyboardButton("📜 История чата", callback_data="admin:chat_history"),
+            ],
+            [
+                InlineKeyboardButton("🎟️ Промокод", callback_data="admin:promo"),
+                InlineKeyboardButton("🚫 Отозвать доступ", callback_data="admin:revoke_access"),
+            ],
+            [
+                InlineKeyboardButton("🚫 Отозвать админ...", callback_data="admin:revoke_admin"),
                 InlineKeyboardButton("ℹ️ Справка", callback_data="menu:admin_help"),
             ],
             [
-                InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:main"),
+                InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"),
             ],
         ]
     )
@@ -158,6 +174,8 @@ async def menu_callback(update: Update, context: CallbackContext) -> None:
         await query.edit_message_text(_admin_help_text(), reply_markup=_admin_panel_markup())
     elif action == "menu:admin_help":
         await query.edit_message_text(_admin_help_text(), reply_markup=_admin_panel_markup())
+    elif action.startswith("admin:"):
+        await query.answer("Этот раздел отключён в текущей сборке. Доступен только сброс истории и служебная справка.", show_alert=False)
     elif action == "menu:reset_history":
         user_id = query.from_user.id if query.from_user else None
         if user_id not in (ADMIN_ID,):
