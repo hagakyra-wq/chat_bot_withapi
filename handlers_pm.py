@@ -56,11 +56,25 @@ def _menu_markup() -> InlineKeyboardMarkup:
     )
 
 
+def _admin_help_text() -> str:
+    return (
+        "⚙️ Админ-панель\n\n"
+        "Доступные команды:\n"
+        "• /adm — открыть панель администратора\n"
+        "• /admin — тот же вход\n"
+        "• /adminhelp — справка с учётом прав\n"
+        "• /helpadmin — алиас справки\n\n"
+        "Опасные действия требуют подтверждения.\n"
+        "Сейчас в панели доступен сброс истории чата для текущего чата."
+    )
+
+
 def _admin_panel_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("🧹 Сбросить историю чата", callback_data="menu:reset_history"),
+                InlineKeyboardButton("ℹ️ Справка", callback_data="menu:admin_help"),
             ],
             [
                 InlineKeyboardButton("⬅️ Назад в меню", callback_data="menu:main"),
@@ -141,10 +155,9 @@ async def menu_callback(update: Update, context: CallbackContext) -> None:
         if user_id not in (ADMIN_ID,):
             await query.answer("Нет доступа к админ-панели.", show_alert=True)
             return
-        await query.edit_message_text(
-            "⚙️ Админ-панель\n\nЗдесь можно быстро управлять историей чата и проверками бота.",
-            reply_markup=_admin_panel_markup(),
-        )
+        await query.edit_message_text(_admin_help_text(), reply_markup=_admin_panel_markup())
+    elif action == "menu:admin_help":
+        await query.edit_message_text(_admin_help_text(), reply_markup=_admin_panel_markup())
     elif action == "menu:reset_history":
         user_id = query.from_user.id if query.from_user else None
         if user_id not in (ADMIN_ID,):
@@ -169,10 +182,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if message.from_user is None or message.from_user.id not in (ADMIN_ID,):
         await message.reply_text("Админ-панель доступна только владельцу бота.")
         return
-    await message.reply_text(
-        "⚙️ Админ-панель\n\nДоступные действия:\n• /adm — открыть панель\n• /admin — тоже работает",
-        reply_markup=_admin_panel_markup(),
-    )
+    await message.reply_text(_admin_help_text(), reply_markup=_admin_panel_markup())
 
 
 def _message_content_text(message) -> str:

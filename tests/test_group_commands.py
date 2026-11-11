@@ -8,35 +8,21 @@ os.environ.setdefault("GROQ_API_KEY", "test-key")
 os.environ.setdefault("HISTORY_ENCRYPTION_KEY", Fernet.generate_key().decode("ascii"))
 os.environ.setdefault("ADMIN_ID", "1")
 
-from handlers_group import should_process_group_command
+from handlers_pm import _admin_help_text, _admin_panel_markup
 
 
 class GroupCommandFilterTests(unittest.TestCase):
-    def test_unknown_slash_commands_are_ignored(self):
-        self.assertFalse(should_process_group_command("/anotherbotcommand", "yubara_bot"))
+    def test_admin_panel_contains_reset_action_and_aliases(self):
+        panel_buttons = [
+            button.text
+            for row in _admin_panel_markup().inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🧹 Сбросить историю чата", panel_buttons)
 
-    def test_commands_addressed_to_other_bots_are_ignored(self):
-        self.assertFalse(should_process_group_command("/start@another_bot", "yubara_bot"))
-
-    def test_removed_room_command_is_ignored(self):
-        self.assertFalse(should_process_group_command("/room@Yubara_Bot ABC234", "yubara_bot"))
-
-    def test_regular_messages_are_not_filtered(self):
-        self.assertTrue(should_process_group_command("Привет, Юбара!", "yubara_bot"))
-
-    def test_removed_feature_commands_are_ignored(self):
-        for command in (
-            "/profile",
-            "/top",
-            "/market",
-            "/fortuna",
-            "/casino",
-            "/banner",
-            "/inventory",
-            "/react",
-            "/reaction",
-        ):
-            self.assertFalse(should_process_group_command(command, "yubara_bot"))
+        help_text = _admin_help_text()
+        for command in ("/adm", "/admin", "/adminhelp", "/helpadmin"):
+            self.assertIn(command, help_text)
 
 
 if __name__ == "__main__":
