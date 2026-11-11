@@ -46,7 +46,14 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(advanced_court_callback, pattern="^court_adv:"))
     app.add_handler(
         MessageHandler(
-            filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE | filters.STICKER | filters.AUDIO | filters.ANIMATION | filters.Document.ALL,
+            filters.TEXT
+            | filters.PHOTO
+            | filters.VIDEO
+            | filters.VOICE
+            | filters.Sticker.ALL
+            | filters.AUDIO
+            | filters.ANIMATION
+            | filters.Document.ALL,
             handle_plain_message,
         )
     )
